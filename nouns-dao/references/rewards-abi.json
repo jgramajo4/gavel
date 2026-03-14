@@ -1,0 +1,121 @@
+[
+  {
+    "type": "function",
+    "name": "registerClient",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "name",       "type": "string" },
+      { "name": "descriptor", "type": "string" }
+    ],
+    "outputs": [
+      { "name": "clientId", "type": "uint32" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "updateClientMetadata",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "clientId",   "type": "uint32" },
+      { "name": "name",       "type": "string"  },
+      { "name": "descriptor", "type": "string"  }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "setClientApproval",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "clientId", "type": "uint32" },
+      { "name": "approved", "type": "bool"   }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "clientBalance",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "clientId", "type": "uint32" }
+    ],
+    "outputs": [
+      { "name": "", "type": "uint256" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "withdrawClientBalance",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "clientId", "type": "uint32"  },
+      { "name": "to",       "type": "address" },
+      { "name": "amount",   "type": "uint256" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "updateRewardsForAuctions",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "lastNounId", "type": "uint32" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "updateRewardsForProposalWritingAndVoting",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "lastProposalId", "type": "uint32"   },
+      { "name": "votingClientIds", "type": "uint32[]" }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "isClientApproved",
+    "stateMutability": "view",
+    "inputs": [
+      { "name": "clientId", "type": "uint32" }
+    ],
+    "outputs": [
+      { "name": "", "type": "bool" }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ClientRegistered",
+    "inputs": [
+      { "name": "clientId",   "type": "uint32", "indexed": true  },
+      { "name": "name",       "type": "string", "indexed": false },
+      { "name": "descriptor", "type": "string", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ClientApprovalSet",
+    "inputs": [
+      { "name": "clientId", "type": "uint32", "indexed": true  },
+      { "name": "approved", "type": "bool",   "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ClientBalanceWithdrawal",
+    "inputs": [
+      { "name": "clientId", "type": "uint32",  "indexed": true  },
+      { "name": "to",       "type": "address", "indexed": false },
+      { "name": "amount",   "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ClientRewarded",
+    "inputs": [
+      { "name": "clientId", "type": "uint32",  "indexed": true  },
+      { "name": "amount",   "type": "uint256", "indexed": false }
+    ]
+  }
+]
