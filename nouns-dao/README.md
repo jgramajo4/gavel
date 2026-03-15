@@ -30,6 +30,8 @@ nouns-dao/
     ├── get_noun_metadata.js
     ├── list_proposals.js
     ├── cast_vote.js
+    ├── propose.js
+    ├── update_rewards.js
     └── withdraw_rewards.js
 ```
 
@@ -86,6 +88,16 @@ node scripts/list_proposals.js --limit=10
 ### Cast Vote (Optional)
 ```
 node scripts/cast_vote.js 456 1 "Voting FOR because…"
+```
+
+### Propose (Optional)
+```
+node scripts/propose.js --targets 0xTarget1,0xTarget2 --values 0,0 --signatures "", "" --calldatas 0x,0x --description "Proposal description"
+```
+
+### Update Rewards (Optional)
+```
+node scripts/update_rewards.js --last-proposal-id 456 --voting-client-ids 38
 ```
 
 ### Withdraw Rewards (Optional)
