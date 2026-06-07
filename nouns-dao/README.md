@@ -28,8 +28,10 @@ nouns-dao/
     ├── place_bid.js
     ├── settle_auction.js
     ├── get_noun_metadata.js
+    ├── daily_briefing.js
     ├── list_proposals.js
     ├── cast_vote.js
+    ├── delegate_votes.js
     ├── propose.js
     ├── update_rewards.js
     └── withdraw_rewards.js
@@ -80,6 +82,17 @@ node scripts/settle_auction.js
 NOUN_ID=123 node scripts/get_noun_metadata.js
 ```
 
+### Daily Briefing (Optional)
+Read-only digest of the live auction and Active proposals. Signs nothing —
+only needs `ETHEREUM_RPC_URL`, so it is safe to run unattended on a schedule.
+```
+node scripts/daily_briefing.js
+```
+Optionally annotate whether an address has voted on each Active proposal:
+```
+node scripts/daily_briefing.js --voter=0xYourAddress --limit=10
+```
+
 ### List Active Proposals (Optional)
 ```
 node scripts/list_proposals.js --limit=10
@@ -88,6 +101,11 @@ node scripts/list_proposals.js --limit=10
 ### Cast Vote (Optional)
 ```
 node scripts/cast_vote.js 456 1 "Voting FOR because…"
+```
+
+### Delegate Votes (Optional)
+```
+node scripts/delegate_votes.js --to 0xYourAddress
 ```
 
 ### Propose (Optional)
