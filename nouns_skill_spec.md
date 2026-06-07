@@ -38,6 +38,7 @@ This document defines the technical specification for a Bankr Skill that gives a
 | Place Bid | **Required** | Submit ETH bid via `createBid()`; enforce min increment + reserve price |
 | Settle Auction | **Required** | Call `settleCurrentAndCreateNewAuction()` once auction clock has expired |
 | Get Noun Metadata | **Required** | Resolve on-chain SVG image, traits, and seed for a given Noun ID |
+| Daily Briefing | Optional | Read-only digest composing live auction state, Active proposals, and recent on-chain changes (bids, settlements, new proposals, votes from event logs) into one morning summary. Signs nothing |
 | List Active Proposals | Optional | Fetch all proposals in Active state from governance contract |
 | Get Proposal Detail | Optional | Return full proposal data: description, vote counts, state, calldata |
 | Cast Vote | Optional | Call `castRefundableVoteWithReason(proposalId, support, reason, clientId)` |
@@ -152,6 +153,30 @@ uint256 minBid = amount > 0
    - `support`: `0` = Against, `1` = For, `2` = Abstain
 5. Confirm via `VoteCast` event
 
+### 4.4 Daily Briefing (Optional, read-only)
+
+A scheduled digest that drives a daily governance loop. Performs **no signing**
+— it only reads, so it needs `ETHEREUM_RPC_URL` but never `AGENT_PRIVATE_KEY`.
+
+1. Read `auction()` (+ `reservePrice`, `minBidIncrementPercentage`, `timeBuffer`):
+   - Report Noun ID, high bid, bidder, time remaining, and min next bid
+   - Flag `needsSettlement` when `block.timestamp >= endTime && !settled`
+   - Flag Nounders' Nouns (`nounId % 10 == 0`) — never auctioned
+2. Iterate `proposalCount()` down, collecting `state(id) == 1` (Active) proposals
+   with their for/against/abstain tallies and `quorumVotes`
+3. Flag `endingSoon` when an Active proposal's `endBlock` is within a configurable
+   window (default ~6500 blocks ≈ 1 day)
+4. If a voter address is supplied, annotate each Active proposal via
+   `getReceipt(id, voter)` with whether it has already voted
+5. Report what changed over a recent block window (default ~24h) from event
+   logs — `AuctionBid`, `AuctionCreated`, `AuctionSettled` (burns flagged when
+   `winner == address(0)`), and `VoteCast` grouped per proposal — plus any
+   proposals whose `creationTimestamp` falls inside the window
+6. Emit a JSON payload plus human-readable `headlines` suitable for posting
+
+> Scoped deliberately to public, everyone-uses-it data. Client-specific reward
+> balances are out of scope here — see §5 for the clientId-38 rewards lifecycle.
+
 ---
 
 ## 5. Client Incentives (Rewards Program)
@@ -230,12 +255,17 @@ nouns-dao/
 │   ├── nouns-token-abi.json     ← ERC-721 ABI
 │   └── rewards-abi.json         ← ABI for 0x883860178f...
 └── scripts/
+    ├── _utils.js                ← shared helpers (provider, ABIs, formatting)
     ├── get_auction.js
     ├── place_bid.js             ← createBid(nounId, 38)
     ├── settle_auction.js
     ├── get_noun_metadata.js     ← decodes tokenURI base64
+    ├── daily_briefing.js        ← [optional] read-only auction + proposals digest
     ├── list_proposals.js        ← [optional]
     ├── cast_vote.js             ← castRefundableVoteWithReason(..., 38)
+    ├── delegate_votes.js        ← [optional] delegate(address)
+    ├── propose.js               ← [optional] propose(..., 38)
+    ├── update_rewards.js        ← [optional] recompute reward balances
     └── withdraw_rewards.js      ← withdrawClientBalance(38, to, amount)
 ```
 
@@ -287,6 +317,7 @@ Call `delegate(selfAddress)` on the Nouns Token at least once to activate voting
 - [ ] `get_auction.js`, `place_bid.js`, `settle_auction.js` functional on mainnet
 - [ ] `place_bid.js` uses `createBid(nounId, 38)` — not the clientId-less variant
 - [ ] `cast_vote.js` uses `castRefundableVoteWithReason(..., 38)` for reward attribution
+- [ ] `daily_briefing.js` is read-only — requires no `AGENT_PRIVATE_KEY` and sends no tx
 - [ ] `withdraw_rewards.js` script present
 - [ ] Bid validation enforces both `reservePrice` and `minBidIncrementPercentage`
 - [ ] Scripts are stateless — all config via env vars and `config.json`
