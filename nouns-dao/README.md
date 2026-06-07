@@ -83,14 +83,17 @@ NOUN_ID=123 node scripts/get_noun_metadata.js
 ```
 
 ### Daily Briefing (Optional)
-Read-only digest of the live auction and Active proposals. Signs nothing —
-only needs `ETHEREUM_RPC_URL`, so it is safe to run unattended on a schedule.
+Read-only digest of the live auction, Active proposals, and what changed since
+the last briefing (bids, settlements, new auctions, new proposals, and votes
+cast over a recent block window, read from event logs). Signs nothing — only
+needs `ETHEREUM_RPC_URL`, so it is safe to run unattended on a schedule.
 ```
 node scripts/daily_briefing.js
 ```
-Optionally annotate whether an address has voted on each Active proposal:
+Optionally annotate whether an address has voted on each Active proposal, and
+widen or narrow the change window (default ~24h):
 ```
-node scripts/daily_briefing.js --voter=0xYourAddress --limit=10
+node scripts/daily_briefing.js --voter=0xYourAddress --limit=10 --since-hours=24
 ```
 
 ### List Active Proposals (Optional)

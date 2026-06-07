@@ -38,7 +38,7 @@ This document defines the technical specification for a Bankr Skill that gives a
 | Place Bid | **Required** | Submit ETH bid via `createBid()`; enforce min increment + reserve price |
 | Settle Auction | **Required** | Call `settleCurrentAndCreateNewAuction()` once auction clock has expired |
 | Get Noun Metadata | **Required** | Resolve on-chain SVG image, traits, and seed for a given Noun ID |
-| Daily Briefing | Optional | Read-only digest composing live auction state + Active proposals into one morning summary. Signs nothing |
+| Daily Briefing | Optional | Read-only digest composing live auction state, Active proposals, and recent on-chain changes (bids, settlements, new proposals, votes from event logs) into one morning summary. Signs nothing |
 | List Active Proposals | Optional | Fetch all proposals in Active state from governance contract |
 | Get Proposal Detail | Optional | Return full proposal data: description, vote counts, state, calldata |
 | Cast Vote | Optional | Call `castRefundableVoteWithReason(proposalId, support, reason, clientId)` |
@@ -168,7 +168,11 @@ A scheduled digest that drives a daily governance loop. Performs **no signing**
    window (default ~6500 blocks ≈ 1 day)
 4. If a voter address is supplied, annotate each Active proposal via
    `getReceipt(id, voter)` with whether it has already voted
-5. Emit a JSON payload plus human-readable `headlines` suitable for posting
+5. Report what changed over a recent block window (default ~24h) from event
+   logs — `AuctionBid`, `AuctionCreated`, `AuctionSettled` (burns flagged when
+   `winner == address(0)`), and `VoteCast` grouped per proposal — plus any
+   proposals whose `creationTimestamp` falls inside the window
+6. Emit a JSON payload plus human-readable `headlines` suitable for posting
 
 > Scoped deliberately to public, everyone-uses-it data. Client-specific reward
 > balances are out of scope here — see §5 for the clientId-38 rewards lifecycle.
