@@ -42,12 +42,18 @@ const VOTE_FIELDS = `
   }
 `;
 
-const HISTORY_QUERY = `
-  query VoterHistory($voter: String!, $first: Int!, $skip: Int!) {
+const SNAPSHOT_QUERY = `
+  query SnapshotBlock {
     _meta { block { number } }
+  }
+`;
+
+const HISTORY_QUERY = `
+  query VoterHistory($voter: String!, $first: Int!, $skip: Int!, $block: Int!) {
     votes(
       first: $first
       skip: $skip
+      block: { number: $block }
       where: { voter: $voter }
       orderBy: blockNumber
       orderDirection: asc
@@ -169,11 +175,11 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
     }
   }
 
-  async query(variables) {
+  async request(query, variables = {}) {
     const response = await this.fetch(this.endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: HISTORY_QUERY, variables }),
+      body: JSON.stringify({ query, variables }),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) {
@@ -183,10 +189,23 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
     if (body.errors?.length) {
       throw new Error(`Nouns subgraph error: ${JSON.stringify(body.errors)}`);
     }
-    if (!body.data?._meta?.block?.number || !Array.isArray(body.data.votes)) {
+    return body.data;
+  }
+
+  async snapshotBlock() {
+    const data = await this.request(SNAPSHOT_QUERY);
+    if (!data?._meta?.block?.number) {
+      throw new Error("Nouns subgraph returned no snapshot block");
+    }
+    return String(data._meta.block.number);
+  }
+
+  async query(variables) {
+    const data = await this.request(HISTORY_QUERY, variables);
+    if (!Array.isArray(data?.votes)) {
       throw new Error("Nouns subgraph returned an unexpected history payload");
     }
-    return body.data;
+    return data.votes;
   }
 
   async fetchHistory(voter) {
@@ -195,14 +214,20 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
     const queriedAt = new Date().toISOString();
     const rawVotes = [];
     let skip = 0;
-    let subgraphBlock = "0";
+    const subgraphBlock = await this.snapshotBlock();
+    const block = Number(subgraphBlock);
+    if (!Number.isSafeInteger(block)) throw new Error(`Unsafe subgraph block: ${subgraphBlock}`);
 
     while (true) {
-      const data = await this.query({ voter: queryVoter, first: this.pageSize, skip });
-      subgraphBlock = String(data._meta.block.number);
-      rawVotes.push(...data.votes);
-      if (data.votes.length < this.pageSize) break;
-      skip += data.votes.length;
+      const votes = await this.query({
+        voter: queryVoter,
+        first: this.pageSize,
+        skip,
+        block,
+      });
+      rawVotes.push(...votes);
+      if (votes.length < this.pageSize) break;
+      skip += votes.length;
     }
 
     const context = { endpoint: this.endpoint, queriedAt, subgraphBlock };
@@ -232,6 +257,7 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
 
 module.exports = {
   DEFAULT_ENDPOINT,
+  SNAPSHOT_QUERY,
   HISTORY_QUERY,
   isoFromUnixSeconds,
   proposalContentHash,

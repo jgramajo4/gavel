@@ -43,10 +43,16 @@ test("paginates voter history and produces one validated document", async () => 
   const pages = [[vote(1, 100), vote(2, 200)], [vote(3, 300)], []];
   const fakeFetch = async (_url, options) => {
     const request = JSON.parse(options.body);
+    if (request.query.includes("SnapshotBlock")) {
+      return new Response(
+        JSON.stringify({ data: { _meta: { block: { number: "999" } } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     calls.push(request.variables);
     const current = pages[calls.length - 1];
     return new Response(
-      JSON.stringify({ data: { _meta: { block: { number: "999" } }, votes: current } }),
+      JSON.stringify({ data: { votes: current } }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   };
@@ -60,6 +66,7 @@ test("paginates voter history and produces one validated document", async () => 
 
   assert.equal(history.voteCount, 3);
   assert.deepEqual(calls.map((call) => call.skip), [0, 2]);
+  assert.ok(calls.every((call) => call.block === 999));
   assert.ok(calls.every((call) => call.voter === VOTER.toLowerCase()));
   assert.equal(history.votes[0].reason, "A preserved reason");
   assert.equal(history.source.subgraphBlock, "999");

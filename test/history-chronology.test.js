@@ -41,7 +41,9 @@ test("the held-out vote and future outcomes cannot leak into training", () => {
 
   assert.ok(!training.includes(target));
   assert.ok(!training.includes(future));
-  assert.ok(!training.some((vote) => vote.proposal.outcome === "DEFEATED"));
+  assert.ok(training.every((vote) => !("outcome" in vote.proposal)));
+  assert.ok(training.every((vote) => !("state" in vote.proposal)));
+  assert.ok(training.every((vote) => !("forVotes" in vote.proposal)));
 });
 
 test("temporal leakage assertion rejects same-block and future evidence", () => {
