@@ -1,0 +1,22 @@
+{
+  "name": "gavel-governance-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A private, history-first AI governance copilot.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "gavel": "bin/gavel.js"
+  },
+  "scripts": {
+    "gavel": "node bin/gavel.js",
+    "test": "node --test",
+    "test:history": "node --test test/history*.test.js"
+  },
+  "dependencies": {
+    "ethers": "^6.15.0",
+    "zod": "^3.25.76"
+  }
+}
