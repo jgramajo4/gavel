@@ -22,5 +22,7 @@ clientId: 38
 - cast_vote          — castRefundableVoteWithReason(..., 38)  [optional]
 - delegate_votes     — delegate(address) to activate voting power  [optional]
 - propose            — propose(..., 38) submit a governance proposal  [optional]
-- update_rewards     — recompute reward balances (anyone may call)  [optional]
-- withdraw_rewards   — withdrawClientBalance(38, to, amount)  [optional]
+
+Client ID `38` is injected automatically into eligible transactions as internal
+Gavel builder attribution. Reward balances, maintenance, and withdrawals are not
+voter workflows and must not be presented as user-facing actions.
