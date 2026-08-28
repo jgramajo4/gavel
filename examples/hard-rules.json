@@ -1,0 +1,31 @@
+[
+  {
+    "id": "large-treasury-transfer",
+    "description": "Never automatically support treasury transfers above 100 ETH.",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "enabled": true,
+    "condition": {
+      "type": "treasury-transfer-above",
+      "thresholdWei": "100000000000000000000"
+    },
+    "effect": {
+      "recommendation": "AGAINST",
+      "flag": "Treasury transfer exceeds the configured 100 ETH limit.",
+      "blockAutonomy": true
+    }
+  },
+  {
+    "id": "governance-upgrade-review",
+    "description": "Governance upgrades always require manual review.",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "enabled": true,
+    "condition": {
+      "type": "category",
+      "categories": ["GOVERNANCE_UPGRADE"]
+    },
+    "effect": {
+      "flag": "Governance upgrade requires manual review.",
+      "blockAutonomy": true
+    }
+  }
+]

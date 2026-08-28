@@ -35,10 +35,10 @@ rewards feature. Reward maintenance and withdrawals remain admin-only.
 ## Status
 
 The existing `nouns-dao/` Bankr skill contains working Nouns transaction tools.
-The new `src/` tree is the beginning of the Gavel intelligence layer. The first
-implemented vertical slice ingests and normalizes a voter's Nouns history while
-preserving onchain reasons, proposal actions, timestamps, weights, outcomes, and
-source provenance.
+The new `src/` tree is the beginning of the Gavel intelligence layer. It ingests
+and normalizes a voter's Nouns history, then builds a private three-layer voter
+profile with recency-weighted observed behavior, timestamped stated preferences,
+and deterministic hard rules.
 
 ## Requirements
 
@@ -73,6 +73,28 @@ npm run gavel -- history 0xYourVoterAddress --stdout
 The default source is `https://www.nouns.camp/subgraphs/nouns`. Override it with
 `NOUNS_SUBGRAPH_URL` or `--endpoint`.
 
+## Private voter profile
+
+Build a profile from a normalized history file:
+
+```bash
+npm run gavel -- profile data/private/nouns/0xyourvoteraddress.json
+```
+
+Gavel defaults to an explicit 365-day exponential half-life and records the
+formula and evidence cutoff in the output. Add private, user-maintained policy
+inputs with `--preferences <json>` and `--rules <json>`. Example formats live in
+[`examples/`](examples/); the full methodology is documented in
+[`docs/PROFILE_MODEL.md`](docs/PROFILE_MODEL.md).
+
+Profiles are written to `data/private/profiles/<dao>/<address>.json` unless
+`--output` or `--stdout` is supplied. Observed history is never edited by user
+corrections. Policy precedence is:
+
+```text
+matching hard rule > newest matching stated preference > observed behavior
+```
+
 ## Privacy
 
 Historical votes are public, but the normalized record and all future derived
@@ -86,7 +108,8 @@ one voter's model with another voter.
   preparation ships.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
   Gavel instructions.
-- This phase does not yet predict votes, produce calibrated confidence, or
+- The profile phase extracts evidence and resolves policy precedence, but does
+  not yet predict votes, produce calibrated confidence, draft reasons, or
   broadcast transactions.
 
 ## Legacy Nouns tools
