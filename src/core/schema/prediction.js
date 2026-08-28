@@ -25,7 +25,7 @@ const precedentSchema = z.object({
 
 const predictionDocumentSchema = z
   .object({
-    schemaVersion: z.literal("1.0.0"),
+    schemaVersion: z.enum(["1.0.0", "1.1.0"]),
     generatedAt: z.string().datetime(),
     asOf: z.string().datetime(),
     dao: z.string().min(1),
@@ -35,8 +35,18 @@ const predictionDocumentSchema = z
     proposalContentHash: z.string().regex(/^[0-9a-f]{64}$/),
     recommendation: supportSchema,
     confidence: boundedScore,
+    rawConfidence: boundedScore.optional(),
     confidencePercent: z.number().int().min(0).max(100),
-    confidenceCalibrated: z.literal(false),
+    confidenceCalibrated: z.boolean(),
+    calibration: z
+      .object({
+        applied: z.boolean(),
+        modelId: z.string().regex(/^[0-9a-f]{64}$/),
+        bucketIndex: z.number().int().nonnegative(),
+        sampleCount: z.number().int().nonnegative(),
+        reason: z.string().min(1).nullable(),
+      })
+      .optional(),
     policySource: z.enum(["OBSERVED_BEHAVIOR", "STATED_PREFERENCE", "HARD_RULE"]),
     policySourceId: z.string().nullable(),
     precedents: z.array(precedentSchema).max(5),
@@ -69,7 +79,7 @@ const predictionDocumentSchema = z
     method: z.object({
       name: z.literal("gavel-evidence-heuristic"),
       version: z.literal("1.0.0"),
-      calibrated: z.literal(false),
+      calibrated: z.boolean(),
       relevantSimilarityThreshold: boundedScore,
       maxScoredPrecedents: z.number().int().positive(),
     }),
@@ -95,6 +105,26 @@ const predictionDocumentSchema = z
         code: z.ZodIssueCode.custom,
         path: ["evidence", "supportScores"],
         message: "support scores must sum to 1",
+      });
+    }
+    if (prediction.confidenceCalibrated) {
+      if (
+        prediction.schemaVersion !== "1.1.0" ||
+        prediction.rawConfidence === undefined ||
+        !prediction.calibration?.applied ||
+        !prediction.method.calibrated
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["confidenceCalibrated"],
+          message: "calibrated predictions require v1.1 metadata and rawConfidence",
+        });
+      }
+    } else if (prediction.method.calibrated) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["method", "calibrated"],
+        message: "method cannot be calibrated when confidenceCalibrated is false",
       });
     }
   });
