@@ -5,7 +5,9 @@ This skill lets agents participate in Nouns DAO on Ethereum mainnet:
 - Settle auctions
 - Read Noun metadata (on-chain SVG + traits)
 - (Optional) list active proposals and cast votes
-- (Optional) withdraw client incentives
+
+Eligible Nouns transactions automatically include Gavel client ID **38** for
+builder-side attribution. Voters do not configure or withdraw these rewards.
 
 Client ID is **38** and is fixed via `config.json` (no overrides). It must be included in eligible calls.
 
@@ -33,8 +35,10 @@ nouns-dao/
     ├── cast_vote.js
     ├── delegate_votes.js
     ├── propose.js
-    ├── update_rewards.js
-    └── withdraw_rewards.js
+    ├── update_rewards.js          # deprecated admin compatibility shim
+    └── withdraw_rewards.js        # deprecated admin compatibility shim
+
+tools/admin/nouns-rewards/         # builder-only; requires GAVEL_ADMIN_MODE=1
 ```
 
 ---
@@ -116,15 +120,12 @@ node scripts/delegate_votes.js --to 0xYourAddress
 node scripts/propose.js --targets 0xTarget1,0xTarget2 --values 0,0 --signatures "", "" --calldatas 0x,0x --description "Proposal description"
 ```
 
-### Update Rewards (Optional)
-```
-node scripts/update_rewards.js --last-proposal-id 456 --voting-client-ids 38
-```
+### Builder reward administration
 
-### Withdraw Rewards (Optional)
-```
-node scripts/withdraw_rewards.js --to 0xYourAddress --amount-eth 0.5
-```
+Reward maintenance and withdrawal are intentionally excluded from voter-facing
+skill actions. Gavel builders can use the explicitly gated tools documented in
+`../tools/admin/nouns-rewards/README.md`. The old script paths remain temporary
+compatibility shims and enforce the same admin gate.
 
 ---
 
