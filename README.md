@@ -114,6 +114,29 @@ A leakage-free real-history holdout is recorded in
 
 Predictions are private by default and do not prepare, sign, or broadcast votes.
 
+## Historical backtesting
+
+Run expanding-window chronological evaluation on a normalized voter history:
+
+```bash
+npm run gavel -- backtest data/private/nouns/0xyourvoteraddress.json
+```
+
+The report includes overall and class-specific accuracy, confidence buckets,
+category/year slices, Brier scores, failure modes, and a minimum-sample-gated
+calibration model. Training uses strictly earlier blocks, excludes same-block
+votes, and redacts ingestion-time outcomes and tallies. The complete methodology
+is documented in [`docs/BACKTESTING.md`](docs/BACKTESTING.md).
+The first full Nouncil result—including the finding that the current predictor
+does not beat its majority-class baseline—is documented in
+[`docs/BACKTEST_EXAMPLE.md`](docs/BACKTEST_EXAMPLE.md).
+
+An eligible model can calibrate a later prediction:
+
+```bash
+npm run gavel -- predict profile.json proposal.json --calibration backtest.json
+```
+
 ## Privacy
 
 Historical votes are public, but the normalized record and all future derived
@@ -127,8 +150,8 @@ one voter's model with another voter.
   preparation ships.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
   Gavel instructions.
-- Confidence is an exposed Phase 4 heuristic, not yet an empirically calibrated
-  probability. Chronological calibration is the next backtesting phase.
+- Raw confidence remains an exposed heuristic. A prediction is marked calibrated
+  only when a chronological backtest bucket meets its minimum evidence count.
 - Prediction does not yet decode arbitrary calldata, prepare votes, or broadcast
   transactions.
 

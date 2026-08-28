@@ -15,6 +15,11 @@ The concise result is printed and the complete prediction is stored privately
 under `data/private/predictions/`. Use `--stdout` for the complete JSON without
 writing a file.
 
+After a chronological backtest produces an eligible calibration model, apply it
+with `--calibration <backtest.json>`. Gavel preserves the raw confidence and
+only marks the result calibrated when the selected bucket meets the configured
+minimum sample count. See [`BACKTESTING.md`](BACKTESTING.md).
+
 ## Precedent similarity
 
 Similarity is structural and deterministic. It is not based only on keywords.
@@ -58,7 +63,8 @@ matching hard rule > newest matching stated preference > observed behavior
 
 Confidence is explicitly labeled `confidenceCalibrated: false`. It is a bounded
 heuristic for Phase 4, not an LLM self-assessment and not yet an empirical
-probability. The output exposes these normalized components:
+probability until a qualifying Phase 5 calibration model is applied. The raw
+output exposes these normalized components:
 
 - margin between the top two support scores;
 - average similarity of the strongest precedents;
