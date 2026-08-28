@@ -1,0 +1,17 @@
+[
+  {
+    "id": "current-treasury-caution",
+    "statement": "I am now more conservative about treasury spending.",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "active": true,
+    "categories": ["TREASURY"],
+    "recommendation": "AGAINST"
+  },
+  {
+    "id": "reason-style",
+    "statement": "Keep drafted vote reasons concise and state the main caveat.",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "active": true,
+    "categories": []
+  }
+]

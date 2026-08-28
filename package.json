@@ -13,7 +13,8 @@
   "scripts": {
     "gavel": "node bin/gavel.js",
     "test": "node --test",
-    "test:history": "node --test test/history*.test.js"
+    "test:history": "node --test test/history*.test.js",
+    "test:profile": "node --test test/profile.test.js"
   },
   "dependencies": {
     "ethers": "^6.15.0",
