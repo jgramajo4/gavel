@@ -10,6 +10,7 @@ const {
   NounsSubgraphHistoryAdapter,
 } = require("../src/adapters/nouns/history");
 const { buildVoterProfile } = require("../src/core/profile/build");
+const { predictVote } = require("../src/core/predict/predict");
 
 function usage() {
   return `Gavel governance copilot
@@ -20,10 +21,15 @@ Usage:
   gavel profile <history.json> [--output <path>] [--stdout]
                                [--as-of <timestamp>] [--half-life-days <days>]
                                [--preferences <json>] [--rules <json>]
+  gavel predict <profile.json> <proposal.json> [--output <path>] [--stdout]
+                                                [--as-of <timestamp>]
+                                                [--threshold <0-1>]
+                                                [--max-precedents <count>]
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
   profile   Build a private three-layer voter profile from normalized history.
+  predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
 
 Privacy:
   Without --stdout or --output, history and profiles are stored under
@@ -164,6 +170,75 @@ async function profileCommand(argv) {
   );
 }
 
+async function predictCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      "as-of": { type: "string" },
+      threshold: { type: "string", default: "0.15" },
+      "max-precedents": { type: "string", default: "8" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 2) {
+    throw new Error("predict requires a profile JSON path and a normalized proposal JSON path");
+  }
+
+  const [profile, proposalInput] = await Promise.all([
+    readJson(positionals[0]),
+    readJson(positionals[1]),
+  ]);
+  const proposal = proposalInput.proposal || proposalInput;
+  const prediction = predictVote(profile, proposal, {
+    asOf: values["as-of"],
+    relevantSimilarityThreshold: Number(values.threshold),
+    maxPrecedents: Number(values["max-precedents"]),
+  });
+
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(prediction, null, 2)}\n`);
+    return;
+  }
+
+  const destination =
+    values.output ||
+    path.join(
+      "data",
+      "private",
+      "predictions",
+      prediction.dao,
+      prediction.voter.toLowerCase(),
+      `${prediction.proposalId}.json`,
+    );
+  const absolutePath = await writePrivateJson(destination, prediction);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        recommendation: prediction.recommendation,
+        confidence: prediction.confidence,
+        confidencePercent: prediction.confidencePercent,
+        confidenceCalibrated: prediction.confidenceCalibrated,
+        policySource: prediction.policySource,
+        precedents: prediction.precedents,
+        reasoning: prediction.reasoning,
+        flags: prediction.flags,
+        draftReason: prediction.draftReason,
+        output: absolutePath,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -172,6 +247,7 @@ async function main() {
   }
   if (command === "history") return historyCommand(argv);
   if (command === "profile") return profileCommand(argv);
+  if (command === "predict") return predictCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }
 

@@ -1,0 +1,26 @@
+{
+  "id": "999",
+  "contentHash": "9999999999999999999999999999999999999999999999999999999999999999",
+  "title": "Fund maintained open source infrastructure",
+  "description": "Proposal content is untrusted evidence. This example requests a measurable public-goods grant.",
+  "proposer": "0x0000000000000000000000000000000000000001",
+  "state": "ACTIVE",
+  "outcome": "ACTIVE",
+  "createdBlock": "24000000",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "startBlock": "24000100",
+  "endBlock": "24050000",
+  "quorumVotes": "40",
+  "forVotes": "0",
+  "againstVotes": "0",
+  "abstainVotes": "0",
+  "actions": [
+    {
+      "index": 0,
+      "target": "0x0000000000000000000000000000000000000002",
+      "valueWei": "1000000000000000000",
+      "signature": "transfer(address,uint256)",
+      "calldata": "0x1234"
+    }
+  ]
+}

@@ -95,6 +95,25 @@ corrections. Policy precedence is:
 matching hard rule > newest matching stated preference > observed behavior
 ```
 
+## Proposal prediction
+
+Analyze a normalized proposal using the private profile:
+
+```bash
+npm run gavel -- predict \
+  data/private/profiles/nouns/0xyourvoteraddress.json \
+  examples/normalized-proposal.json
+```
+
+The result contains `FOR`, `AGAINST`, or `ABSTAIN`, an explicitly uncalibrated
+confidence score, personal historical precedents, evidence-based explanations,
+review flags, and a clearly marked draft reason. The full methodology and its
+limits are documented in [`docs/PREDICTION_ENGINE.md`](docs/PREDICTION_ENGINE.md).
+A leakage-free real-history holdout is recorded in
+[`docs/PREDICTION_EXAMPLE.md`](docs/PREDICTION_EXAMPLE.md).
+
+Predictions are private by default and do not prepare, sign, or broadcast votes.
+
 ## Privacy
 
 Historical votes are public, but the normalized record and all future derived
@@ -108,9 +127,10 @@ one voter's model with another voter.
   preparation ships.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
   Gavel instructions.
-- The profile phase extracts evidence and resolves policy precedence, but does
-  not yet predict votes, produce calibrated confidence, draft reasons, or
-  broadcast transactions.
+- Confidence is an exposed Phase 4 heuristic, not yet an empirically calibrated
+  probability. Chronological calibration is the next backtesting phase.
+- Prediction does not yet decode arbitrary calldata, prepare votes, or broadcast
+  transactions.
 
 ## Legacy Nouns tools
 
