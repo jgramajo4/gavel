@@ -13,6 +13,7 @@ const { buildVoterProfile } = require("../src/core/profile/build");
 const { predictVote } = require("../src/core/predict/predict");
 const { applyCalibrationToPrediction } = require("../src/core/backtest/calibration");
 const { runChronologicalBacktest } = require("../src/core/backtest/run");
+const { inspectNounsProposal } = require("../src/adapters/nouns/security");
 
 function usage() {
   return `Gavel governance copilot
@@ -33,12 +34,14 @@ Usage:
                                 [--half-life-days <days>]
                                 [--min-calibration-samples <count>]
                                 [--preferences <json>] [--rules <json>]
+  gavel inspect <proposal.json> [--output <path>] [--stdout]
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
+  inspect   Decode and security-check structured Nouns proposal actions.
 
 Privacy:
   Without --stdout or --output, history and profiles are stored under
@@ -335,6 +338,32 @@ async function backtestCommand(argv) {
   );
 }
 
+async function inspectCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("inspect requires exactly one normalized proposal JSON path");
+  const proposalInput = await readJson(positionals[0]);
+  const report = inspectNounsProposal(proposalInput.proposal || proposalInput);
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  const destination = values.output || path.join("data", "private", "inspections", "nouns", `${report.proposalId}.json`);
+  const absolutePath = await writePrivateJson(destination, report);
+  process.stdout.write(`${JSON.stringify({ ...report.summary, flags: report.flags, mismatches: report.mismatches, output: absolutePath }, null, 2)}\n`);
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -345,6 +374,7 @@ async function main() {
   if (command === "profile") return profileCommand(argv);
   if (command === "predict") return predictCommand(argv);
   if (command === "backtest") return backtestCommand(argv);
+  if (command === "inspect") return inspectCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }
 

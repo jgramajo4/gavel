@@ -101,9 +101,10 @@ three historical reasons and no stated preferences are available.
 
 - Proposal prose is untrusted feature input and cannot become Gavel policy or
   appear verbatim in explanations or draft reasons.
-- Native ETH value and target addresses are inspected; token transfers and
-  arbitrary calldata are not yet decoded. That belongs to the proposal-safety
-  phase.
+- Phase 6 security output is embedded under `security`. Structured actions are
+  decoded where possible; injection suspicion, privileged calls, unknown
+  calldata, and conservative prose/action contradictions require human review.
+  See [`PROPOSAL_SECURITY.md`](PROPOSAL_SECURITY.md).
 - Category extraction is deterministic and intentionally conservative.
 - Confidence remains uncalibrated until chronological backtesting is complete.
 - This phase recommends only. It does not prepare, sign, or broadcast a vote.

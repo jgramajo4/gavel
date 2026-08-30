@@ -19,7 +19,7 @@ Nouns API / chain
  observed behavior + stated preferences + hard rules
                               |
                               v
- precedents -> prediction -> confidence -> draft reason
+ precedents -> prediction -> confidence -> proposal security -> draft reason
                               |
                               v
                     prepare Nouns vote transaction
@@ -111,6 +111,21 @@ A leakage-free real-history holdout is recorded in
 
 Predictions are private by default and do not prepare, sign, or broadcast votes.
 
+## Proposal security
+
+Inspect a normalized proposal independently of any voter profile:
+
+```bash
+npm run gavel -- inspect examples/normalized-proposal.json -- --stdout
+```
+
+Gavel quarantines proposal prose as untrusted data, decodes structured Nouns
+actions where possible, inspects targets and privileged calls, and flags unknown
+or dangerous execution. Conservative mismatch checks compare explicit ETH amount
+and recipient claims against decoded actions. Prediction output embeds the same
+security report, while keeping security review separate from the personalized
+voter recommendation. See [`docs/PROPOSAL_SECURITY.md`](docs/PROPOSAL_SECURITY.md).
+
 ## Historical backtesting
 
 Run expanding-window chronological evaluation on a normalized voter history:
@@ -146,11 +161,12 @@ one voter's model with another voter.
   metadata. Direct onchain verification will be added before transaction
   preparation ships.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
-  Gavel instructions.
+  Gavel instructions. Static action inspection does not replace direct chain
+  verification or transaction simulation.
 - Raw confidence remains an exposed heuristic. A prediction is marked calibrated
   only when a chronological backtest bucket meets its minimum evidence count.
-- Prediction does not yet decode arbitrary calldata, prepare votes, or broadcast
-  transactions.
+- Unknown arbitrary calldata is flagged for human review. Prediction does not
+  yet prepare votes or broadcast transactions.
 
 ## Legacy Nouns tools
 
