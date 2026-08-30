@@ -11,6 +11,8 @@ const {
 } = require("../src/adapters/nouns/history");
 const { buildVoterProfile } = require("../src/core/profile/build");
 const { predictVote } = require("../src/core/predict/predict");
+const { applyCalibrationToPrediction } = require("../src/core/backtest/calibration");
+const { runChronologicalBacktest } = require("../src/core/backtest/run");
 
 function usage() {
   return `Gavel governance copilot
@@ -25,11 +27,18 @@ Usage:
                                                 [--as-of <timestamp>]
                                                 [--threshold <0-1>]
                                                 [--max-precedents <count>]
+                                                [--calibration <backtest.json>]
+  gavel backtest <history.json> [--output <path>] [--stdout]
+                                [--min-training-votes <count>]
+                                [--half-life-days <days>]
+                                [--min-calibration-samples <count>]
+                                [--preferences <json>] [--rules <json>]
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
+  backtest  Run leakage-free chronological evaluation and confidence calibration.
 
 Privacy:
   Without --stdout or --output, history and profiles are stored under
@@ -180,6 +189,7 @@ async function predictCommand(argv) {
       "as-of": { type: "string" },
       threshold: { type: "string", default: "0.15" },
       "max-precedents": { type: "string", default: "8" },
+      calibration: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -197,11 +207,16 @@ async function predictCommand(argv) {
     readJson(positionals[1]),
   ]);
   const proposal = proposalInput.proposal || proposalInput;
-  const prediction = predictVote(profile, proposal, {
+  let prediction = predictVote(profile, proposal, {
     asOf: values["as-of"],
     relevantSimilarityThreshold: Number(values.threshold),
     maxPrecedents: Number(values["max-precedents"]),
   });
+  if (values.calibration) {
+    const calibrationInput = await readJson(values.calibration);
+    const calibrationModel = calibrationInput.calibrationModel || calibrationInput;
+    prediction = applyCalibrationToPrediction(prediction, calibrationModel);
+  }
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(prediction, null, 2)}\n`);
@@ -239,6 +254,87 @@ async function predictCommand(argv) {
   );
 }
 
+async function backtestCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      "min-training-votes": { type: "string", default: "25" },
+      "half-life-days": { type: "string", default: "365" },
+      threshold: { type: "string", default: "0.15" },
+      "max-precedents": { type: "string", default: "8" },
+      "high-confidence": { type: "string", default: "0.9" },
+      "calibration-prior": { type: "string", default: "10" },
+      "min-calibration-samples": { type: "string", default: "20" },
+      preferences: { type: "string" },
+      rules: { type: "string" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("backtest requires exactly one history JSON path");
+
+  const history = await readJson(positionals[0]);
+  const [statedPreferences, hardRules] = await Promise.all([
+    optionalArray(values.preferences, "preferences"),
+    optionalArray(values.rules, "rules"),
+  ]);
+  const report = runChronologicalBacktest(history, {
+    minTrainingVotes: Number(values["min-training-votes"]),
+    halfLifeDays: Number(values["half-life-days"]),
+    relevantSimilarityThreshold: Number(values.threshold),
+    maxPrecedents: Number(values["max-precedents"]),
+    highConfidenceThreshold: Number(values["high-confidence"]),
+    calibrationPriorStrength: Number(values["calibration-prior"]),
+    minCalibrationSamples: Number(values["min-calibration-samples"]),
+    statedPreferences,
+    hardRules,
+  });
+
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+
+  const destination =
+    values.output ||
+    path.join("data", "private", "backtests", report.dao, `${report.voter.toLowerCase()}.json`);
+  const absolutePath = await writePrivateJson(destination, report);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        voter: report.voter,
+        predictions: report.summary.predictionCount,
+        correct: report.summary.correctCount,
+        accuracy: report.summary.accuracy,
+        majorityClass: report.summary.majorityClass,
+        majorityClassAccuracy: report.summary.majorityClassAccuracy,
+        accuracyLiftOverMajority: report.summary.accuracyLiftOverMajority,
+        balancedAccuracy: report.summary.balancedAccuracy,
+        rawBrierScore: report.summary.rawBrierScore,
+        onlineCalibratedBrierScore: report.summary.onlineCalibratedBrierScore,
+        rawExpectedCalibrationError: report.summary.rawExpectedCalibrationError,
+        highConfidence: report.summary.highConfidence,
+        perClass: report.perClass,
+        byCategory: report.byCategory,
+        byYear: report.byYear,
+        confidenceBuckets: report.confidenceBuckets,
+        failureModes: report.failureModes,
+        calibrationModelId: report.calibrationModel.modelId,
+        output: absolutePath,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -248,6 +344,7 @@ async function main() {
   if (command === "history") return historyCommand(argv);
   if (command === "profile") return profileCommand(argv);
   if (command === "predict") return predictCommand(argv);
+  if (command === "backtest") return backtestCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }
 
