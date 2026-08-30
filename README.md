@@ -28,9 +28,6 @@ Nouns API / chain
                  adapter injects builder clientId 38
 ```
 
-Client ID `38` is builder-side attribution plumbing. It is automatically added
-to eligible Nouns transactions and is not a voter preference or voter-facing
-rewards feature. Reward maintenance and withdrawals remain admin-only.
 
 ## Status
 
