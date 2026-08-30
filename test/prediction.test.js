@@ -142,6 +142,8 @@ test("predicts from matching personal precedents and exposes uncalibrated confid
   assert.equal(result.precedents[0].vote, "FOR");
   assert.equal(result.draftReason.isDraft, true);
   assert.equal(result.draftReason.available, true);
+  assert.equal(result.schemaVersion, "1.2.0");
+  assert.equal(result.security.contentPolicy.instructionHandling, "NEVER_FOLLOW");
 });
 
 test("does not turn uncertainty into ABSTAIN for a voter with no history", () => {
