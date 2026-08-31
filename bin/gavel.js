@@ -21,6 +21,7 @@ function usage() {
 Usage:
   gavel history <address> [--output <path>] [--stdout]
                          [--endpoint <url>] [--page-size <1-1000>]
+  gavel proposal <id> [--output <path>] [--stdout] [--endpoint <url>]
   gavel profile <history.json> [--output <path>] [--stdout]
                                [--as-of <timestamp>] [--half-life-days <days>]
                                [--preferences <json>] [--rules <json>]
@@ -38,6 +39,7 @@ Usage:
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
+  proposal  Fetch one current Nouns proposal as normalized private input.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
@@ -257,6 +259,35 @@ async function predictCommand(argv) {
   );
 }
 
+async function proposalCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      endpoint: { type: "string", default: process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1 || !/^\d+$/.test(positionals[0])) {
+    throw new Error("proposal requires exactly one unsigned Nouns proposal ID");
+  }
+  const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
+  const proposal = await adapter.fetchProposal(positionals[0]);
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
+    return;
+  }
+  const destination = values.output || path.join("data", "private", "proposals", "nouns", `${proposal.id}.json`);
+  const absolutePath = await writePrivateJson(destination, proposal);
+  process.stdout.write(`${JSON.stringify({ ok: true, proposalId: proposal.id, contentHash: proposal.contentHash, state: proposal.state, actionCount: proposal.actions.length, output: absolutePath }, null, 2)}\n`);
+}
+
 async function backtestCommand(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -371,6 +402,7 @@ async function main() {
     return;
   }
   if (command === "history") return historyCommand(argv);
+  if (command === "proposal") return proposalCommand(argv);
   if (command === "profile") return profileCommand(argv);
   if (command === "predict") return predictCommand(argv);
   if (command === "backtest") return backtestCommand(argv);

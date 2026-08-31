@@ -4,6 +4,7 @@ const { getAddress } = require("ethers");
 const { GovernanceHistoryAdapter } = require("../../core/history/adapter");
 const {
   historyDocumentSchema,
+  normalizedProposalSchema,
   normalizedVoteSchema,
   supportFromNouns,
 } = require("../../core/schema/governance");
@@ -11,17 +12,7 @@ const {
 const DEFAULT_ENDPOINT = "https://www.nouns.camp/subgraphs/nouns";
 const DEFAULT_PAGE_SIZE = 100;
 
-const VOTE_FIELDS = `
-  id
-  supportDetailed
-  votesRaw
-  reason
-  blockNumber
-  blockTimestamp
-  transactionHash
-  clientId
-  voter { id }
-  proposal {
+const PROPOSAL_FIELDS = `
     id
     title
     description
@@ -39,6 +30,20 @@ const VOTE_FIELDS = `
     forVotes
     againstVotes
     abstainVotes
+`;
+
+const VOTE_FIELDS = `
+  id
+  supportDetailed
+  votesRaw
+  reason
+  blockNumber
+  blockTimestamp
+  transactionHash
+  clientId
+  voter { id }
+  proposal {
+    ${PROPOSAL_FIELDS}
   }
 `;
 
@@ -59,6 +64,14 @@ const HISTORY_QUERY = `
       orderDirection: asc
     ) {
       ${VOTE_FIELDS}
+    }
+  }
+`;
+
+const PROPOSAL_QUERY = `
+  query ProposalById($id: BigInt!, $block: Int!) {
+    proposals(first: 1, block: { number: $block }, where: { id: $id }) {
+      ${PROPOSAL_FIELDS}
     }
   }
 `;
@@ -113,17 +126,40 @@ function normalizeActions(proposal) {
   }));
 }
 
+function normalizeProposal(proposal, context) {
+  if (!proposal) throw new Error("Cannot normalize an empty proposal");
+  const contentHash = proposalContentHash(proposal);
+  return normalizedProposalSchema.parse({
+    id: String(proposal.id),
+    contentHash,
+    title: String(proposal.title || ""),
+    description: String(proposal.description || ""),
+    proposer: getAddress(proposal.proposer.id),
+    state: String(proposal.status || "UNKNOWN").toUpperCase(),
+    outcome: proposalOutcome(proposal, context.subgraphBlock),
+    createdBlock: String(proposal.createdBlock),
+    createdAt: isoFromUnixSeconds(proposal.createdTimestamp),
+    startBlock: String(proposal.startBlock),
+    endBlock: String(proposal.endBlock),
+    quorumVotes: String(proposal.quorumVotes),
+    forVotes: String(proposal.forVotes),
+    againstVotes: String(proposal.againstVotes),
+    abstainVotes: String(proposal.abstainVotes),
+    actions: normalizeActions(proposal),
+  });
+}
+
 function normalizeVote(rawVote, context) {
   const proposal = rawVote.proposal;
   if (!proposal) throw new Error(`Vote ${rawVote.id} has no proposal`);
 
-  const contentHash = proposalContentHash(proposal);
+  const normalizedProposal = normalizeProposal(proposal, context);
   const queriedAt = context.queriedAt;
   const normalized = {
     dao: "nouns",
     chainId: 1,
     proposalId: String(proposal.id),
-    proposalContentHash: contentHash,
+    proposalContentHash: normalizedProposal.contentHash,
     voter: getAddress(rawVote.voter.id),
     support: supportFromNouns(rawVote.supportDetailed),
     reason: rawVote.reason == null || rawVote.reason === "" ? null : String(rawVote.reason),
@@ -131,24 +167,7 @@ function normalizeVote(rawVote, context) {
     timestamp: isoFromUnixSeconds(rawVote.blockTimestamp),
     voteWeight: String(rawVote.votesRaw),
     clientId: Number(rawVote.clientId),
-    proposal: {
-      id: String(proposal.id),
-      contentHash,
-      title: String(proposal.title || ""),
-      description: String(proposal.description || ""),
-      proposer: getAddress(proposal.proposer.id),
-      state: String(proposal.status || "UNKNOWN").toUpperCase(),
-      outcome: proposalOutcome(proposal, context.subgraphBlock),
-      createdBlock: String(proposal.createdBlock),
-      createdAt: isoFromUnixSeconds(proposal.createdTimestamp),
-      startBlock: String(proposal.startBlock),
-      endBlock: String(proposal.endBlock),
-      quorumVotes: String(proposal.quorumVotes),
-      forVotes: String(proposal.forVotes),
-      againstVotes: String(proposal.againstVotes),
-      abstainVotes: String(proposal.abstainVotes),
-      actions: normalizeActions(proposal),
-    },
+    proposal: normalizedProposal,
     source: {
       kind: "nouns-subgraph",
       endpoint: context.endpoint,
@@ -253,16 +272,33 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
       votes,
     });
   }
+
+  async fetchProposal(proposalId) {
+    const id = String(proposalId);
+    if (!/^\d+$/.test(id)) throw new TypeError("proposalId must be an unsigned integer");
+    const queriedAt = new Date().toISOString();
+    const subgraphBlock = await this.snapshotBlock();
+    const block = Number(subgraphBlock);
+    if (!Number.isSafeInteger(block)) throw new Error(`Unsafe subgraph block: ${subgraphBlock}`);
+    const data = await this.request(PROPOSAL_QUERY, { id, block });
+    if (!Array.isArray(data?.proposals)) {
+      throw new Error("Nouns subgraph returned an unexpected proposal payload");
+    }
+    if (data.proposals.length !== 1) throw new Error(`Nouns proposal ${id} was not found`);
+    return normalizeProposal(data.proposals[0], { endpoint: this.endpoint, queriedAt, subgraphBlock });
+  }
 }
 
 module.exports = {
   DEFAULT_ENDPOINT,
   SNAPSHOT_QUERY,
   HISTORY_QUERY,
+  PROPOSAL_QUERY,
   isoFromUnixSeconds,
   proposalContentHash,
   proposalOutcome,
   normalizeActions,
+  normalizeProposal,
   normalizeVote,
   NounsSubgraphHistoryAdapter,
 };
