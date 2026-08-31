@@ -118,6 +118,16 @@ node scripts/list_proposals.js --limit=10
 node scripts/cast_vote.js 456 1 "Voting FOR because…"
 ```
 
+The primary Gavel path prepares canonical-verified unsigned calldata from the
+repository root before any wallet approval:
+
+```
+node bin/gavel.js prepare-vote prediction.json proposal.json --support FOR --reason "Confirmed reason"
+```
+
+See `../docs/PREPARE_VOTE.md`. The direct script above broadcasts immediately
+and is retained only for explicit legacy use.
+
 ### Delegate Votes (Optional)
 ```
 node scripts/delegate_votes.js --to 0xYourAddress
