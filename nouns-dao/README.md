@@ -1,6 +1,14 @@
-# Nouns DAO Bankr Skill (`nouns-dao`)
+# Gavel Bankr Skill — Developer and Legacy Tool Reference
 
-This skill lets agents participate in Nouns DAO on Ethereum mainnet:
+The voter-facing entry point is [`SKILL.md`](SKILL.md). It presents Gavel as a
+personalized governance copilot and routes natural intents to private history,
+profile, proposal-analysis, correction, backtest, daily briefing, review-first
+voting, and delegation workflows.
+
+The commands below are lower-level Nouns utilities retained for development and
+explicit auction or transaction requests. They are not the primary Gavel user
+experience:
+
 - Bid in daily Noun auctions
 - Settle auctions
 - Read Noun metadata (on-chain SVG + traits)
