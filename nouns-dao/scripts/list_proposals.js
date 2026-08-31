@@ -62,7 +62,10 @@ async function main() {
       continue;
     }
 
-    const proposal = await governance.proposals(id);
+    const [proposal, actions] = await Promise.all([
+      governance.proposals(id),
+      governance.getActions(id),
+    ]);
 
     activeProposals.push({
       id: toStringSafe(proposal.id),
@@ -70,10 +73,10 @@ async function main() {
       proposalThreshold: toStringSafe(proposal.proposalThreshold),
       quorumVotes: toStringSafe(proposal.quorumVotes),
       eta: toStringSafe(proposal.eta),
-      targets: proposal.targets,
-      values: proposal.values.map(toStringSafe),
-      signatures: proposal.signatures,
-      calldatas: proposal.calldatas,
+      targets: actions[0],
+      values: actions[1].map(toStringSafe),
+      signatures: actions[2],
+      calldatas: actions[3],
       startBlock: toStringSafe(proposal.startBlock),
       endBlock: toStringSafe(proposal.endBlock),
       forVotes: toStringSafe(proposal.forVotes),
@@ -82,8 +85,8 @@ async function main() {
       canceled: proposal.canceled,
       executed: proposal.executed,
       vetoed: proposal.vetoed,
-      vetoer: proposal.vetoer,
-      creationTimestamp: toStringSafe(proposal.creationTimestamp),
+      totalSupply: toStringSafe(proposal.totalSupply),
+      creationBlock: toStringSafe(proposal.creationBlock),
       state: stateNum,
     });
 

@@ -192,6 +192,7 @@ test("hard rules override inferred recommendations with deterministic confidence
   assert.equal(result.policySource, "HARD_RULE");
   assert.equal(result.confidence, 1);
   assert.ok(result.flags.includes("Large transfer requires rejection."));
+  assert.ok(result.flags.includes("A matched hard rule blocks autonomous execution."));
 });
 
 test("newest matching stated preference overrides observed behavior", () => {
