@@ -116,7 +116,7 @@ function applyCalibrationToPrediction(prediction, model) {
   const confidence = bin.recommendedConfidence;
   return predictionDocumentSchema.parse({
     ...prediction,
-    schemaVersion: "1.1.0",
+    schemaVersion: prediction.schemaVersion === "1.2.0" ? "1.2.0" : "1.1.0",
     rawConfidence,
     confidence,
     confidencePercent: Math.round(confidence * 100),

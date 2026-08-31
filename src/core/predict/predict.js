@@ -6,6 +6,7 @@ const { resolveLayeredPolicy } = require("../profile/policy");
 const { heuristicConfidence } = require("./confidence");
 const { generateDraftReason } = require("./reason");
 const { retrievePrecedents } = require("./similarity");
+const { inspectNounsProposal } = require("../../adapters/nouns/security");
 
 const SUPPORT_ORDER = [Support.FOR, Support.AGAINST, Support.ABSTAIN];
 const DEFAULT_THRESHOLD = 0.15;
@@ -132,6 +133,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
   }
 
   const targetFacts = extractProposalFacts(proposal);
+  const security = profile.dao === "nouns" ? inspectNounsProposal(proposal) : null;
   const precedents = retrievePrecedents(profile, proposal, {
     asOf,
     threshold,
@@ -148,6 +150,14 @@ function predictVote(profileInput, proposalInput, options = {}) {
     policySource: policy.source,
   });
   const flags = buildFlags({ profile, policy, precedents, supportScores, asOf });
+  if (security) {
+    for (const securityFlag of security.flags) {
+      flags.push(`Security ${securityFlag.code}: ${securityFlag.message}`);
+    }
+    if (security.summary.requiresHumanReview) {
+      flags.push("Proposal security inspection requires human review before transaction preparation.");
+    }
+  }
   const draftReason = generateDraftReason({
     profile,
     recommendation,
@@ -169,7 +179,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
   }));
 
   return predictionDocumentSchema.parse({
-    schemaVersion: "1.0.0",
+    schemaVersion: security ? "1.2.0" : "1.0.0",
     generatedAt,
     asOf,
     dao: profile.dao,
@@ -192,6 +202,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
       scores: supportScores,
     }),
     flags,
+    security: security || undefined,
     draftReason,
     evidence: {
       profileVoteCount: profile.observedBehavior.voteCount,

@@ -1,6 +1,7 @@
 const { z } = require("zod");
 
 const { Support } = require("./governance");
+const { proposalSecurityReportSchema } = require("./security");
 
 const supportSchema = z.enum(Object.values(Support));
 const boundedScore = z.number().finite().min(0).max(1);
@@ -25,7 +26,7 @@ const precedentSchema = z.object({
 
 const predictionDocumentSchema = z
   .object({
-    schemaVersion: z.enum(["1.0.0", "1.1.0"]),
+    schemaVersion: z.enum(["1.0.0", "1.1.0", "1.2.0"]),
     generatedAt: z.string().datetime(),
     asOf: z.string().datetime(),
     dao: z.string().min(1),
@@ -52,6 +53,7 @@ const predictionDocumentSchema = z
     precedents: z.array(precedentSchema).max(5),
     reasoning: z.array(z.string().min(1)),
     flags: z.array(z.string().min(1)),
+    security: proposalSecurityReportSchema.optional(),
     draftReason: z.object({
       isDraft: z.literal(true),
       available: z.boolean(),
@@ -109,7 +111,7 @@ const predictionDocumentSchema = z
     }
     if (prediction.confidenceCalibrated) {
       if (
-        prediction.schemaVersion !== "1.1.0" ||
+        prediction.schemaVersion === "1.0.0" ||
         prediction.rawConfidence === undefined ||
         !prediction.calibration?.applied ||
         !prediction.method.calibrated
