@@ -79,3 +79,38 @@ test("fails closed on GraphQL errors", async () => {
   });
   await assert.rejects(() => adapter.fetchHistory(VOTER), /Nouns subgraph error/);
 });
+
+test("fetches one current proposal at a pinned subgraph block", async () => {
+  const requests = [];
+  const fakeFetch = async (_url, options) => {
+    const request = JSON.parse(options.body);
+    requests.push(request);
+    if (request.query.includes("SnapshotBlock")) {
+      return new Response(JSON.stringify({ data: { _meta: { block: { number: "999" } } } }));
+    }
+    return new Response(JSON.stringify({ data: { proposals: [vote(42, 200).proposal] } }));
+  };
+  const adapter = new NounsSubgraphHistoryAdapter({
+    endpoint: "https://example.test/subgraph",
+    fetch: fakeFetch,
+  });
+  const proposal = await adapter.fetchProposal("42");
+  assert.equal(proposal.id, "42");
+  assert.equal(proposal.title, "Proposal 42");
+  assert.equal(proposal.outcome, "EXECUTED");
+  assert.equal(requests[1].variables.block, 999);
+  assert.equal(requests[1].variables.id, "42");
+  await assert.rejects(() => adapter.fetchProposal("not-an-id"), /unsigned integer/);
+});
+
+test("fails closed when a requested proposal is absent", async () => {
+  const fakeFetch = async (_url, options) => {
+    const request = JSON.parse(options.body);
+    const data = request.query.includes("SnapshotBlock")
+      ? { _meta: { block: { number: "999" } } }
+      : { proposals: [] };
+    return new Response(JSON.stringify({ data }));
+  };
+  const adapter = new NounsSubgraphHistoryAdapter({ fetch: fakeFetch });
+  await assert.rejects(() => adapter.fetchProposal("404"), /was not found/);
+});

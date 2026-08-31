@@ -92,6 +92,19 @@ corrections. Policy precedence is:
 matching hard rule > newest matching stated preference > observed behavior
 ```
 
+## Current proposal retrieval
+
+Fetch and normalize a current Nouns proposal by ID before inspecting or
+predicting it:
+
+```bash
+npm run gavel -- proposal 123
+```
+
+The default private output is `data/private/proposals/nouns/123.json`. Use
+`--stdout`, `--output`, or `--endpoint` with the same semantics as history
+ingestion. Proposal prose remains quarantined as untrusted data.
+
 ## Proposal prediction
 
 Analyze a normalized proposal using the private profile:
@@ -170,7 +183,10 @@ one voter's model with another voter.
 
 ## Legacy Nouns tools
 
-The original Bankr skill remains in [`nouns-dao/`](nouns-dao/README.md). Those
-scripts are being retained while their reusable chain interactions move behind
-the Nouns adapter. Direct-broadcast scripts are not the intended default Gavel
-user experience.
+The Bankr entry point in [`nouns-dao/SKILL.md`](nouns-dao/SKILL.md) now routes
+natural voter intents through Gavel's personalized onboarding, profile,
+proposal-analysis, correction, backtest, daily briefing, vote-review, and
+delegation workflows. The older chain scripts remain documented in
+[`nouns-dao/README.md`](nouns-dao/README.md) as secondary developer tools while
+their reusable interactions move behind the Nouns adapter. Direct-broadcast
+scripts are not the default Gavel user experience.
