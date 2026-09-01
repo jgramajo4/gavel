@@ -101,6 +101,7 @@ function buildFlags({ profile, policy, precedents, supportScores, asOf }) {
   const profileAgeDays = (new Date(asOf).getTime() - new Date(profile.asOf).getTime()) / (24 * 60 * 60 * 1000);
   if (profileAgeDays > profile.recency.halfLifeDays) flags.push("The voter profile is older than one recency half-life.");
   if (policy.source !== "OBSERVED_BEHAVIOR") flags.push(`${policy.source} overrides the inferred recommendation.`);
+  if (policy.blockAutonomy) flags.push("A matched hard rule blocks autonomous execution.");
   flags.push(...policy.flags);
   return [...new Set(flags)];
 }

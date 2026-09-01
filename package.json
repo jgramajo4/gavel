@@ -18,7 +18,8 @@
     "test:prediction": "node --test test/prediction.test.js",
     "test:backtest": "node --test test/backtest.test.js",
     "test:security": "node --test test/security.test.js",
-    "test:bankr-skill": "node --test test/bankr-skill.test.js"
+    "test:bankr-skill": "node --test test/bankr-skill.test.js",
+    "test:prepare-vote": "node --test test/vote-preparation.test.js"
   },
   "dependencies": {
     "ethers": "^6.15.0",

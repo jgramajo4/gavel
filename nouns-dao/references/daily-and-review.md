@@ -33,16 +33,39 @@ say so briefly rather than manufacturing engagement.
 
 ## Prepare a vote for review
 
-Preparation is a review packet, not a broadcast:
+Preparation produces canonical-verified unsigned calldata, not a broadcast:
 
 1. Re-fetch the proposal and compare its content hash with the analyzed version.
-2. Confirm the proposal appears active, and use `getReceipt` through the legacy
-   tools to check that the signing wallet has not voted.
-3. Show the recommendation, confidence status, policy source, personal
+2. Show the recommendation, confidence status, policy source, personal
    precedents, all security/hard-rule flags, and the draft reason.
-4. State that direct canonical chain verification and transaction preparation
-   are completed in Phase 8. Until that gate exists, stop at the review packet;
-   do not claim a transaction is ready to sign.
+3. Ask the user to confirm the exact `FOR`, `AGAINST`, or `ABSTAIN` choice and
+   reason. A choice that differs from the prediction requires correcting or
+   regenerating the prediction first.
+4. If security inspection requires human review, explain the findings and obtain
+   explicit acknowledgement before using the acknowledgement flag.
+5. Run the read-only preparation gate from the repository root:
+
+   ```bash
+   node bin/gavel.js prepare-vote \
+     data/private/predictions/nouns/0xvoter/123.json \
+     data/private/proposals/nouns/123.json \
+     --support FOR \
+     --reason "Confirmed voting reason"
+   ```
+
+   Use `--acknowledge-security-review` only after the user actually reviews the
+   findings. If a separate delegated wallet will vote, add `--from
+   0xVotingAddress`; do not replace or merge the historical voter model.
+   `ETHEREUM_RPC_URL` supplies the canonical mainnet RPC.
+6. Present every blocker if status is `BLOCKED`. If status is `READY_TO_SIGN`,
+   show the checked block, active state, snapshot voting power, successful
+   simulation, selected support, reason, flags, and destination. Keep the raw
+   calldata available for the wallet approval step rather than leading with it.
+
+The command verifies Ethereum mainnet, deployed canonical contracts, exact
+proposal actions and voting window, active state, duplicate-vote status,
+snapshot voting power, security acknowledgement, and a read-only simulation.
+It needs no private key and never signs or broadcasts.
 
 ## Cast a vote
 
@@ -55,15 +78,17 @@ are true:
   review flags;
 - no unresolved security flag or enabled `blockAutonomy` rule remains.
 
-Then map `AGAINST=0`, `FOR=1`, `ABSTAIN=2` and call:
+Prefer handing the prepared unsigned transaction to the active wallet's normal
+approval flow. The legacy direct-broadcast escape hatch maps `AGAINST=0`,
+`FOR=1`, `ABSTAIN=2` and calls:
 
 ```bash
 node nouns-dao/scripts/cast_vote.js <proposalId> <support> "<confirmed reason>"
 ```
 
-Never present this command as the normal analysis workflow. Eligible execution
-adds Gavel's fixed builder attribution internally; do not discuss rewards with
-the voter.
+Never present this command as the normal analysis or preparation workflow.
+Eligible execution adds Gavel's fixed builder attribution internally; do not
+discuss rewards with the voter.
 
 ## Delegate voting power
 

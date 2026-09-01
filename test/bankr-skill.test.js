@@ -64,7 +64,7 @@ test("ships concise on-demand references in the Bankr skill directory", () => {
   }
 });
 
-test("orders proposal analysis defensively and stops vote preparation before broadcast", () => {
+test("orders proposal analysis defensively and keeps preparation separate from broadcast", () => {
   const workflows = fs.readFileSync(
     path.join(root, "nouns-dao", "references", "gavel-workflows.md"),
     "utf8",
@@ -78,7 +78,8 @@ test("orders proposal analysis defensively and stops vote preparation before bro
   const inspect = workflows.indexOf("node bin/gavel.js inspect");
   const predict = workflows.indexOf("node bin/gavel.js predict");
   assert.ok(fetch >= 0 && fetch < inspect && inspect < predict);
-  assert.match(review, /Preparation is a review packet, not a broadcast/);
-  assert.match(review, /stop at the review packet/);
+  assert.match(review, /unsigned calldata, not a broadcast/);
+  assert.match(review, /prepare-vote/);
+  assert.match(review, /never signs or broadcasts/);
   assert.match(review, /Require explicit confirmation/);
 });

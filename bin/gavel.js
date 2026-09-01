@@ -3,7 +3,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
-const { getAddress } = require("ethers");
+const { getAddress, JsonRpcProvider } = require("ethers");
 
 const {
   DEFAULT_ENDPOINT,
@@ -14,6 +14,7 @@ const { predictVote } = require("../src/core/predict/predict");
 const { applyCalibrationToPrediction } = require("../src/core/backtest/calibration");
 const { runChronologicalBacktest } = require("../src/core/backtest/run");
 const { inspectNounsProposal } = require("../src/adapters/nouns/security");
+const { NounsVotePreparationAdapter } = require("../src/adapters/nouns/vote");
 
 function usage() {
   return `Gavel governance copilot
@@ -36,6 +37,10 @@ Usage:
                                 [--min-calibration-samples <count>]
                                 [--preferences <json>] [--rules <json>]
   gavel inspect <proposal.json> [--output <path>] [--stdout]
+  gavel prepare-vote <prediction.json> <proposal.json> --support <choice>
+                     [--from <voting-address>] [--reason <text>]
+                     [--acknowledge-security-review]
+                     [--rpc <url>] [--output <path>] [--stdout]
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
@@ -44,6 +49,7 @@ Commands:
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
   inspect   Decode and security-check structured Nouns proposal actions.
+  prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
 
 Privacy:
   Without --stdout or --output, history and profiles are stored under
@@ -395,6 +401,90 @@ async function inspectCommand(argv) {
   process.stdout.write(`${JSON.stringify({ ...report.summary, flags: report.flags, mismatches: report.mismatches, output: absolutePath }, null, 2)}\n`);
 }
 
+async function prepareVoteCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      support: { type: "string" },
+      from: { type: "string" },
+      reason: { type: "string" },
+      "acknowledge-security-review": { type: "boolean", default: false },
+      rpc: { type: "string", default: process.env.ETHEREUM_RPC_URL },
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 2) {
+    throw new Error("prepare-vote requires prediction and normalized proposal JSON paths");
+  }
+  if (!values.support) {
+    throw new Error("prepare-vote requires --support AGAINST, FOR, or ABSTAIN as explicit confirmation");
+  }
+  if (!values.rpc) {
+    throw new Error("prepare-vote requires --rpc or ETHEREUM_RPC_URL");
+  }
+  const [prediction, proposalInput] = await Promise.all([
+    readJson(positionals[0]),
+    readJson(positionals[1]),
+  ]);
+  const provider = new JsonRpcProvider(values.rpc, 1, { staticNetwork: false });
+  const adapter = new NounsVotePreparationAdapter({ provider });
+  const preparation = await adapter.prepare({
+    prediction,
+    proposal: proposalInput.proposal || proposalInput,
+    selectedSupport: values.support,
+    votingAddress: values.from,
+    reason: values.reason,
+    acknowledgeSecurityReview: values["acknowledge-security-review"],
+  });
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(preparation, null, 2)}\n`);
+  } else {
+    const destination =
+      values.output ||
+      path.join(
+        "data",
+        "private",
+        "preparations",
+        preparation.dao,
+        preparation.modelVoter.toLowerCase(),
+        `${preparation.proposalId}.json`,
+      );
+    const absolutePath = await writePrivateJson(destination, preparation);
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          status: preparation.status,
+          proposalId: preparation.proposalId,
+          modelVoter: preparation.modelVoter,
+          votingAddress: preparation.votingAddress,
+          recommendation: preparation.recommendation,
+          selectedSupport: preparation.selectedSupport,
+          confidencePercent: preparation.confidencePercent,
+          proposalState: preparation.verification.proposalState.label,
+          votingPower: preparation.verification.votingPower.votes,
+          delegation: preparation.verification.delegation,
+          simulation: preparation.verification.simulation,
+          blockers: preparation.blockers,
+          flags: preparation.flags,
+          security: preparation.security,
+          transactionPrepared: preparation.transaction !== null,
+          output: absolutePath,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  if (preparation.status === "BLOCKED") process.exitCode = 2;
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -407,6 +497,7 @@ async function main() {
   if (command === "predict") return predictCommand(argv);
   if (command === "backtest") return backtestCommand(argv);
   if (command === "inspect") return inspectCommand(argv);
+  if (command === "prepare-vote") return prepareVoteCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }
 

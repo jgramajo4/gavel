@@ -124,6 +124,30 @@ A leakage-free real-history holdout is recorded in
 
 Predictions are private by default and do not prepare, sign, or broadcast votes.
 
+## Review-first vote preparation
+
+After reviewing a prediction, explicitly confirm its support choice and prepare
+an unsigned Nouns transaction:
+
+```bash
+npm run gavel -- prepare-vote \
+  data/private/predictions/nouns/0xyourvoteraddress/123.json \
+  data/private/proposals/nouns/123.json \
+  --support FOR \
+  --reason "Confirmed voting reason"
+```
+
+This read-only gate uses `ETHEREUM_RPC_URL` but no private key. It verifies the
+canonical contracts, exact proposal actions and voting window, active state,
+duplicate-vote status, snapshot voting power, security review, and transaction
+simulation. A failed gate returns `BLOCKED` with no transaction. A passing gate
+returns unsigned calldata for a separate wallet approval flow; it never signs or
+broadcasts. See [`docs/PREPARE_VOTE.md`](docs/PREPARE_VOTE.md).
+
+For a separate delegated voting wallet, add `--from 0xVotingAddress`. Gavel
+keeps the modeled historical voter distinct from the address whose receipt,
+snapshot power, simulation, and unsigned transaction are checked.
+
 ## Proposal security
 
 Inspect a normalized proposal independently of any voter profile:
@@ -171,15 +195,17 @@ one voter's model with another voter.
 ## Current boundaries
 
 - The ingestion adapter trusts the subgraph for discovery and rich proposal
-  metadata. Direct onchain verification will be added before transaction
-  preparation ships.
+  metadata. Vote preparation independently verifies executable actions, voting
+  window, state, receipt, and voting power against canonical contracts.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
   Gavel instructions. Static action inspection does not replace direct chain
   verification or transaction simulation.
 - Raw confidence remains an exposed heuristic. A prediction is marked calibrated
   only when a chronological backtest bucket meets its minimum evidence count.
-- Unknown arbitrary calldata is flagged for human review. Prediction does not
-  yet prepare votes or broadcast transactions.
+- Unknown arbitrary calldata is flagged for human review. Preparation requires
+  explicit review acknowledgement, and critical findings remain blocked.
+- Gavel produces unsigned vote calldata only. Wallet approval, signing,
+  broadcasting, and receipt monitoring remain outside the preparation command.
 
 ## Legacy Nouns tools
 
