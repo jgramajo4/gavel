@@ -3,6 +3,7 @@ const { Contract, Interface, getAddress } = require("ethers");
 const { normalizedProposalSchema, Support } = require("../../core/schema/governance");
 const { predictionDocumentSchema } = require("../../core/schema/prediction");
 const { votePreparationSchema } = require("../../core/schema/preparation");
+const { canonicalProposalVersion } = require("./freshness");
 
 const CHAIN_ID = 1;
 const CLIENT_ID = 38;
@@ -86,6 +87,7 @@ class NounsVotePreparationAdapter {
     this.governance = options.governance || new Contract(GOVERNANCE_ADDRESS, GOVERNANCE_ABI, options.provider);
     this.nounsToken = options.nounsToken || new Contract(NOUNS_TOKEN_ADDRESS, NOUNS_TOKEN_ABI, options.provider);
     this.now = options.now || (() => new Date());
+    this.freshnessVerifier = options.freshnessVerifier || canonicalProposalVersion;
   }
 
   async prepare(input) {
@@ -140,6 +142,23 @@ class NounsVotePreparationAdapter {
         this.nounsToken.getPriorVotes(votingAddress, proposal.startBlock),
         this.nounsToken.delegates(modelVoter),
       ]);
+
+    let canonicalVersion = null;
+    try {
+      canonicalVersion = await this.freshnessVerifier(
+        this.provider,
+        GOVERNANCE_ADDRESS,
+        proposal.id,
+        proposal.createdBlock,
+        checkedAtBlock,
+      );
+    } catch (error) {
+      block("CANONICAL_VERSION_UNAVAILABLE", `Canonical proposal version could not be verified: ${safeErrorMessage(error)}`);
+    }
+    const descriptionMatches = canonicalVersion !== null && canonicalVersion.description === proposal.description;
+    if (canonicalVersion && !descriptionMatches) {
+      block("PROPOSAL_DESCRIPTION_STALE", "Canonical proposal description differs from the normalized proposal.");
+    }
 
     const networkChainId = Number(network.chainId);
     if (networkChainId !== CHAIN_ID) block("WRONG_CHAIN", `RPC is connected to chain ${networkChainId}, not Ethereum mainnet.`);
@@ -231,6 +250,14 @@ class NounsVotePreparationAdapter {
         proposalIdentityMatches,
         votingWindowMatches,
         executableActionsMatch,
+        freshness: {
+          verifiedFromCanonicalEvents: canonicalVersion !== null,
+          descriptionMatches,
+          version: canonicalVersion?.version ?? null,
+          latestEvent: canonicalVersion?.latestEvent ?? null,
+          latestBlock: canonicalVersion?.latestBlock ?? null,
+          eventDigest: canonicalVersion?.eventDigest ?? null,
+        },
         receipt: { hasVoted, support: receiptSupport, votes: receiptVotes },
         votingPower: { snapshotBlock: canonicalStartBlock, votes: votingPower, eligible: BigInt(votingPower) > 0n },
         delegation: {

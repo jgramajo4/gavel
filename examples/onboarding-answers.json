@@ -1,0 +1,12 @@
+{
+  "answers": [
+    { "questionId": "treasury-spending", "answer": "DEPENDS", "qualification": "Prefer milestone-based requests with explicit budgets." },
+    { "questionId": "public-goods", "answer": "FOR", "qualification": "When outcomes are measurable and openly reported." },
+    { "questionId": "recurring-expenses", "answer": "ABSTAIN", "qualification": "Until renewal performance is documented." },
+    { "questionId": "experimentation", "answer": "FOR", "qualification": "For capped pilots with a clear sunset." },
+    { "questionId": "governance-changes", "answer": "DEPENDS" },
+    { "questionId": "protocol-investment", "answer": "FOR" },
+    { "questionId": "marketing-events", "answer": "SKIP" },
+    { "questionId": "uncertainty", "answer": "ABSTAIN" }
+  ]
+}
