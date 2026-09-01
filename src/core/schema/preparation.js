@@ -53,6 +53,14 @@ const votePreparationSchema = z
       proposalIdentityMatches: z.boolean(),
       votingWindowMatches: z.boolean(),
       executableActionsMatch: z.boolean(),
+      freshness: z.object({
+        verifiedFromCanonicalEvents: z.boolean(),
+        descriptionMatches: z.boolean(),
+        version: z.number().int().positive().nullable(),
+        latestEvent: z.string().min(1).nullable(),
+        latestBlock: decimalStringSchema.nullable(),
+        eventDigest: hexSchema.nullable(),
+      }),
       receipt: z.object({
         hasVoted: z.boolean(),
         support: z.number().int().min(0).max(255),

@@ -92,6 +92,17 @@ corrections. Policy precedence is:
 matching hard rule > newest matching stated preference > observed behavior
 ```
 
+For a new or low-history voter, record the short onboarding questionnaire as
+explicit stated preferences, never as learned behavior:
+
+```bash
+node bin/gavel.js onboard 0xYourVoterAddress --questions
+node bin/gavel.js onboard 0xYourVoterAddress --answers examples/onboarding-answers.json
+```
+
+Answers support `DEPENDS` and `SKIP`, preserve optional qualifications, and are
+stored with timestamped questionnaire provenance under `data/private/policies/`.
+
 ## Current proposal retrieval
 
 Fetch and normalize a current Nouns proposal by ID before inspecting or
@@ -138,7 +149,7 @@ npm run gavel -- prepare-vote \
 ```
 
 This read-only gate uses `ETHEREUM_RPC_URL` but no private key. It verifies the
-canonical contracts, exact proposal actions and voting window, active state,
+canonical contracts, proposal version/description events, exact proposal actions and voting window, active state,
 duplicate-vote status, snapshot voting power, security review, and transaction
 simulation. A failed gate returns `BLOCKED` with no transaction. A passing gate
 returns unsigned calldata for a separate wallet approval flow; it never signs or
@@ -206,6 +217,10 @@ one voter's model with another voter.
   explicit review acknowledgement, and critical findings remain blocked.
 - Gavel produces unsigned vote calldata only. Wallet approval, signing,
   broadcasting, and receipt monitoring remain outside the preparation command.
+- The Phase 9 gate status and reproducible evidence are maintained in
+  [`docs/PHASE9_LAUNCH_READINESS.md`](docs/PHASE9_LAUNCH_READINESS.md).
+
+Set `GAVEL_STRUCTURED_ERRORS=1` for privacy-scrubbed JSON operational failures.
 
 ## Legacy Nouns tools
 

@@ -171,6 +171,16 @@ function harness(overrides = {}) {
     governance,
     nounsToken,
     now: () => new Date("2026-01-03T00:00:00.000Z"),
+    freshnessVerifier: async () => {
+      if (overrides.freshnessError) throw new Error("mocked log outage");
+      return {
+        version: overrides.version ?? 1,
+        description: overrides.canonicalDescription ?? proposal().description,
+        latestEvent: overrides.latestEvent ?? "ProposalCreated",
+        latestBlock: "90",
+        eventDigest: `0x${"1".repeat(64)}`,
+      };
+    },
   });
   return { adapter, calls };
 }
@@ -250,6 +260,23 @@ test("blocks missing voting power and canonical action drift", async () => {
   assert.equal(result.status, "BLOCKED");
   assert.ok(result.blockers.some((item) => item.code === "EXECUTABLE_ACTION_MISMATCH"));
   assert.ok(result.blockers.some((item) => item.code === "NO_SNAPSHOT_VOTING_POWER"));
+});
+
+test("fails closed on stale proposal prose or unavailable canonical version events", async () => {
+  const stale = await harness({ canonicalDescription: "Updated canonical description", version: 2 }).adapter.prepare({
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR",
+  });
+  assert.equal(stale.status, "BLOCKED");
+  assert.ok(stale.blockers.some((item) => item.code === "PROPOSAL_DESCRIPTION_STALE"));
+  assert.equal(stale.verification.freshness.version, 2);
+  assert.equal(stale.verification.freshness.descriptionMatches, false);
+
+  const unavailable = await harness({ freshnessError: true }).adapter.prepare({
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR",
+  });
+  assert.equal(unavailable.status, "BLOCKED");
+  assert.ok(unavailable.blockers.some((item) => item.code === "CANONICAL_VERSION_UNAVAILABLE"));
+  assert.equal(unavailable.verification.freshness.verifiedFromCanonicalEvents, false);
 });
 
 test("requires exact recommendation confirmation and explicit acknowledgement of review flags", async () => {

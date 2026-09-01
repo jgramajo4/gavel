@@ -15,6 +15,8 @@ const { applyCalibrationToPrediction } = require("../src/core/backtest/calibrati
 const { runChronologicalBacktest } = require("../src/core/backtest/run");
 const { inspectNounsProposal } = require("../src/adapters/nouns/security");
 const { NounsVotePreparationAdapter } = require("../src/adapters/nouns/vote");
+const { ONBOARDING_QUESTIONS, buildOnboardingPreferences } = require("../src/core/profile/onboarding");
+const { classifyOperationalFailure } = require("../src/core/operations/failure");
 
 function usage() {
   return `Gavel governance copilot
@@ -22,6 +24,9 @@ function usage() {
 Usage:
   gavel history <address> [--output <path>] [--stdout]
                          [--endpoint <url>] [--page-size <1-1000>]
+  gavel onboard <address> --answers <json> [--output <path>] [--stdout]
+                           [--recorded-at <timestamp>]
+  gavel onboard <address> --questions
   gavel proposal <id> [--output <path>] [--stdout] [--endpoint <url>]
   gavel profile <history.json> [--output <path>] [--stdout]
                                [--as-of <timestamp>] [--half-life-days <days>]
@@ -44,6 +49,7 @@ Usage:
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
+  onboard   Record low-history questionnaire answers as stated preferences.
   proposal  Fetch one current Nouns proposal as normalized private input.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
@@ -120,6 +126,58 @@ async function readJson(filePath) {
   } catch (error) {
     throw new Error(`Invalid JSON in ${absolutePath}: ${error.message}`);
   }
+}
+
+async function onboardingCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      answers: { type: "string" },
+      questions: { type: "boolean", default: false },
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      "recorded-at": { type: "string" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("onboard requires exactly one voter address");
+  if (values.questions) {
+    process.stdout.write(`${JSON.stringify({ questions: ONBOARDING_QUESTIONS, answers: ["FOR", "AGAINST", "ABSTAIN", "DEPENDS", "SKIP"] }, null, 2)}\n`);
+    return;
+  }
+  if (!values.answers) throw new Error("onboard requires --answers <json> or --questions");
+  const input = await readJson(values.answers);
+  const questionnaire = buildOnboardingPreferences(positionals[0], input.answers || input, {
+    recordedAt: values["recorded-at"],
+  });
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(questionnaire, null, 2)}\n`);
+    return;
+  }
+  const destination = values.output || path.join("data", "private", "policies", questionnaire.voter.toLowerCase(), "preferences.json");
+  let existing = [];
+  try {
+    existing = await readJson(destination);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (!Array.isArray(existing)) throw new Error("existing preferences file must contain a JSON array");
+  const preferences = [...existing, ...questionnaire.preferences];
+  const absolutePath = await writePrivateJson(destination, preferences);
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    voter: questionnaire.voter,
+    recordedAt: questionnaire.recordedAt,
+    answeredCount: questionnaire.preferences.length,
+    skippedCount: (input.answers || input).length - questionnaire.preferences.length,
+    totalPreferenceCount: preferences.length,
+    output: absolutePath,
+  }, null, 2)}\n`);
 }
 
 async function optionalArray(filePath, label) {
@@ -492,6 +550,7 @@ async function main() {
     return;
   }
   if (command === "history") return historyCommand(argv);
+  if (command === "onboard") return onboardingCommand(argv);
   if (command === "proposal") return proposalCommand(argv);
   if (command === "profile") return profileCommand(argv);
   if (command === "predict") return predictCommand(argv);
@@ -502,6 +561,9 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`gavel: ${error.message || error}\n`);
+  const command = process.argv[2];
+  const failure = classifyOperationalFailure(command, error);
+  if (process.env.GAVEL_STRUCTURED_ERRORS === "1") process.stderr.write(`${JSON.stringify(failure)}\n`);
+  else process.stderr.write(`gavel: [${failure.category}] ${failure.message}\n`);
   process.exitCode = 1;
 });

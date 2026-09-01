@@ -39,6 +39,14 @@ const statedPreferenceSchema = z.object({
   active: z.boolean().default(true),
   categories: z.array(categorySchema).default([]),
   recommendation: supportSchema.optional(),
+  provenance: z
+    .object({
+      source: z.enum(["ONBOARDING_QUESTIONNAIRE", "USER_STATED", "USER_CORRECTION"]),
+      questionId: identifierSchema.optional(),
+      answer: z.enum(["FOR", "AGAINST", "ABSTAIN", "DEPENDS"]).optional(),
+      qualification: z.string().min(1).max(1000).optional(),
+    })
+    .optional(),
 });
 
 const hardRuleConditionSchema = z.discriminatedUnion("type", [

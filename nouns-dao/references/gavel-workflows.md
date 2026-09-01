@@ -28,9 +28,16 @@ private JSON into chat by default.
 5. Summarize what Gavel learned and name the evidence cutoff. Do not claim a
    profile is accurate merely because it was created.
 
-If the address has too little history, say that personalization is weak. A
-curated new-voter questionnaire is not yet implemented; do not invent completed
-onboarding evidence.
+If the address has too little history, say that behavioral personalization is
+weak and offer the fixed questionnaire:
+
+```bash
+node bin/gavel.js onboard 0xVoterAddress --questions
+node bin/gavel.js onboard 0xVoterAddress --answers /private/answers.json
+```
+
+Rebuild the profile using the resulting private preferences file. Describe these
+answers as stated preferences with onboarding provenance, never learned behavior.
 
 ## Explain the profile
 

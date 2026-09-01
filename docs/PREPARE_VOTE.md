@@ -40,17 +40,24 @@ Before returning a transaction, Gavel verifies:
    proposal content;
 4. canonical proposal ID, voting window, targets, values, signatures, and
    calldata exactly match the inspected input;
-5. the proposal is currently Active;
-6. the voter has not already voted;
-7. the selected voting address had nonzero voting power at the proposal snapshot
+5. canonical creation and update events reconstruct the same latest proposal
+   description/version as the inspected input;
+6. the proposal is currently Active;
+7. the voter has not already voted;
+8. the selected voting address had nonzero voting power at the proposal snapshot
    block, with the model address's current delegatee reported separately;
-8. the selected support exactly confirms the recommendation;
-9. required security review is acknowledged; and
-10. `eth_call` and gas estimation succeed from the voter address.
+9. the selected support exactly confirms the recommendation;
+10. required security review is acknowledged; and
+11. `eth_call` and gas estimation succeed from the voter address.
 
 A failed gate produces status `BLOCKED`, explicit blocker codes, and no
 transaction. The CLI exits with code 2 after saving the blocked review packet.
 RPC failures fail closed.
+
+Freshness is derived from canonical `ProposalCreated`, `ProposalUpdated`,
+`ProposalTransactionsUpdated`, and `ProposalDescriptionUpdated` logs at the DAO
+proxy. The subgraph is not authoritative for this safety gate. Missing log access
+and description-only drift both fail closed.
 
 ## Output boundary
 
