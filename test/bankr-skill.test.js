@@ -64,6 +64,18 @@ test("ships concise on-demand references in the Bankr skill directory", () => {
   }
 });
 
+test("defines a persistent self-installing Bankr runtime boundary", () => {
+  const runtime = fs.readFileSync(path.join(root, "nouns-dao", "references", "bankr-runtime.md"), "utf8");
+  assert.match(skill, /references\/bankr-runtime\.md/);
+  assert.match(skill, /\/cli\/gavel\/data\/private/);
+  assert.match(runtime, /git clone --branch phase9-launch-hardening --single-branch https:\/\/github\.com\/jgramajo4\/gavel\.git \/cli\/gavel/);
+  assert.match(runtime, /immutable release\s+tag/);
+  assert.match(runtime, /npm ci/);
+  assert.match(runtime, /npm test/);
+  assert.match(runtime, /end the Bankr conversation and start a new one/i);
+  assert.match(runtime, /No private key is required/);
+});
+
 test("orders proposal analysis defensively and keeps preparation separate from broadcast", () => {
   const workflows = fs.readFileSync(
     path.join(root, "nouns-dao", "references", "gavel-workflows.md"),

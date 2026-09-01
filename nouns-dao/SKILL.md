@@ -9,8 +9,7 @@ metadata:
     emoji: "⚖️"
     homepage: "https://github.com/jgramajo4/gavel"
     requires:
-      bins: [node]
-      packages: [ethers, zod]
+      bins: [git, node, npm]
 ---
 
 # Gavel
@@ -47,11 +46,24 @@ prepare a vote for review, cast a confirmed vote, or delegate voting power.
    retain Gavel's fixed attribution automatically; never present reward settings,
    balances, withdrawals, or builder economics as voter features.
 
+## Bankr runtime
+
+Before the first Gavel workflow in Bankr, load
+`references/bankr-runtime.md` and ensure the runtime exists in the persistent
+`/cli/gavel` directory. Run Gavel commands from that directory. Skill resources
+are instructions, not a bundled copy of the application runtime.
+
+Never place private profiles, preferences, predictions, or prepared transactions
+inside the installed skill directory. Keep them in `/cli/gavel/data/private/`,
+which is excluded from Git, and verify they survive a later session before
+claiming persistence works.
+
 ## Route by user intent
 
 | User intent | Workflow |
 | --- | --- |
 | "Onboard me", "learn my voting", "sync my history" | Follow `references/gavel-workflows.md` → Onboard and sync |
+| "Install Gavel", first Gavel request, or missing runtime | Follow `references/bankr-runtime.md` → Install or verify runtime |
 | "What did you learn?", "show my profile" | Follow `references/gavel-workflows.md` → Explain the profile |
 | "I changed my mind", "remember that I…", "your call was wrong" | Follow `references/policy-and-corrections.md` → Preference or correction |
 | "Always…", "never…", "flag anything over…" | Follow `references/policy-and-corrections.md` → Hard rule |
