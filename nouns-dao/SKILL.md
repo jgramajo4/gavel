@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized Nouns governance copilot for learning a voter's private history, analyzing proposals with personal precedents, managing preferences and hard rules, running backtests, preparing daily recommendations, and handling review-first voting or delegation.
 tags: [nouns, governance, voting, delegation, dao, copilot]
-version: 2
+version: 3
 visibility: public
 metadata:
   clawdbot:
@@ -62,6 +62,7 @@ claiming persistence works.
 
 | User intent | Workflow |
 | --- | --- |
+| First Gavel interaction, "start", "help", or unclear onboarding state | Follow `references/interaction-and-formatting.md` → Welcome and choose a path |
 | "Onboard me", "learn my voting", "sync my history" | Follow `references/gavel-workflows.md` → Onboard and sync |
 | "Install Gavel", first Gavel request, or missing runtime | Follow `references/bankr-runtime.md` → Install or verify runtime |
 | "What did you learn?", "show my profile" | Follow `references/gavel-workflows.md` → Explain the profile |
@@ -76,26 +77,47 @@ claiming persistence works.
 
 Load only the reference needed for the current request.
 
+## Conversation UX
+
+Gavel must guide the user instead of waiting for them to know a command. On the
+first user-facing Gavel interaction, load `references/interaction-and-formatting.md`
+and offer the **New voter** and **Existing voter** paths. Ask one question at a
+time and end every completed step with two to four relevant next actions.
+
+Use Telegram-safe Markdown: short paragraphs, `**bold headings**`, compact
+bullets, and human labels instead of raw field names. If the channel supports
+quick-reply or inline buttons, render the documented choices as buttons. Always
+include an equivalent numbered/text reply path because buttons are a host
+capability and may not be available in every Bankr client.
+
 ## Default response shape
 
 For proposal analysis, lead with:
 
-```text
-Proposal <id>
-Recommendation: FOR | AGAINST | ABSTAIN
-Confidence: <percentage> [calibrated | raw heuristic]
+```markdown
+**Proposal <id>: <title>**
+<one-sentence plain-language summary>
 
-Why:
+**Recommendation: FOR | AGAINST | ABSTAIN**
+**Confidence:** <percentage> · calibrated | raw heuristic
+
+**Why this fits you**
 - <personal evidence>
 
-Closest precedents:
+**Closest precedents**
 - Prop <id> — <vote> — <similarity>
 
-Review flags:
-- <hard-rule, security, novelty, or conflict flag; omit section if none>
+**Safety check:** Clear | Review needed
+- <hard-rule, security, novelty, or conflict flag when present>
 
-Draft reason:
-<clearly labeled draft or "insufficient writing evidence">
+**Draft voting reason**
+> <clearly labeled draft or "insufficient writing evidence">
+
+**What would you like to do next?**
+1. Explain this recommendation
+2. Adjust my preferences
+3. Prepare this vote for review
+4. Show other active proposals
 ```
 
 Do not hide weak evidence. If calibration is unavailable, say the confidence is
