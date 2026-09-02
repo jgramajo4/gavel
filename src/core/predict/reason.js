@@ -7,7 +7,7 @@ const CATEGORY_PHRASES = Object.freeze({
   [ProfileCategory.RETROACTIVE_FUNDING]: "retroactive funding",
   [ProfileCategory.GOVERNANCE_UPGRADE]: "governance changes",
   [ProfileCategory.PROTOCOL_DEVELOPMENT]: "protocol development",
-  [ProfileCategory.MARKETING]: "marketing spending",
+  [ProfileCategory.MARKETING]: "brand and marketing initiatives",
   [ProfileCategory.EVENTS]: "event funding",
   [ProfileCategory.EXPERIMENTAL]: "experimental initiatives",
   [ProfileCategory.AUCTION]: "auction policy",
@@ -15,7 +15,20 @@ const CATEGORY_PHRASES = Object.freeze({
 });
 
 function mainCategory(categories) {
-  return categories.find((category) => category !== ProfileCategory.TREASURY) || categories[0];
+  const priority = [
+    ProfileCategory.MARKETING,
+    ProfileCategory.EVENTS,
+    ProfileCategory.PUBLIC_GOODS,
+    ProfileCategory.GOVERNANCE_UPGRADE,
+    ProfileCategory.RECURRING_FUNDING,
+    ProfileCategory.RETROACTIVE_FUNDING,
+    ProfileCategory.AUCTION,
+    ProfileCategory.EXPERIMENTAL,
+    ProfileCategory.PROTOCOL_DEVELOPMENT,
+    ProfileCategory.TREASURY,
+    ProfileCategory.OTHER,
+  ];
+  return priority.find((category) => categories.includes(category)) || categories[0];
 }
 
 function generateDraftReason({ profile, recommendation, precedents, confidence, policySource, targetFacts }) {

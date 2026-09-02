@@ -15,17 +15,22 @@ say so briefly rather than manufacturing engagement.
    fetch → inspect → predict workflow in `gavel-workflows.md`.
 3. Rank ending-soon proposals first, then high-confidence recommendations, then
    low-confidence/manual-review items.
-4. Keep the first view compact:
+4. Keep the first view compact and phone-friendly:
 
-   ```text
-   Gavel Daily
-   2 proposals need attention.
+   ```markdown
+   **Gavel Daily ⚖️**
+   **2 proposals need your attention**
 
-   Prop 123 — FOR · 84% calibrated
+   **Prop 123 — FOR · 84% calibrated**
    Strong personal precedent; no hard rule triggered.
 
-   Prop 124 — AGAINST · 61% raw
+   **Prop 124 — AGAINST · 61% not yet calibrated**
    Weak precedent; security review required.
+
+   **What next?**
+   1. Review Prop 123
+   2. Review Prop 124
+   3. Show all active proposals
    ```
 
 5. Offer evidence, precedents, and draft reasons on drill-down. Never send a

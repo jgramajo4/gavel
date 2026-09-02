@@ -14,6 +14,7 @@ const requiredReferences = [
   "policy-and-corrections.md",
   "daily-and-review.md",
   "legacy-nouns-tools.md",
+  "interaction-and-formatting.md",
 ];
 
 test("declares Gavel as a discoverable personalized governance copilot", () => {
@@ -62,6 +63,28 @@ test("ships concise on-demand references in the Bankr skill directory", () => {
     assert.ok(stat.size < 100_000, `${filename} must stay below Bankr's reference limit`);
     assert.ok(skill.includes(`references/${filename}`), `${filename} must be routed from SKILL.md`);
   }
+});
+
+test("guides new and existing voters with mobile-friendly next actions", () => {
+  const interaction = fs.readFileSync(
+    path.join(root, "nouns-dao", "references", "interaction-and-formatting.md"),
+    "utf8",
+  );
+  const workflows = fs.readFileSync(
+    path.join(root, "nouns-dao", "references", "gavel-workflows.md"),
+    "utf8",
+  );
+
+  assert.match(skill, /first user-facing Gavel interaction/i);
+  assert.match(interaction, /\*\*New voter\*\*/);
+  assert.match(interaction, /\*\*Existing voter\*\*/);
+  assert.match(interaction, /Ask exactly one question at a time/i);
+  assert.match(interaction, /quick-reply or inline-button capability/i);
+  assert.match(interaction, /equivalent\s+numbered\/text reply path/i);
+  assert.match(interaction, /\*\*What would you like to do next\?\*\*/);
+  assert.match(interaction, /never your private key/i);
+  assert.match(workflows, /### New voter[\s\S]*eight fixed[\s\S]*one at a time/i);
+  assert.match(workflows, /### Existing voter/);
 });
 
 test("defines a persistent self-installing Bankr runtime boundary", () => {

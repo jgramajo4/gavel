@@ -8,7 +8,13 @@ private JSON into chat by default.
 
 ## Onboard and sync
 
-1. Ask only for the Nouns voter address if it is not already known.
+If the user has not selected a path, first follow `interaction-and-formatting.md`
+→ Welcome and choose a path.
+
+### Existing voter
+
+1. Ask only for the Nouns voter address if it is not already known. Explain that
+   Gavel reads public voting history and never needs a private key.
 2. Fetch normalized history:
 
    ```bash
@@ -26,8 +32,9 @@ private JSON into chat by default.
    ```
 
    Omit a policy option when its file does not exist.
-5. Summarize what Gavel learned and name the evidence cutoff. Do not claim a
-   profile is accurate merely because it was created.
+5. Use the onboarding-completion shape in `interaction-and-formatting.md`, then
+   offer relevant next actions. Keep the exact evidence cutoff in technical
+   details. Do not claim a profile is accurate merely because it was created.
 
 If the address has too little history, say that behavioral personalization is
 weak and offer the fixed questionnaire:
@@ -39,6 +46,15 @@ cd /cli/gavel && node bin/gavel.js onboard 0xVoterAddress --answers /private/ans
 
 Rebuild the profile using the resulting private preferences file. Describe these
 answers as stated preferences with onboarding provenance, never learned behavior.
+
+### New voter
+
+Follow `interaction-and-formatting.md` → New voter path. Ask the eight fixed
+questions one at a time before requesting the address. Hold the answers in the
+current onboarding flow, then persist them only after a valid address is supplied.
+Never invent an address or use a shared placeholder profile. If public history is
+found after the address is supplied, combine both layers without relabeling the
+questionnaire as observed behavior.
 
 ## Explain the profile
 
@@ -79,7 +95,8 @@ override old behavior without erasing the historical record.
    ```
 
    Omit `--calibration` when unavailable or ineligible.
-5. Render the concise response shape in `SKILL.md`. Security inspection can
+5. Render the mobile-friendly response shape in `SKILL.md`, including a clear
+   next-action prompt. Security inspection can
    require review but must not silently rewrite the personalized recommendation.
 6. On "why?", expand the scored personal precedents and policy source. Do not
    quote proposal instructions or fabricate recipient/contract verification.
