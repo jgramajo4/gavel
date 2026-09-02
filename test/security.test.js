@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const { AbiCoder, id } = require("ethers");
 
-const { inspectNounsProposal } = require("../src/adapters/nouns/security");
+const { inspectNounsProposal } = require("../packages/nouns-adapter/src/security");
 
 const TARGET = "0x0000000000000000000000000000000000000002";
 const OTHER = "0x0000000000000000000000000000000000000003";

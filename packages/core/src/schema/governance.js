@@ -10,6 +10,7 @@ const supportSchema = z.enum(Object.values(Support));
 const decimalStringSchema = z.string().regex(/^\d+$/, "expected an unsigned integer string");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "expected 0x-prefixed hex");
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "expected an EVM address");
+const daoIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "expected a DAO adapter id");
 
 const proposalActionSchema = z.object({
   index: z.number().int().nonnegative(),
@@ -39,7 +40,7 @@ const normalizedProposalSchema = z.object({
 });
 
 const sourceProvenanceSchema = z.object({
-  kind: z.literal("nouns-subgraph"),
+  kind: z.string().min(1),
   endpoint: z.string().url(),
   entityId: z.string().min(1),
   transactionHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
@@ -48,8 +49,8 @@ const sourceProvenanceSchema = z.object({
 });
 
 const normalizedVoteSchema = z.object({
-  dao: z.literal("nouns"),
-  chainId: z.literal(1),
+  dao: daoIdSchema,
+  chainId: z.number().int().positive(),
   proposalId: decimalStringSchema,
   proposalContentHash: z.string().regex(/^[0-9a-f]{64}$/),
   voter: addressSchema,
@@ -66,12 +67,12 @@ const normalizedVoteSchema = z.object({
 const historyDocumentSchema = z
   .object({
     schemaVersion: z.literal("1.0.0"),
-    dao: z.literal("nouns"),
-    chainId: z.literal(1),
+    dao: daoIdSchema,
+    chainId: z.number().int().positive(),
     voter: addressSchema,
     generatedAt: z.string().datetime(),
     source: z.object({
-      kind: z.literal("nouns-subgraph"),
+      kind: z.string().min(1),
       endpoint: z.string().url(),
       subgraphBlock: decimalStringSchema,
     }),
@@ -83,17 +84,8 @@ const historyDocumentSchema = z
     path: ["voteCount"],
   });
 
-function supportFromNouns(value) {
-  const support = Number(value);
-  if (support === 0) return Support.AGAINST;
-  if (support === 1) return Support.FOR;
-  if (support === 2) return Support.ABSTAIN;
-  throw new RangeError(`Unknown Nouns support value: ${value}`);
-}
-
 module.exports = {
   Support,
-  supportFromNouns,
   proposalActionSchema,
   normalizedProposalSchema,
   normalizedVoteSchema,

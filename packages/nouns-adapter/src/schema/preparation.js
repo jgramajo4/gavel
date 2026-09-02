@@ -1,7 +1,8 @@
 const { z } = require("zod");
 
-const { Support } = require("./governance");
-const { securityFlagSchema } = require("./security");
+const { Support } = require("../../../core/src/schema/governance");
+const { securityFlagSchema } = require("../../../core/src/schema/security");
+const { addressRolesSchema } = require("../../../core/src/schema/execution");
 
 const decimalStringSchema = z.string().regex(/^\d+$/);
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/);
@@ -23,6 +24,7 @@ const votePreparationSchema = z
     proposalContentHash: z.string().regex(/^[0-9a-f]{64}$/),
     modelVoter: addressSchema,
     votingAddress: addressSchema,
+    addressRoles: addressRolesSchema,
     recommendation: supportSchema,
     selectedSupport: supportSchema,
     confidencePercent: z.number().int().min(0).max(100),
@@ -73,6 +75,9 @@ const votePreparationSchema = z
       }),
       delegation: z.object({
         modelVoterDelegatee: addressSchema,
+        assetOwnerAddress: addressSchema,
+        currentDelegateAddress: addressSchema,
+        requiredDelegateAddress: addressSchema,
         matchesVotingAddress: z.boolean(),
       }),
       simulation: z.object({

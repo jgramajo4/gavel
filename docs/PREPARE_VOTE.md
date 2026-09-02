@@ -19,12 +19,11 @@ Set `ETHEREUM_RPC_URL` or pass `--rpc`. No private key is read. The selected
 support is mandatory and must confirm the prediction. When no `--reason` is
 provided, Gavel uses the clearly marked prediction draft if one exists.
 
-The prediction address remains the private model owner. If a distinct delegated
-wallet will cast the vote, pass `--from 0xVotingAddress`. Gavel checks that
-address's receipt and snapshot voting power, uses it as the unsigned
-transaction's `from`, and separately reports the model address's current
-delegatee. This avoids confusing the person being modeled with the operational
-wallet.
+The prediction address remains `modelAddress`. If the token owner and voting
+address differ, pass `--asset-owner 0xColdAddress` and
+`--execution-address 0xVotingAddress`; `--from` remains a compatibility alias
+for the latter. Gavel checks the execution address's receipt and snapshot power,
+the asset owner's current delegate, and reports all address roles explicitly.
 
 If proposal security reports require human review, inspect the findings first
 and then pass `--acknowledge-security-review`. Critical findings cannot be
@@ -44,8 +43,8 @@ Before returning a transaction, Gavel verifies:
    description/version as the inspected input;
 6. the proposal is currently Active;
 7. the voter has not already voted;
-8. the selected voting address had nonzero voting power at the proposal snapshot
-   block, with the model address's current delegatee reported separately;
+8. the execution address had nonzero voting power at the proposal snapshot
+   block and the asset owner delegates to that required execution address;
 9. the selected support exactly confirms the recommendation;
 10. required security review is acknowledged; and
 11. `eth_call` and gas estimation succeed from the voter address.

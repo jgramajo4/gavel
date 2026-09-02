@@ -10,7 +10,7 @@ const {
   GOVERNANCE_ADDRESS,
   canonicalActions,
   NounsVotePreparationAdapter,
-} = require("../src/adapters/nouns/vote");
+} = require("../packages/nouns-adapter/src/vote");
 
 const VOTER = "0x1111111111111111111111111111111111111111";
 const TARGET = "0x2222222222222222222222222222222222222222";

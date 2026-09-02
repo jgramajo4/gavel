@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {
   assertNoTemporalLeakage,
   chronologicalHoldouts,
-} = require("../src/core/backtest/chronology");
+} = require("../packages/core/src/backtest/chronology");
 
 function record(id, blockNumber, outcome = "EXECUTED") {
   return {

@@ -1,0 +1,17 @@
+module.exports = {
+  ...require("./src/schema/governance"),
+  ...require("./src/schema/execution"),
+  ...require("./src/profile/build"),
+  ...require("./src/profile/onboarding"),
+  ...require("./src/predict/predict"),
+  ...require("./src/backtest/calibration"),
+  ...require("./src/backtest/run"),
+  ...require("./src/operations/failure"),
+  ...require("./src/execution/readiness"),
+  ...require("./src/execution/transaction-binding"),
+  ...require("./src/execution/executors/unsigned"),
+  ...require("./src/execution/executors/safe"),
+  ...require("./src/execution/executors/waap"),
+  ...require("./src/dao/registry"),
+  ...require("./src/storage/private-state"),
+};

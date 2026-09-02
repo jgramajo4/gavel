@@ -1,16 +1,24 @@
 const { createHash } = require("node:crypto");
 const { getAddress } = require("ethers");
 
-const { GovernanceHistoryAdapter } = require("../../core/history/adapter");
+const { GovernanceHistoryAdapter } = require("../../core/src/history/adapter");
 const {
   historyDocumentSchema,
   normalizedProposalSchema,
   normalizedVoteSchema,
-  supportFromNouns,
-} = require("../../core/schema/governance");
+} = require("../../core/src/schema/governance");
+const { Support } = require("../../core/src/schema/governance");
 
 const DEFAULT_ENDPOINT = "https://www.nouns.camp/subgraphs/nouns";
 const DEFAULT_PAGE_SIZE = 100;
+
+function supportFromNouns(value) {
+  const support = Number(value);
+  if (support === 0) return Support.AGAINST;
+  if (support === 1) return Support.FOR;
+  if (support === 2) return Support.ABSTAIN;
+  throw new RangeError(`Unknown Nouns support value: ${value}`);
+}
 
 const PROPOSAL_FIELDS = `
     id
@@ -291,6 +299,7 @@ class NounsSubgraphHistoryAdapter extends GovernanceHistoryAdapter {
 
 module.exports = {
   DEFAULT_ENDPOINT,
+  supportFromNouns,
   SNAPSHOT_QUERY,
   HISTORY_QUERY,
   PROPOSAL_QUERY,

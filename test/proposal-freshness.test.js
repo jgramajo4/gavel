@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { canonicalProposalVersion, proposalEvents } = require("../src/adapters/nouns/freshness");
+const { canonicalProposalVersion, proposalEvents } = require("../packages/nouns-adapter/src/freshness");
 
 const GOVERNANCE = "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d";
 const PROPOSER = "0x3333333333333333333333333333333333333333";

@@ -1,12 +1,12 @@
 const { AbiCoder, Interface, formatEther, getAddress, id } = require("ethers");
 
-const { normalizedProposalSchema } = require("../../core/schema/governance");
-const { proposalSecurityReportSchema } = require("../../core/schema/security");
+const { normalizedProposalSchema } = require("../../core/src/schema/governance");
+const { proposalSecurityReportSchema } = require("../../core/src/schema/security");
 const {
   detectUntrustedInstructions,
   parseEthClaims,
   parseRecipientClaims,
-} = require("../../core/security/content");
+} = require("../../core/src/security/content");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const RISK_ORDER = Object.freeze({ CLEAR: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 });

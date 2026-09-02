@@ -5,15 +5,15 @@ actually governed, finds relevant precedents in their own record, recommends
 `FOR`, `AGAINST`, or `ABSTAIN` on new proposals, explains the recommendation,
 and can prepare a vote transaction for review.
 
-Nouns is the first DAO adapter and Bankr is the first agent runtime. The core
-history, profile, rules, prediction, confidence, voice, and backtesting layers
-are designed to remain independent of both.
+Gavel is one monorepo and one canonical governance engine. Nouns is the first
+DAO adapter; Bankr and Hermes are thin runtime integrations. Any compatible
+agent or shell can use the same machine-readable `gavel` CLI.
 
 ```text
 Nouns API / chain
        |
        v
-  Nouns adapter -----> normalized private history
+ packages/nouns-adapter -----> normalized private history
                               |
                               v
  observed behavior + stated preferences + hard rules
@@ -22,20 +22,22 @@ Nouns API / chain
  precedents -> prediction -> confidence -> proposal security -> draft reason
                               |
                               v
-                    prepare Nouns vote transaction
+                validated governance transaction
                               |
                               v
-                 adapter injects builder clientId 38
+                 unsigned / Safe / scoped WaaP
 ```
 
 
 ## Status
 
-The existing `nouns-dao/` Bankr skill contains working Nouns transaction tools.
-The new `src/` tree is the beginning of the Gavel intelligence layer. It ingests
-and normalizes a voter's Nouns history, then builds a private three-layer voter
-profile with recency-weighted observed behavior, timestamped stated preferences,
-and deterministic hard rules.
+The canonical packages are `packages/core`, `packages/nouns-adapter`, and
+`packages/cli`. The root `bin/gavel.js` and `nouns-dao/` Bankr skill remain as
+verified compatibility entry points. `packages/tui` and `packages/server` are
+reserved boundaries; the TUI migration is audited but intentionally non-blocking.
+
+See [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md)
+for the pre-change audit and staged migration map.
 
 ## Requirements
 
@@ -54,8 +56,9 @@ npm run gavel -- history 0xYourVoterAddress
 ```
 
 By default, Gavel writes the normalized record under
-`data/private/nouns/<address>.json`. That directory is gitignored. To choose a
-different destination:
+`data/private/nouns/<address>.json`. Set `GAVEL_DATA_DIR` to let a host runtime
+choose a durable private location; no Bankr path is hard-coded in core. To
+choose one output file directly:
 
 ```bash
 npm run gavel -- history 0xYourVoterAddress --output ./history.json
@@ -155,9 +158,37 @@ simulation. A failed gate returns `BLOCKED` with no transaction. A passing gate
 returns unsigned calldata for a separate wallet approval flow; it never signs or
 broadcasts. See [`docs/PREPARE_VOTE.md`](docs/PREPARE_VOTE.md).
 
-For a separate delegated voting wallet, add `--from 0xVotingAddress`. Gavel
-keeps the modeled historical voter distinct from the address whose receipt,
-snapshot power, simulation, and unsigned transaction are checked.
+For a separate delegated voting wallet, `--from 0xVotingAddress` remains a
+compatibility alias. New integrations should use `--asset-owner` and
+`--execution-address`. Gavel keeps `modelAddress`, `assetOwnerAddress`,
+`currentDelegateAddress`, `executionAddress`, and `requiredDelegateAddress`
+explicit and distinct.
+
+## Execution readiness and delegation
+
+Runtime and wallet are independent choices. Check the selected execution mode
+before preparation or submission:
+
+```bash
+gavel execution-status --dao nouns --mode safe-supervised --model-address 0xMODEL
+gavel execution-status --dao nouns --mode waap-autonomous --model-address 0xMODEL
+```
+
+The JSON response reports current/required delegates, voting power,
+`redelegationRequired`, and `canVote`. RPC uncertainty fails closed. Prepare an
+explicit unsigned delegation change with:
+
+```bash
+gavel prepare-delegation --dao nouns --asset-owner-address 0xCOLD --to 0xNEWDELEGATE
+```
+
+Safe execution uses a proposer-only client and preserves human approval; no Safe
+owner key is required. WaaP execution is available only when the registered DAO
+adapter explicitly enables autonomy, the action is allowlisted, delegation and
+address roles match, and a policy hook approves the immutable prepared intent.
+Live WaaP broadcast is intentionally left to an official deterministic client.
+See [`docs/execution/safe.md`](docs/execution/safe.md) and
+[`docs/execution/waap.md`](docs/execution/waap.md).
 
 ## Proposal security
 
@@ -215,8 +246,9 @@ one voter's model with another voter.
   only when a chronological backtest bucket meets its minimum evidence count.
 - Unknown arbitrary calldata is flagged for human review. Preparation requires
   explicit review acknowledgement, and critical findings remain blocked.
-- Gavel produces unsigned vote calldata only. Wallet approval, signing,
-  broadcasting, and receipt monitoring remain outside the preparation command.
+- Canonical preparation produces immutable validated calldata. Unsigned mode
+  stops there; Safe can propose for human approval, while WaaP remains adapter-
+  and policy-scoped.
 - The Phase 9 gate status and reproducible evidence are maintained in
   [`docs/PHASE9_LAUNCH_READINESS.md`](docs/PHASE9_LAUNCH_READINESS.md).
 
@@ -231,3 +263,9 @@ delegation workflows. The older chain scripts remain documented in
 [`nouns-dao/README.md`](nouns-dao/README.md) as secondary developer tools while
 their reusable interactions move behind the Nouns adapter. Direct-broadcast
 scripts are not the default Gavel user experience.
+
+## License
+
+Gavel is licensed under GPL-3.0. The audited TUI is GPL-3.0-or-later; current
+runtime dependencies are permissively licensed and no consolidation conflict
+was identified.
