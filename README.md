@@ -49,6 +49,206 @@ npm install
 npm test
 ```
 
+## Choose how to run Gavel
+
+The runtime changes how people interact with Gavel, but not how governance is
+analyzed or validated. All supported runtimes should call the canonical CLI and
+keep private state in a runtime-owned `GAVEL_DATA_DIR`.
+
+| Method | Best for | Current status | Transaction boundary |
+| --- | --- | --- | --- |
+| [Bankr](#bankr) | A conversational governance copilot | Supported through the `nouns-dao` compatibility skill | Unsigned preparation by default; legacy signing scripts are separate |
+| [BYOH](#byoh-bring-your-own-harness) | Any agent framework, shell, scheduler, or local application | Supported through the JSON CLI | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
+| [TUI](#terminal-ui-tui) | Interactive proposal browsing in a real terminal | Separate legacy application; consolidation is not complete | Read-only unless its separate direct-signing path is enabled |
+| [Headless / Railway](#headless-on-railway) | Scheduled ingestion, analysis, and JSON-producing jobs | CLI jobs are supported; an HTTP service is not yet shipped | Use unsigned output or an external supported executor |
+
+Whichever method you choose, start with read-only history, profile, proposal,
+prediction, and inspection commands. Preparing a transaction does not authorize
+its submission.
+
+### Shared configuration
+
+Inject configuration through the host's secret or environment-variable system;
+do not commit a populated `.env` file.
+
+| Variable | Required when | Meaning |
+| --- | --- | --- |
+| `GAVEL_DATA_DIR` | Recommended for every persistent runtime | Private histories, profiles, policies, proposals, predictions, and prepared transactions |
+| `NOUNS_SUBGRAPH_URL` | Optional | Override the default Nouns governance subgraph |
+| `ETHEREUM_RPC_URL` | Chain verification, readiness, delegation, and vote preparation | Ethereum mainnet JSON-RPC endpoint |
+| `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
+| `GAVEL_ASSET_OWNER_ADDRESS` | Delegated voting | Address that owns the Noun or voting power |
+| `GAVEL_SAFE_ADDRESS` | Safe-supervised execution | Safe that must receive delegated voting power and propose the validated vote |
+| `GAVEL_WAAP_ADDRESS` | WaaP-autonomous execution | Policy-controlled execution address that must receive delegated voting power |
+
+`AGENT_PRIVATE_KEY` is only for the explicitly legacy scripts under
+`nouns-dao/scripts/`. The canonical CLI, core, and executor boundaries do not
+read it.
+
+### Bankr
+
+Bankr supplies the conversation and tool runtime; Gavel remains the governance
+engine. Install or expose [`nouns-dao/`](nouns-dao/) as the Gavel skill, then
+install the repository into Bankr's persistent CLI workspace with Bankr's
+`execute_cli` tool:
+
+```bash
+git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git /cli/gavel
+cd /cli/gavel
+npm ci
+npm test
+```
+
+Set these in Bankr's secure environment settings:
+
+```text
+GAVEL_DATA_DIR=/cli/gavel/data/private
+ETHEREUM_RPC_URL=<ethereum-mainnet-rpc>
+```
+
+The RPC variable is only needed for chain-backed checks and transaction
+preparation. No private key is required for the canonical Gavel workflow.
+
+People can then use natural-language requests such as:
+
+- “Onboard me with voter address `0x…`.”
+- “Sync my Nouns voting history and explain what you learned.”
+- “Analyze proposal 123 using my profile.”
+- “Prepare a FOR vote for review; do not submit it.”
+- “Check whether my Safe is ready to vote.”
+
+The skill routes those requests to the canonical command form:
+
+```bash
+cd /cli/gavel && node bin/gavel.js <command>
+```
+
+Private artifacts stay under `/cli/gavel/data/private/` and should never be
+copied into the skill directory or pasted into chat. Confirm persistence across
+a new Bankr conversation before relying on it. See the complete
+[`Bankr runtime guide`](nouns-dao/references/bankr-runtime.md) and
+[`Bankr integration boundary`](integrations/bankr/README.md).
+
+### BYOH: bring your own harness
+
+BYOH means any agent framework or program can orchestrate Gavel without importing
+Bankr-specific code. Install Node.js 20+, clone the repository, run `npm ci`, and
+invoke `gavel` as a subprocess. Successful commands emit JSON summaries; add
+`--stdout` when the caller needs the complete artifact on standard output and set
+`GAVEL_STRUCTURED_ERRORS=1` when it needs machine-readable errors.
+
+A complete explicit-file workflow looks like this in a POSIX shell:
+
+```bash
+export GAVEL_DATA_DIR="$PWD/private/alice"
+export ETHEREUM_RPC_URL="https://your-mainnet-rpc.example"
+export VOTER="0xYourVoterAddress"
+
+npm run gavel -- history "$VOTER" --output "$GAVEL_DATA_DIR/history.json"
+npm run gavel -- profile "$GAVEL_DATA_DIR/history.json" --output "$GAVEL_DATA_DIR/profile.json"
+npm run gavel -- proposal 123 --output "$GAVEL_DATA_DIR/proposal-123.json"
+npm run gavel -- predict "$GAVEL_DATA_DIR/profile.json" "$GAVEL_DATA_DIR/proposal-123.json" --output "$GAVEL_DATA_DIR/prediction-123.json"
+npm run gavel -- inspect "$GAVEL_DATA_DIR/proposal-123.json" --stdout
+npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --stdout
+```
+
+An orchestrator must treat a nonzero exit, `BLOCKED`, or uncertain RPC result as
+a hard stop. It must also keep recommendation, human review, preparation, and
+submission as separate steps. See [`docs/runtimes/generic-cli.md`](docs/runtimes/generic-cli.md)
+for the stable interface contract.
+
+For delegated execution, check readiness before preparing a vote:
+
+```bash
+npm run gavel -- execution-status \
+  --dao nouns \
+  --mode safe-supervised \
+  --model-address 0xMODEL \
+  --asset-owner-address 0xOWNER \
+  --execution-address 0xSAFE
+```
+
+If `redelegationRequired` is true, prepare—but do not submit—the delegation
+transaction with `npm run gavel -- prepare-delegation`. Safe mode only proposes
+the exact validated transaction for human owner approval. WaaP mode additionally
+requires an autonomy-enabled DAO adapter, an allowlisted action, matching address
+and chain scope, and a positive policy decision. No live WaaP broadcaster is
+bundled.
+
+### Terminal UI (TUI)
+
+`packages/tui` currently reserves the consolidated TUI package name; it does not
+yet contain a runnable application. The existing interface remains in the
+separate [`jgramajo4/Gavel-TUI`](https://github.com/jgramajo4/Gavel-TUI)
+repository and can be evaluated from a real terminal:
+
+```bash
+git clone https://github.com/jgramajo4/Gavel-TUI.git
+cd Gavel-TUI
+npm install
+npm run typecheck
+npm run dev
+```
+
+That legacy TUI uses `RPC_URL` rather than `ETHEREUM_RPC_URL`. Without
+`GAVEL_PRIVATE_KEY` it operates read-only. Supplying that variable enables the
+TUI's own direct-signing code, which predates Gavel's canonical preparation,
+Safe, and WaaP boundaries; do not treat it as the production execution path.
+Its PASS/FAIL prediction model and local cache also differ from the canonical
+history-first engine.
+
+The migration will retain the Ink screens and keyboard navigation while replacing
+duplicated data, prediction, address, ABI, and transaction modules with
+`@gavel/core`, `@gavel/nouns-adapter`, and the stable CLI. Track the audited plan
+in [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md).
+
+### Headless on Railway
+
+The supported Railway shape today is a one-shot or scheduled CLI worker. Gavel
+does not yet ship `gavel serve`, an HTTP API, a listening `PORT`, or a health
+endpoint: [`packages/server`](packages/server/) is an intentionally empty
+boundary. Do not deploy the TUI to Railway because it requires an interactive
+TTY.
+
+To deploy a headless job:
+
+1. Create a Railway service from your GitHub fork of this repository.
+2. Set the build command to `npm ci`.
+3. Add a persistent volume mounted at `/data`.
+4. Add service variables:
+
+   ```text
+   GAVEL_DATA_DIR=/data/gavel
+   ETHEREUM_RPC_URL=<ethereum-mainnet-rpc>
+   NOUNS_SUBGRAPH_URL=https://www.nouns.camp/subgraphs/nouns
+   GAVEL_STRUCTURED_ERRORS=1
+   ```
+
+5. Set a start command that performs one bounded operation and exits. For
+   example, a scheduled history refresh is:
+
+   ```bash
+   npm run gavel -- history 0xYourVoterAddress
+   ```
+
+6. Configure the service as a Railway Cron Job if it should run on a schedule.
+   Create separate jobs or a small BYOH orchestrator for multi-step workflows;
+   do not encode transaction submission into an unattended shell chain.
+
+Railway mounts volumes only when the service starts, so state-producing Gavel
+commands belong in the start command, not a build or pre-deploy command. Mounting
+at `/data` and setting `GAVEL_DATA_DIR=/data/gavel` keeps private artifacts away
+from Railway's ephemeral application filesystem. See Railway's official guides
+for [services](https://docs.railway.com/services),
+[start commands](https://docs.railway.com/builds/build-and-start-commands),
+[volumes](https://docs.railway.com/volumes),
+[variables](https://docs.railway.com/variables), and
+[cron jobs](https://docs.railway.com/cron-jobs).
+
+The first future HTTP deployment should use `packages/server` and the same core,
+adapter, storage, and execution boundaries. Until that server exists, exposing a
+public Railway domain does not make the CLI an API.
+
 ## Historical vote ingestion
 
 ```bash
