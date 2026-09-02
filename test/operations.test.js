@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { classifyOperationalFailure, safeOperationMessage } = require("../src/core/operations/failure");
+const { classifyOperationalFailure, safeOperationMessage } = require("../packages/core/src/operations/failure");
 
 test("classifies retryable infrastructure separately from stale and user failures", () => {
   assert.deepEqual(classifyOperationalFailure("history", new Error("fetch timeout")).category, "RETRYABLE_INFRASTRUCTURE");

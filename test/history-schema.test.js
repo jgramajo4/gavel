@@ -4,13 +4,13 @@ const assert = require("node:assert/strict");
 const {
   Support,
   historyDocumentSchema,
-  supportFromNouns,
-} = require("../src/core/schema/governance");
+} = require("../packages/core/src/schema/governance");
 const {
   normalizeVote,
   proposalContentHash,
   proposalOutcome,
-} = require("../src/adapters/nouns/history");
+  supportFromNouns,
+} = require("../packages/nouns-adapter/src/history");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 

@@ -1,10 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { buildVoterProfile } = require("../src/core/profile/build");
-const { predictVote } = require("../src/core/predict/predict");
-const { amountSimilarity, precedentSimilarity } = require("../src/core/predict/similarity");
-const { ProfileCategory } = require("../src/core/schema/profile");
+const { buildVoterProfile } = require("../packages/core/src/profile/build");
+const { predictVote } = require("../packages/core/src/predict/predict");
+const { amountSimilarity, precedentSimilarity } = require("../packages/core/src/predict/similarity");
+const { ProfileCategory } = require("../packages/core/src/schema/profile");
+const { inspectNounsProposal } = require("../packages/nouns-adapter/src/security");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 const RECIPIENT = "0x0000000000000000000000000000000000000002";
@@ -92,7 +93,12 @@ function profile(votes, options = {}) {
 }
 
 function predict(profileDocument, target = proposal(99), options = {}) {
-  return predictVote(profileDocument, target, { generatedAt: AS_OF, asOf: AS_OF, ...options });
+  return predictVote(profileDocument, target, {
+    generatedAt: AS_OF,
+    asOf: AS_OF,
+    proposalInspector: inspectNounsProposal,
+    ...options,
+  });
 }
 
 test("similarity combines category, amount, recipient, and title signals", () => {

@@ -6,7 +6,6 @@ const { resolveLayeredPolicy } = require("../profile/policy");
 const { heuristicConfidence } = require("./confidence");
 const { generateDraftReason } = require("./reason");
 const { retrievePrecedents } = require("./similarity");
-const { inspectNounsProposal } = require("../../adapters/nouns/security");
 
 const SUPPORT_ORDER = [Support.FOR, Support.AGAINST, Support.ABSTAIN];
 const DEFAULT_THRESHOLD = 0.15;
@@ -134,7 +133,8 @@ function predictVote(profileInput, proposalInput, options = {}) {
   }
 
   const targetFacts = extractProposalFacts(proposal);
-  const security = profile.dao === "nouns" ? inspectNounsProposal(proposal) : null;
+  const security = options.securityReport ||
+    (typeof options.proposalInspector === "function" ? options.proposalInspector(proposal) : null);
   const precedents = retrievePrecedents(profile, proposal, {
     asOf,
     threshold,

@@ -1,0 +1,7 @@
+{
+  "name": "@gavel/integration-bankr",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Thin Bankr runtime integration for the canonical Gavel CLI.",
+  "license": "GPL-3.0-only"
+}

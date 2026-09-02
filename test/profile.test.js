@@ -1,11 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { buildVoterProfile } = require("../src/core/profile/build");
-const { extractProposalFacts } = require("../src/core/profile/features");
-const { resolveLayeredPolicy } = require("../src/core/profile/policy");
-const { recencyWeight } = require("../src/core/profile/recency");
-const { ProfileCategory, profileDocumentSchema } = require("../src/core/schema/profile");
+const { buildVoterProfile } = require("../packages/core/src/profile/build");
+const { extractProposalFacts } = require("../packages/core/src/profile/features");
+const { resolveLayeredPolicy } = require("../packages/core/src/profile/policy");
+const { recencyWeight } = require("../packages/core/src/profile/recency");
+const { ProfileCategory, profileDocumentSchema } = require("../packages/core/src/schema/profile");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 const RECIPIENT = "0x0000000000000000000000000000000000000002";

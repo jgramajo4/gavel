@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const { JsonRpcProvider } = require("ethers");
 
-const { NounsVotePreparationAdapter } = require("../src/adapters/nouns/vote");
+const { NounsVotePreparationAdapter } = require("../packages/nouns-adapter/src/vote");
 
 const configured = Boolean(
   process.env.MAINNET_FORK_RPC_URL &&

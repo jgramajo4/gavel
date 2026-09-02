@@ -1,8 +1,8 @@
 const { Contract, Interface, getAddress } = require("ethers");
 
-const { normalizedProposalSchema, Support } = require("../../core/schema/governance");
-const { predictionDocumentSchema } = require("../../core/schema/prediction");
-const { votePreparationSchema } = require("../../core/schema/preparation");
+const { normalizedProposalSchema, Support } = require("../../core/src/schema/governance");
+const { predictionDocumentSchema } = require("../../core/src/schema/prediction");
+const { votePreparationSchema } = require("./schema/preparation");
 const { canonicalProposalVersion } = require("./freshness");
 
 const CHAIN_ID = 1;
@@ -22,7 +22,9 @@ const GOVERNANCE_ABI = [
 ];
 const NOUNS_TOKEN_ABI = [
   "function getPriorVotes(address account,uint256 blockNumber) view returns (uint96)",
+  "function getCurrentVotes(address account) view returns (uint96)",
   "function delegates(address delegator) view returns (address)",
+  "function delegate(address delegatee)",
 ];
 const voteInterface = new Interface(GOVERNANCE_ABI);
 
@@ -94,7 +96,8 @@ class NounsVotePreparationAdapter {
     const prediction = predictionDocumentSchema.parse(input.prediction);
     const proposal = normalizedProposalSchema.parse(input.proposal);
     const modelVoter = getAddress(prediction.voter);
-    const votingAddress = getAddress(input.votingAddress || prediction.voter);
+    const assetOwnerAddress = getAddress(input.assetOwnerAddress || prediction.voter);
+    const votingAddress = getAddress(input.executionAddress || input.votingAddress || prediction.voter);
     const selectedSupport = String(input.selectedSupport || "").toUpperCase();
     if (!(selectedSupport in SUPPORT_CODES)) {
       throw new Error("selectedSupport must be AGAINST, FOR, or ABSTAIN");
@@ -140,7 +143,7 @@ class NounsVotePreparationAdapter {
         this.governance.getActions(proposal.id),
         this.governance.getReceipt(proposal.id, votingAddress),
         this.nounsToken.getPriorVotes(votingAddress, proposal.startBlock),
-        this.nounsToken.delegates(modelVoter),
+        this.nounsToken.delegates(assetOwnerAddress),
       ]);
 
     let canonicalVersion = null;
@@ -187,6 +190,10 @@ class NounsVotePreparationAdapter {
     const votingPower = decimal(votingPowerRaw, "snapshot voting power");
     if (BigInt(votingPower) === 0n) block("NO_SNAPSHOT_VOTING_POWER", `Address ${votingAddress} had no voting power at proposal snapshot block ${canonicalStartBlock}.`);
     const modelVoterDelegatee = getAddress(delegateeRaw);
+    const delegationMatches = modelVoterDelegatee === votingAddress;
+    if (!delegationMatches) {
+      block("DELEGATION_MISMATCH", `Asset owner ${assetOwnerAddress} delegates to ${modelVoterDelegatee}, not execution address ${votingAddress}.`);
+    }
 
     const data = voteInterface.encodeFunctionData("castRefundableVoteWithReason", [
       proposal.id,
@@ -227,6 +234,13 @@ class NounsVotePreparationAdapter {
       proposalContentHash: proposal.contentHash,
       modelVoter,
       votingAddress,
+      addressRoles: {
+        modelAddress: modelVoter,
+        assetOwnerAddress,
+        currentDelegateAddress: modelVoterDelegatee,
+        executionAddress: votingAddress,
+        requiredDelegateAddress: votingAddress,
+      },
       recommendation: prediction.recommendation,
       selectedSupport,
       confidencePercent: prediction.confidencePercent,
@@ -262,7 +276,10 @@ class NounsVotePreparationAdapter {
         votingPower: { snapshotBlock: canonicalStartBlock, votes: votingPower, eligible: BigInt(votingPower) > 0n },
         delegation: {
           modelVoterDelegatee,
-          matchesVotingAddress: modelVoterDelegatee === votingAddress,
+          assetOwnerAddress,
+          currentDelegateAddress: modelVoterDelegatee,
+          requiredDelegateAddress: votingAddress,
+          matchesVotingAddress: delegationMatches,
         },
         simulation,
       },

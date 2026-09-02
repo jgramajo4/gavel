@@ -6,8 +6,8 @@ const {
   bucketFor,
   buildCalibrationModel,
   onlineCalibratedConfidence,
-} = require("../src/core/backtest/calibration");
-const { runChronologicalBacktest, sanitizeTrainingVote } = require("../src/core/backtest/run");
+} = require("../packages/core/src/backtest/calibration");
+const { runChronologicalBacktest, sanitizeTrainingVote } = require("../packages/core/src/backtest/run");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 const AS_OF = "2026-01-01T00:00:00.000Z";

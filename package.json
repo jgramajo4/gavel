@@ -1,17 +1,21 @@
 {
-  "name": "gavel-governance-copilot",
-  "version": "0.1.0",
+  "name": "gavel",
+  "version": "0.2.0",
   "private": true,
   "description": "A private, history-first AI governance copilot.",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
+  "workspaces": [
+    "packages/*",
+    "integrations/*"
+  ],
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "gavel": "bin/gavel.js"
+    "gavel": "packages/cli/bin/gavel.js"
   },
   "scripts": {
-    "gavel": "node bin/gavel.js",
+    "gavel": "node packages/cli/bin/gavel.js",
     "test": "node --test",
     "test:history": "node --test test/history*.test.js",
     "test:profile": "node --test test/profile.test.js",

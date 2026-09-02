@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { ONBOARDING_QUESTIONS, buildOnboardingPreferences } = require("../src/core/profile/onboarding");
+const { ONBOARDING_QUESTIONS, buildOnboardingPreferences } = require("../packages/core/src/profile/onboarding");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 

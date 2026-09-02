@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { NounsSubgraphHistoryAdapter } = require("../src/adapters/nouns/history");
+const { NounsSubgraphHistoryAdapter } = require("../packages/nouns-adapter/src/history");
 
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 
