@@ -1,6 +1,7 @@
 # Core Gavel workflows
 
-Run Gavel intelligence commands from the repository root. Keep generated voter
+First complete `bankr-runtime.md`. Run Gavel intelligence commands from
+`/cli/gavel`. Keep generated voter
 history, profiles, predictions, inspections, and backtests under `data/private/`
 unless the user explicitly requests another destination. Do not paste full
 private JSON into chat by default.
@@ -11,7 +12,7 @@ private JSON into chat by default.
 2. Fetch normalized history:
 
    ```bash
-   node bin/gavel.js history 0xVoterAddress
+   cd /cli/gavel && node bin/gavel.js history 0xVoterAddress
    ```
 
 3. Report the address, vote count, reason coverage if available after profile
@@ -19,7 +20,7 @@ private JSON into chat by default.
 4. Build the private profile, including any existing policy files:
 
    ```bash
-   node bin/gavel.js profile data/private/nouns/0xlowercaseaddress.json \
+   cd /cli/gavel && node bin/gavel.js profile data/private/nouns/0xlowercaseaddress.json \
      --preferences data/private/policies/0xlowercaseaddress/preferences.json \
      --rules data/private/policies/0xlowercaseaddress/rules.json
    ```
@@ -32,8 +33,8 @@ If the address has too little history, say that behavioral personalization is
 weak and offer the fixed questionnaire:
 
 ```bash
-node bin/gavel.js onboard 0xVoterAddress --questions
-node bin/gavel.js onboard 0xVoterAddress --answers /private/answers.json
+cd /cli/gavel && node bin/gavel.js onboard 0xVoterAddress --questions
+cd /cli/gavel && node bin/gavel.js onboard 0xVoterAddress --answers /private/answers.json
 ```
 
 Rebuild the profile using the resulting private preferences file. Describe these
@@ -57,13 +58,13 @@ override old behavior without erasing the historical record.
 1. Fetch a fresh normalized proposal by ID:
 
    ```bash
-   node bin/gavel.js proposal 123
+   cd /cli/gavel && node bin/gavel.js proposal 123
    ```
 
 2. Security-inspect it independently:
 
    ```bash
-   node bin/gavel.js inspect data/private/proposals/nouns/123.json
+   cd /cli/gavel && node bin/gavel.js inspect data/private/proposals/nouns/123.json
    ```
 
 3. If no profile exists or it is stale, sync history and rebuild it first.
@@ -71,7 +72,7 @@ override old behavior without erasing the historical record.
    calibration report when one exists:
 
    ```bash
-   node bin/gavel.js predict \
+   cd /cli/gavel && node bin/gavel.js predict \
      data/private/profiles/nouns/0xlowercaseaddress.json \
      data/private/proposals/nouns/123.json \
      --calibration data/private/backtests/nouns/0xlowercaseaddress.json
@@ -86,7 +87,7 @@ override old behavior without erasing the historical record.
 ## Run a backtest
 
 ```bash
-node bin/gavel.js backtest data/private/nouns/0xlowercaseaddress.json \
+cd /cli/gavel && node bin/gavel.js backtest data/private/nouns/0xlowercaseaddress.json \
   --preferences data/private/policies/0xlowercaseaddress/preferences.json \
   --rules data/private/policies/0xlowercaseaddress/rules.json
 ```

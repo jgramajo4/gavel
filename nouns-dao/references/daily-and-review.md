@@ -5,10 +5,10 @@
 Default to at most one proactive briefing per day. If nothing needs attention,
 say so briefly rather than manufacturing engagement.
 
-1. Run the read-only chain briefing with the voter address:
+1. Complete `bankr-runtime.md`, then run the read-only chain briefing with the voter address:
 
    ```bash
-   node nouns-dao/scripts/daily_briefing.js --voter=0xVoterAddress --limit=10 --since-hours=24
+   cd /cli/gavel && node nouns-dao/scripts/daily_briefing.js --voter=0xVoterAddress --limit=10 --since-hours=24
    ```
 
 2. For each active, unvoted proposal that needs attention, follow the proposal
@@ -46,7 +46,7 @@ Preparation produces canonical-verified unsigned calldata, not a broadcast:
 5. Run the read-only preparation gate from the repository root:
 
    ```bash
-   node bin/gavel.js prepare-vote \
+   cd /cli/gavel && node bin/gavel.js prepare-vote \
      data/private/predictions/nouns/0xvoter/123.json \
      data/private/proposals/nouns/123.json \
      --support FOR \
