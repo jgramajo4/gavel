@@ -9,16 +9,15 @@ persistent `/cli` workspace.
 Use Bankr's `execute_cli` tool. Never print environment-variable values.
 
 1. Check for `/cli/gavel/package.json` and `/cli/gavel/bin/gavel.js`.
-2. During the pre-merge pilot, clone the same reviewed branch as the installed
-   skill:
+2. Clone the merged public runtime from the default branch:
 
    ```bash
-   git clone --branch phase9-launch-hardening --single-branch https://github.com/jgramajo4/gavel.git /cli/gavel
+   git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git /cli/gavel
    ```
 
-   Before catalog submission, replace this branch with the immutable release
-   tag created from the merged commit. Do not publish a catalog skill that
-   silently tracks a development branch.
+   For a catalog release, replace `main` with the immutable release tag created
+   from the validated commit. Do not silently switch an existing installation
+   to a different revision.
 
 3. Confirm the remote before running code:
 
