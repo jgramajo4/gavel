@@ -33,8 +33,8 @@ Nouns API / chain
 
 The canonical packages are `packages/core`, `packages/nouns-adapter`, and
 `packages/cli`. The root `bin/gavel.js` and `nouns-dao/` Bankr skill remain as
-verified compatibility entry points. `packages/tui` and `packages/server` are
-reserved boundaries; the TUI migration is audited but intentionally non-blocking.
+verified compatibility entry points. `packages/server` remains a reserved boundary. `packages/tui` now contains the
+first read-only migration slice from the former standalone TUI.
 
 See [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md)
 for the pre-change audit and staged migration map.
@@ -59,7 +59,7 @@ keep private state in a runtime-owned `GAVEL_DATA_DIR`.
 | --- | --- | --- | --- |
 | [Bankr](#bankr) | A conversational governance copilot | Supported through the `nouns-dao` compatibility skill | Unsigned preparation by default; legacy signing scripts are separate |
 | [BYOH](#byoh-bring-your-own-harness) | Any agent framework, shell, scheduler, or local application | Supported through the JSON CLI | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
-| [TUI](#terminal-ui-tui) | Interactive proposal browsing in a real terminal | Separate legacy application; consolidation is not complete | Read-only unless its separate direct-signing path is enabled |
+| [TUI](#terminal-ui-tui) | Interactive proposal browsing in a real terminal | Phase 1 source is imported into `packages/tui` | Read-only while canonical wallet handoff is implemented |
 | [Headless / Railway](#headless-on-railway) | Scheduled ingestion, analysis, and JSON-producing jobs | CLI jobs are supported; an HTTP service is not yet shipped | Use unsigned output or an external supported executor |
 
 Whichever method you choose, start with read-only history, profile, proposal,
@@ -184,30 +184,31 @@ bundled.
 
 ### Terminal UI (TUI)
 
-`packages/tui` currently reserves the consolidated TUI package name; it does not
-yet contain a runnable application. The existing interface remains in the
-separate [`jgramajo4/Gavel-TUI`](https://github.com/jgramajo4/Gavel-TUI)
-repository and can be evaluated from a real terminal:
+`packages/tui` contains the first migration slice of the standalone
+[`jgramajo4/Gavel-TUI`](https://github.com/jgramajo4/Gavel-TUI) application,
+pinned to source commit `39ddf1e8fbb2f378b0b62c44df206dcfa4900466`.
+The Ink screens, keyboard navigation, polling, formatting, and legacy data
+modules are now available in the monorepo for incremental replacement.
+
+This phase is intentionally read-only. The migrated configuration never loads
+`GAVEL_PRIVATE_KEY`, so the legacy vote, delegation, and attestation action
+modules cannot obtain a signer through the application bootstrap. Do not
+re-enable that environment-key path. Replace those actions with canonical
+Gavel preparation and an explicit local wallet handoff.
+
+Run the imported interface from a real terminal:
 
 ```bash
-git clone https://github.com/jgramajo4/Gavel-TUI.git
-cd Gavel-TUI
-npm install
-npm run typecheck
-npm run dev
+npm ci
+npm run tui:typecheck
+npm run tui
 ```
 
-That legacy TUI uses `RPC_URL` rather than `ETHEREUM_RPC_URL`. Without
-`GAVEL_PRIVATE_KEY` it operates read-only. Supplying that variable enables the
-TUI's own direct-signing code, which predates Gavel's canonical preparation,
-Safe, and WaaP boundaries; do not treat it as the production execution path.
-Its PASS/FAIL prediction model and local cache also differ from the canonical
-history-first engine.
-
-The migration will retain the Ink screens and keyboard navigation while replacing
-duplicated data, prediction, address, ABI, and transaction modules with
-`@gavel/core`, `@gavel/nouns-adapter`, and the stable CLI. Track the audited plan
-in [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md).
+The TUI still contains transitional PASS/FAIL prediction, subgraph, ABI, and
+proposal-state modules. They are migration inputs, not canonical Gavel domain
+logic. Follow [the TUI migration checklist](docs/architecture/TUI_MIGRATION.md)
+as each module is replaced by `@gavel/core`, `@gavel/nouns-adapter`, or the
+stable JSON CLI.
 
 ### Headless on Railway
 
