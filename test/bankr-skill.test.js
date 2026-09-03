@@ -118,6 +118,28 @@ test("keeps private voter state out of public Bankr Agent Profiles", () => {
   assert.match(storage, /Never fall back to an Agent\s+Profile/i);
 });
 
+test("discovers durable profiles before onboarding in every Bankr client", () => {
+  const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
+  assert.match(skill, /Before asking for a voter address[\s\S]*always search persistent Files/i);
+  assert.match(skill, /including Telegram and the website/i);
+  assert.match(storage, /list_files[\s\S]*\/gavel\/data\/private\/nouns/);
+  assert.match(storage, /exactly one address directory[\s\S]*filesFromUserFs/i);
+  assert.match(storage, /account\s+or wallet-linkage mismatch/i);
+});
+
+test("does not ship reward administration scripts or ABIs", () => {
+  for (const relativePath of [
+    "nouns-dao/scripts/update_rewards.js",
+    "nouns-dao/scripts/withdraw_rewards.js",
+    "nouns-dao/references/rewards-abi.json",
+    "rewards-abi.json",
+    "tools/admin/nouns-rewards/update.js",
+    "tools/admin/nouns-rewards/withdraw.js",
+  ]) {
+    assert.equal(fs.existsSync(path.join(root, relativePath)), false, `${relativePath} must not be shipped`);
+  }
+});
+
 test("ships a valid Bankr stage-process-publish mapping", () => {
   const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
   const example = storage.match(/```json\s*([\s\S]*?)```/);

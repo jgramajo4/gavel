@@ -94,11 +94,11 @@ formatting in `packages/tui`; replace the items above with canonical package API
 or structured CLI calls. Passport/EAS and rewards UI are separate product-scope
 decisions and must not leak into core governance intelligence.
 
-### `packages/server` and `tools/admin`
+### `packages/server`
 
 Reserve a minimal optional server package; do not make core depend on it.
-`tools/admin/nouns-rewards` is already correctly isolated and retains its
-explicit `GAVEL_ADMIN_MODE=1` boundary.
+Reward maintenance and withdrawal tooling is not shipped in this public
+repository. Fixed client attribution remains ordinary transaction plumbing.
 
 ## Safe migration sequence
 

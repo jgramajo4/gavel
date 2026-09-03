@@ -24,6 +24,28 @@ Use this lifecycle for every stateful workflow:
 5. **Restore:** In a later task, use `list_files` and `filesFromUserFs` to load
    the saved profile. Do not rebuild it merely to test persistence.
 
+## Mandatory discovery before onboarding
+
+For requests such as "do you see my profile?", "load my profile", proposal
+analysis, or any fresh-chat Gavel interaction, inspect persistent Files before
+asking for an address or starting onboarding:
+
+1. Call `list_files` with `folder: "/gavel/data/private/nouns"`.
+2. If exactly one address directory contains `profile.json`, treat that as the
+   returning voter and stage its directory with `filesFromUserFs`. Do not ask
+   for the address again and do not re-fetch voting history.
+3. If multiple address directories contain profiles, list only their addresses
+   and ask which one to use. Do not open or summarize every profile.
+4. If an address is already known, check its lowercase deterministic path
+   directly before concluding that its profile is missing.
+5. Only when persistent Files contains no matching profile may onboarding begin.
+
+Apply this sequence identically on Bankr's website and Telegram. A conversation
+or channel has no separate Gavel profile namespace. If the website can list a
+profile but Telegram returns an empty persistent Files root, report an account
+or wallet-linkage mismatch; do not say the profile was never saved and do not
+silently rebuild it.
+
 Publication still runs when a command exits nonzero. An artifact entry alone is
 therefore not proof of a successful workflow. A fresh `gavel-publish/` directory
 keeps a failed command from republishing a staged or stale input. Never run two

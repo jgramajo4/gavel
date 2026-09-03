@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized Nouns governance copilot for learning a voter's private history, analyzing proposals with personal precedents, managing preferences and hard rules, running backtests, preparing daily recommendations, and handling review-first voting or delegation.
 tags: [nouns, governance, voting, delegation, dao, copilot]
-version: 5
+version: 6
 visibility: public
 metadata:
   clawdbot:
@@ -64,6 +64,13 @@ For every generated profile, require both zero command exits and successful
 `artifacts` entries before telling the user it was saved. Never paste the private
 JSON into Bankr memory or a project update.
 
+Before asking for a voter address or claiming that no saved profile exists,
+always search persistent Files under `/gavel/data/private/nouns/`. This applies
+in every Bankr client, including Telegram and the website. If exactly one saved
+voter directory contains `profile.json`, restore it with `filesFromUserFs`
+without asking the user to onboard again. Follow `references/profile-storage.md`
+for multiple, empty, and cross-channel results.
+
 ## Route by user intent
 
 | User intent | Workflow |
@@ -71,8 +78,8 @@ JSON into Bankr memory or a project update.
 | First Gavel interaction, "start", "help", or unclear onboarding state | Follow `references/interaction-and-formatting.md` → Welcome and choose a path |
 | "Onboard me", "learn my voting", "sync my history" | Follow `references/gavel-workflows.md` → Onboard and sync |
 | "Install Gavel", first Gavel request, or missing runtime | Follow `references/bankr-runtime.md` → Install or verify runtime |
-| Missing profile, persistence question, or completed profile write | Follow `references/profile-storage.md` → Verify private durable storage |
-| "What did you learn?", "show my profile" | Follow `references/gavel-workflows.md` → Explain the profile |
+| Missing profile, persistence question, or completed profile write | Follow `references/profile-storage.md` → Discover or verify private durable storage |
+| "What did you learn?", "show my profile", "see/load my profile" | First discover it with `references/profile-storage.md`, then follow `references/gavel-workflows.md` → Explain the profile |
 | "I changed my mind", "remember that I…", "your call was wrong" | Follow `references/policy-and-corrections.md` → Preference or correction |
 | "Always…", "never…", "flag anything over…" | Follow `references/policy-and-corrections.md` → Hard rule |
 | "Analyze proposal 123", "how would I vote?" | Follow `references/gavel-workflows.md` → Analyze a proposal |
