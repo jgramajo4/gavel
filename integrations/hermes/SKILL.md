@@ -1,17 +1,24 @@
 ---
 name: gavel-governance
-description: Use the canonical Gavel CLI from Hermes to analyze DAO governance, build private voter profiles, predict votes, and prepare or supervise explicitly supported governance actions. Do not use for trading, arbitrary wallet operations, or unsupported DAOs.
+description: Analyze Nouns governance using private voter profiles.
 ---
 
 # Gavel governance in Hermes
 
-Use the installed `gavel` executable as the only Gavel compatibility boundary.
-Do not reimplement profile, prediction, proposal, persistence, Nouns, calldata,
-delegation, or executor logic in Hermes.
+Use the bundled [Gavel runner](scripts/gavel.js) as the only compatibility
+boundary. Do not reimplement profile, prediction, proposal, persistence, Nouns,
+calldata, delegation, or executor logic in Hermes.
 
-Before a workflow, run `npm run health-check --workspace @gavel/integration-hermes`
-or `gavel --help`. Set `GAVEL_DATA_DIR` to a persistent private Hermes workspace
-and never print environment-variable values.
+On the first Gavel request, run the runner with `--bootstrap-only`. It installs a
+pinned, validated Gavel runtime under `HERMES_HOME`, creates a separate private
+data directory, and reuses both on later requests. Do not ask the user to clone
+the repository, run `npm ci`, use `npm link`, or set a data path for an ordinary
+installation. Stop and report the missing prerequisite if Git, npm, or Node.js
+20+ is unavailable.
+
+For every Gavel command, invoke this installed skill's `scripts/gavel.js` with
+the command arguments. The runner supplies `GAVEL_DATA_DIR`; never print
+environment-variable values or bypass the runner with a different checkout.
 
 For an on-demand governance workflow:
 
@@ -25,5 +32,6 @@ For an on-demand governance workflow:
    execution address, voting power, and delegation. Never submit arbitrary
    target/calldata.
 
-Read [references/runtime.md](references/runtime.md) when installing, choosing
-state paths, configuring address roles, or selecting an executor.
+Read [references/runtime.md](references/runtime.md) when bootstrap fails,
+overriding state paths, moving a profile between runtimes, configuring address
+roles, or selecting an executor.
