@@ -1,9 +1,11 @@
 # Bankr integration
 
 Bankr is a host for Gavel, not a dependency of the governance engine. Its
-current install contract remains `/cli/gavel`, with private state at
-`/cli/gavel/data/private/`. The canonical CLI now honors `GAVEL_DATA_DIR`, so a
-Bankr deployment may set that path explicitly without putting it in core.
+`execute_cli` containers and arbitrary sandbox paths, including `/cli`, are
+ephemeral. Clone Gavel inside the current invocation, stage durable inputs from
+private user files with `filesFromUserFs`, and export each intended result with
+`publishArtifacts` to `/gavel/data/private/`. The canonical CLI remains unaware
+of Bankr and accepts explicit input/output paths or `GAVEL_DATA_DIR`.
 
 Gavel defaults raw Ethereum reads to `https://eth.drpc.org`, because Bankr's
 internal transaction tools do not expose a JSON-RPC URL to sandbox scripts.
@@ -21,6 +23,6 @@ for backward compatibility and require `AGENT_PRIVATE_KEY`; canonical Gavel
 preparation and executor APIs do not read that variable.
 
 Bankr Agent Profiles and project updates are public publishing features, not
-private Gavel storage. After creating a voter profile, verify its exact path in
-Bankr's persistent Files storage and again from a new task. See
+private Gavel storage. After creating a voter profile, require zero command
+exits and successful artifact metadata, then restore it from a new task. See
 [`../../docs/storage/PROFILE_STORAGE.md`](../../docs/storage/PROFILE_STORAGE.md).

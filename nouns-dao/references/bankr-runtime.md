@@ -1,92 +1,86 @@
-# Bankr runtime setup and persistence
+# Bankr runtime setup
 
 The installed skill contains instructions and references. Gavel's executable
-runtime is the public `jgramajo4/gavel` repository and belongs in Bankr's
-persistent `/cli` workspace.
+runtime is the public `jgramajo4/gavel` repository. Bankr `execute_cli`
+containers and arbitrary paths inside them are ephemeral; `/cli/gavel` is not a
+persistent installation and must never be treated as one.
 
-## Install or verify the runtime
+## Install inside the current sandbox
 
-Use Bankr's `execute_cli` tool. Never print environment-variable values.
+Run installation and the requested Gavel workflow in the same `execute_cli`
+invocation whenever possible. Use `workDir: "workspace"` and never print
+environment-variable values.
 
-1. Check for `/cli/gavel/package.json` and `/cli/gavel/bin/gavel.js`.
-2. Clone the merged public runtime from the default branch:
+1. Clone the merged public runtime into the sandbox:
 
    ```bash
-   git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git /cli/gavel
+   git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
    ```
 
    For a catalog release, replace `main` with the immutable release tag created
-   from the validated commit. Do not silently switch an existing installation
-   to a different revision.
-
-3. Confirm the remote before running code:
+   from the validated commit. Do not silently switch revisions mid-workflow.
+2. Confirm the remote before running code:
 
    ```bash
-   git -C /cli/gavel remote get-url origin
-   git -C /cli/gavel status --short --branch
+   git -C gavel remote get-url origin
+   git -C gavel status --short --branch
    ```
 
    The origin must be exactly `https://github.com/jgramajo4/gavel.git` or the
    equivalent GitHub SSH URL. Stop on an unexpected remote or dirty tracked file.
-4. Install the locked dependencies without changing the lockfile:
+3. Install locked dependencies without changing the lockfile:
 
    ```bash
-   cd /cli/gavel && npm ci
+   cd gavel && npm ci
    ```
 
-5. Run the offline suite before onboarding a real voter:
+4. Run the offline suite before the first real-voter workflow for that release:
 
    ```bash
-   cd /cli/gavel && npm test
+   cd gavel && npm test
    ```
 
-Do not silently pull new runtime code during a voter workflow. Upgrade only when
-the user asks or the installed skill version requires it; inspect the diff, use a
-fast-forward update, reinstall locked dependencies, and rerun tests.
+Re-cloning in a fresh task is expected. Durable voter state is restored
+separately with `filesFromUserFs`; it must not depend on the cloned repository
+surviving. See `profile-storage.md` before every state-producing command.
 
 ## Command convention
 
-Every reference that says to run a Gavel command assumes:
+Every reference that says to run a Gavel command assumes the repository was
+cloned as `workspace/gavel` and the command runs inside the current sandbox:
 
 ```bash
-cd /cli/gavel && node bin/gavel.js <command>
+cd gavel && node bin/gavel.js <command>
 ```
 
-Do not assume Bankr's current directory is the repository root.
+Paths created by that command remain ephemeral unless the same `execute_cli`
+invocation exports each intended file with `publishArtifacts`.
 
 ## Private persistent state
 
-Keep all voter-specific files under:
+Bankr's durable, wallet-scoped state root for Gavel is:
 
 ```text
-/cli/gavel/data/private/
+/gavel/data/private/
 ```
 
-The repository excludes this directory from Git. Never run `git add -f` on it,
-copy it into a skill resource, publish it in chat, or mix files between voters.
-
-`execute_cli` processes may be short-lived. After any state-producing command,
-read its JSON `output` path, verify that exact file is nonempty, and confirm it
-appears in Bankr's persistent Files storage. Do not claim persistence merely
-because the file exists inside the current sandbox process.
-
-Bankr Agent Profiles and their project-update feeds are public. Never store a
-Gavel voter profile, preferences, rules, reasons, or prepared transaction there.
-With the user's consent, Bankr memory may retain only a minimal pointer (voter
-address and private file path), not the profile JSON. See `profile-storage.md`
-for the full policy.
+This is a persistent user-files path, not a sandbox path and not part of the
+skill. Never publish private state to an Agent Profile, project update, chat,
+`/runs` artifact, skill resource, or Git repository.
 
 For the persistence pilot:
 
-1. onboard and build a profile;
-2. record only the voter address, evidence cutoff, counts, and file path in the
-   test notes—not private reasons or preference contents;
-3. end the Bankr conversation and start a new one;
-4. verify the same profile and policy files are present before rebuilding;
-5. add one correction, end the session again, and verify it remains present.
+1. onboard and build a profile in one staged `execute_cli` workflow;
+2. require a successful command result and successful `artifacts` entries;
+3. record only the voter address, evidence cutoff, counts, persistent paths,
+   file IDs, and byte sizes—not private reasons or preference contents;
+4. end the Bankr conversation and start a new one;
+5. use `list_files`, then stage the same files with `filesFromUserFs` and verify
+   the profile without rebuilding it;
+6. add one correction, republish it, end the session again, and verify it remains.
 
-Passing a unit test or seeing a file during the same conversation is not
-persistence evidence.
+Passing a unit test or seeing a file inside one sandbox is not persistence
+evidence.
 
 ## Network configuration
 
@@ -99,5 +93,6 @@ persistence evidence.
   by name and never echo its value.
 - No private key is required by Gavel. It produces unsigned calldata only.
 
-If runtime installation, dependency installation, RPC access, or persistence
-fails, report the exact stage and stop. Do not downgrade canonical checks.
+If runtime installation, dependency installation, RPC access, command execution,
+artifact publication, or later restoration fails, report the exact stage and
+stop. Do not downgrade canonical checks or claim state was saved.

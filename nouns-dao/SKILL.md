@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized Nouns governance copilot for learning a voter's private history, analyzing proposals with personal precedents, managing preferences and hard rules, running backtests, preparing daily recommendations, and handling review-first voting or delegation.
 tags: [nouns, governance, voting, delegation, dao, copilot]
-version: 4
+version: 5
 visibility: public
 metadata:
   clawdbot:
@@ -48,20 +48,21 @@ prepare a vote for review, cast a confirmed vote, or delegate voting power.
 
 ## Bankr runtime
 
-Before the first Gavel workflow in Bankr, load
-`references/bankr-runtime.md` and ensure the runtime exists in the persistent
-`/cli/gavel` directory. Run Gavel commands from that directory. Skill resources
-are instructions, not a bundled copy of the application runtime.
+Before every Gavel workflow in Bankr, load `references/bankr-runtime.md` and
+treat the `execute_cli` sandbox, including `/cli`, as ephemeral. Install the
+runtime inside the current sandbox as directed. Skill resources are instructions,
+not a bundled copy of the application runtime.
 
 Never place private profiles, preferences, predictions, or prepared transactions
-inside the installed skill directory. Keep them in `/cli/gavel/data/private/`,
-which is excluded from Git, and verify they survive a later session before
-claiming persistence works.
+inside the installed skill directory or rely on a sandbox path. For every
+state-producing command, load `references/profile-storage.md`, stage inputs with
+`filesFromUserFs`, and export each result with `publishArtifacts` to the private
+user-files root `/gavel/data/private/`.
 
 Bankr Agent Profiles are public publishing pages, not voter-profile storage.
-For every generated profile, load `references/profile-storage.md` and verify the
-exact output file in persistent Files storage before telling the user it was
-saved. Never paste the private JSON into Bankr memory or a project update.
+For every generated profile, require both zero command exits and successful
+`artifacts` entries before telling the user it was saved. Never paste the private
+JSON into Bankr memory or a project update.
 
 ## Route by user intent
 

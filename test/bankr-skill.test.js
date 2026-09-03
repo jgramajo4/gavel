@@ -88,15 +88,22 @@ test("guides new and existing voters with mobile-friendly next actions", () => {
   assert.match(workflows, /### Existing voter/);
 });
 
-test("defines a persistent self-installing Bankr runtime boundary", () => {
+test("defines an ephemeral Bankr runtime with explicit durable artifact transfer", () => {
   const runtime = fs.readFileSync(path.join(root, "nouns-dao", "references", "bankr-runtime.md"), "utf8");
+  const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
   assert.match(skill, /references\/bankr-runtime\.md/);
-  assert.match(skill, /\/cli\/gavel\/data\/private/);
-  assert.match(runtime, /git clone --branch main --single-branch https:\/\/github\.com\/jgramajo4\/gavel\.git \/cli\/gavel/);
+  assert.match(skill, /including `\/cli`, as ephemeral/i);
+  assert.match(skill, /filesFromUserFs/);
+  assert.match(skill, /publishArtifacts/);
+  assert.match(runtime, /git clone --branch main --single-branch https:\/\/github\.com\/jgramajo4\/gavel\.git gavel/);
   assert.match(runtime, /immutable release\s+tag/);
   assert.match(runtime, /npm ci/);
   assert.match(runtime, /npm test/);
   assert.match(runtime, /end the Bankr conversation and start a new one/i);
+  assert.match(runtime, /\/gavel\/data\/private/);
+  assert.match(storage, /Publication still runs when a command exits nonzero/i);
+  assert.match(storage, /successful\s+`artifacts` entry/i);
+  assert.doesNotMatch(`${skill}\n${runtime}\n${storage}`, /\/cli\/gavel\/data\/private/);
   assert.match(runtime, /No private key is required/);
   assert.match(runtime, /https:\/\/eth\.drpc\.org/);
   assert.match(runtime, /optional advanced\s+override/i);
@@ -106,9 +113,26 @@ test("keeps private voter state out of public Bankr Agent Profiles", () => {
   const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
   assert.match(skill, /Agent Profiles are public publishing pages/i);
   assert.match(storage, /must never\s+receive voting reasons/i);
-  assert.match(storage, /persistent Files storage/i);
+  assert.match(storage, /persistent user files/i);
   assert.match(storage, /later task/i);
   assert.match(storage, /Never fall back to an Agent\s+Profile/i);
+});
+
+test("ships a valid Bankr stage-process-publish mapping", () => {
+  const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
+  const example = storage.match(/```json\s*([\s\S]*?)```/);
+  assert.ok(example, "expected an execute_cli JSON example");
+  const invocation = JSON.parse(example[1]);
+
+  assert.equal(invocation.workDir, "workspace");
+  assert.ok(invocation.filesFromUserFs.length > 0);
+  assert.ok(invocation.publishArtifacts.length > 0);
+  assert.ok(invocation.publishArtifacts.length <= 5);
+  for (const artifact of invocation.publishArtifacts) {
+    assert.match(artifact.sandboxPath, /^gavel-publish\//);
+    assert.match(artifact.destination, /^\/gavel\/data\/private\//);
+    assert.match(artifact.destination, /\.json$/);
+  }
 });
 
 test("orders proposal analysis defensively and keeps preparation separate from broadcast", () => {

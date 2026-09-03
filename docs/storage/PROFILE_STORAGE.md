@@ -9,7 +9,7 @@ project-update feed, skill package, source repository, or chat transcript.
 
 | Runtime | Private state location | Durability requirement |
 | --- | --- | --- |
-| Bankr | `/cli/gavel/data/private/` | Confirm the file appears in Bankr's persistent Files storage and survives a new task |
+| Bankr | Persistent user files beneath `/gavel/data/private/` | Stage with `filesFromUserFs`, export each file with `publishArtifacts`, and verify the returned artifact metadata |
 | Local/BYOH | An absolute, access-controlled `GAVEL_DATA_DIR` | Back it up using the operator's normal encrypted backup policy |
 | Railway | A mounted volume such as `/data/gavel` | Set `GAVEL_DATA_DIR` to the volume, not the ephemeral application filesystem |
 | Stateless CI or agent | `--stdout` plus a private external store | Never rely on the runner's workspace after the job exits |
@@ -22,18 +22,26 @@ profile JSON itself.
 
 ## Bankr durability check
 
-After history, onboarding, profile, or policy output is written:
+Bankr sandbox paths, including `/cli`, are ephemeral and do not automatically
+sync to persistent user files. After history, onboarding, profile, or policy
+output is produced:
 
-1. Read the CLI's JSON summary and capture its absolute `output` path.
-2. Verify that exact path is beneath `/cli/gavel/data/private/` and is nonempty.
-3. Confirm the file is visible in Bankr's persistent Files storage, not only in
-   the current `execute_cli` process.
-4. Start a new Bankr task and verify the same file before claiming persistence.
-5. Stop and disclose the failure if the file is absent. Regenerate public history
+1. Stage existing files with `filesFromUserFs` into a sandbox input directory.
+2. Write new results to a separate, fresh sandbox output directory.
+3. Map at most five individual result files to explicit persistent filenames
+   with `publishArtifacts`; recursive directory publication is unsupported. The
+   per-file limit is 10 MB on Bankr's free tier and 50 MB for Bankr Club.
+4. Require the Gavel commands to exit zero even if artifacts were returned,
+   because Bankr attempts publication after a nonzero exit.
+5. Verify every expected artifact has the exact destination, a `fileId`, positive
+   byte size, and no error. Then use `list_files` from a new task and restore the
+   file with `filesFromUserFs` before claiming cross-task persistence.
+6. Stop and disclose the failure if any file is absent. Regenerate public history
    if needed, but never invent or silently discard private preferences or rules.
 
 Seeing a file twice inside one sandbox task proves only local writes, not
-cross-task durability.
+cross-task durability. Bankr storage is last-write-wins, so serialize stateful
+workflows for each voter.
 
 ## Future storage adapters
 

@@ -3,12 +3,16 @@
 Policy files are private per voter:
 
 ```text
-data/private/policies/0xlowercaseaddress/preferences.json
-data/private/policies/0xlowercaseaddress/rules.json
+/gavel/data/private/nouns/0xlowercaseaddress/preferences.json
+/gavel/data/private/nouns/0xlowercaseaddress/rules.json
 ```
 
-Create a missing file as an empty JSON array. Preserve existing entries. Validate
-the full array by rebuilding the profile before reporting success.
+These are Bankr persistent user-file destinations, not paths to edit directly in
+the sandbox. Follow `profile-storage.md`: stage existing files into
+`gavel-state/`, create the changed policy as a fresh file in `gavel-publish/`,
+validate the full array by rebuilding the profile, then publish both the changed
+policy and rebuilt profile. Create a missing policy as an empty JSON array before
+appending its first entry. Preserve existing entries.
 
 ## Preference or correction
 
