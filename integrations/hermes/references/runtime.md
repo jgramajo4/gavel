@@ -1,11 +1,31 @@
 # Hermes runtime configuration
 
-Install the repository, run `npm ci`, and make the root `gavel` bin available.
-Choose a durable, private directory owned by the Hermes runtime:
+The bundled `scripts/gavel.js` runner performs first-use installation. It fetches
+the pinned Gavel commit into a versioned directory, verifies the repository
+origin and exact commit, installs locked production dependencies without package
+scripts, and reuses that immutable runtime on later calls.
+
+By default it uses:
+
+```text
+runtime: $HERMES_HOME/runtimes/gavel/<pinned-commit>/
+data:    $HERMES_HOME/data/gavel/
+```
+
+`HERMES_HOME` defaults to the current user's `.hermes` directory. The runtime
+and data roots may be overridden with `GAVEL_RUNTIME_DIR` and `GAVEL_DATA_DIR`,
+but they must not overlap. Container operators must mount `HERMES_HOME` or the
+chosen data directory on a persistent private volume. Bootstrap never deletes,
+moves, imports, or overwrites voter data.
+
+The ordinary end-user flow is only:
 
 ```bash
-export GAVEL_DATA_DIR=/persistent/private/gavel
+hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --now
 ```
+
+Then invoke `/gavel-governance` with a natural-language request. The skill runs
+its bootstrap automatically; users do not clone Gavel or install it globally.
 
 Common non-secret/runtime settings are `NOUNS_SUBGRAPH_URL`,
 `GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`, `GAVEL_SAFE_ADDRESS`, and
@@ -35,3 +55,12 @@ Safe clients integrate with the proposer-only `SafeSupervisedExecutor` API. No
 Safe owner key belongs in Gavel. WaaP clients integrate with the
 `WaapAutonomousExecutor` API and must provide a policy hook; live WaaP broadcast
 is intentionally not supplied by this integration.
+
+## Profile portability
+
+Hermes storage is independent from Bankr Files and Railway volumes. Do not imply
+that installing this skill imports another runtime's profile. Until a portable
+export/import command is shipped, users may securely copy `history.json`,
+`profile.json`, `preferences.json`, and `rules.json` into the configured Hermes
+data directory, preserving their private access controls. Never fetch another
+runtime's private store implicitly or rebuild over imported policy files.

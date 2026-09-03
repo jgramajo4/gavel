@@ -58,6 +58,7 @@ keep private state in a runtime-owned `GAVEL_DATA_DIR`.
 | Method | Best for | Current status | Transaction boundary |
 | --- | --- | --- | --- |
 | [Bankr](#bankr) | A conversational governance copilot | Supported through the `nouns-dao` compatibility skill | Unsigned preparation by default; legacy signing scripts are separate |
+| [Hermes Agent](#hermes-agent) | A self-hosted conversational agent | Supported through a first-use bootstrapping skill | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
 | [BYOH](#byoh-bring-your-own-harness) | Any agent framework, shell, scheduler, or local application | Supported through the JSON CLI | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
 | [TUI](#terminal-ui-tui) | Interactive proposal browsing in a real terminal | Phase 1 source is imported into `packages/tui` | Read-only while canonical wallet handoff is implemented |
 | [Headless / Railway](#headless-on-railway) | Scheduled ingestion, analysis, and JSON-producing jobs | CLI jobs are supported; an HTTP service is not yet shipped | Use unsigned output or an external supported executor |
@@ -129,6 +130,31 @@ task. Bankr Agent Profiles and project updates are public and must not store
 private Gavel profiles. See the complete
 [`Bankr runtime guide`](nouns-dao/references/bankr-runtime.md) and
 [`private profile storage policy`](docs/storage/PROFILE_STORAGE.md).
+
+### Hermes Agent
+
+Hermes users install one skill and then start a Gavel conversation:
+
+```bash
+hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --now
+```
+
+```text
+/gavel-governance Initialize my persistent Gavel profile for Nouns voter 0x...
+```
+
+On first use, the skill's bundled runner verifies Git, npm, and Node.js 20+,
+installs an exact pinned Gavel commit with its locked dependencies beneath
+`HERMES_HOME`, creates a separate private data directory, and runs the requested
+command. Later requests reuse that runtime and data. Users do not clone this
+repository, run `npm ci`, set `GAVEL_DATA_DIR`, or globally link `gavel` for a
+normal installation.
+
+Container operators still need to persist `HERMES_HOME` or `GAVEL_DATA_DIR` on
+a private volume. Bankr Files, Hermes storage, and Railway volumes are currently
+independent; profile migration requires an explicit private file transfer until
+Gavel ships a portable export/import workflow. See
+[`integrations/hermes/references/runtime.md`](integrations/hermes/references/runtime.md).
 
 ### BYOH: bring your own harness
 
