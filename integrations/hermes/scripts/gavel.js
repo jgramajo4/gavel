@@ -15,14 +15,14 @@ function commandName(name) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(commandName(command), args, {
+  const spawnOptions = {
     cwd: options.cwd,
     encoding: "utf8",
-    env: options.env || process.env,
     stdio: options.inherit ? "inherit" : "pipe",
     timeout: options.timeout || 10 * 60 * 1000,
     shell: process.platform === "win32" && command === "npm",
-  });
+  };
+  const result = spawnSync(commandName(command), args, spawnOptions);
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const detail = (result.stderr || result.stdout || "").trim();
@@ -113,14 +113,16 @@ function dependenciesReady(runtimeDir) {
   return probe.status === 0;
 }
 
-function npmEnvironment(runtimeRoot) {
-  return {
-    ...process.env,
-    npm_config_audit: "false",
-    npm_config_cache: path.join(runtimeRoot, ".npm-cache"),
-    npm_config_fund: "false",
-    npm_config_update_notifier: "false",
-  };
+function npmInstallArgs(runtimeRoot) {
+  return [
+    "ci",
+    "--omit=dev",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--cache",
+    path.join(runtimeRoot, ".npm-cache"),
+  ];
 }
 
 function installRuntime(config, sourceConfig, options = {}) {
@@ -139,9 +141,8 @@ function installRuntime(config, sourceConfig, options = {}) {
     if (options.skipNpm) {
       fs.mkdirSync(path.join(temporaryDir, "node_modules"), { recursive: true });
     } else {
-      run("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
+      run("npm", npmInstallArgs(config.runtimeRoot), {
         cwd: temporaryDir,
-        env: npmEnvironment(config.runtimeRoot),
         timeout: 10 * 60 * 1000,
       });
     }
@@ -172,9 +173,8 @@ function ensureRuntime(env = process.env, options = {}) {
   const cli = validateRuntime(config.runtimeDir, sourceConfig.source, sourceConfig.ref);
   if (!options.skipNpm && !dependenciesReady(config.runtimeDir)) {
     process.stderr.write("[gavel] Repairing locked runtime dependencies...\n");
-    run("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
+    run("npm", npmInstallArgs(config.runtimeRoot), {
       cwd: config.runtimeDir,
-      env: npmEnvironment(config.runtimeRoot),
       timeout: 10 * 60 * 1000,
     });
     if (!dependenciesReady(config.runtimeDir)) {
@@ -198,10 +198,17 @@ function main() {
       return;
     }
 
-    const result = spawnSync(process.execPath, [runtime.cli, ...process.argv.slice(2)], {
-      stdio: "inherit",
-      env: { ...process.env, GAVEL_DATA_DIR: runtime.dataDir },
-    });
+    const previousDataDir = process.env.GAVEL_DATA_DIR;
+    process.env.GAVEL_DATA_DIR = runtime.dataDir;
+    let result;
+    try {
+      result = spawnSync(process.execPath, [runtime.cli, ...process.argv.slice(2)], {
+        stdio: "inherit",
+      });
+    } finally {
+      if (previousDataDir === undefined) delete process.env.GAVEL_DATA_DIR;
+      else process.env.GAVEL_DATA_DIR = previousDataDir;
+    }
     if (result.error) throw result.error;
     process.exitCode = result.status === null ? 1 : result.status;
   } catch (error) {
@@ -219,6 +226,7 @@ module.exports = {
   dependenciesReady,
   ensureRuntime,
   normalizedOrigin,
+  npmInstallArgs,
   resolveConfig,
   validateRuntime,
 };

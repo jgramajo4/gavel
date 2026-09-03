@@ -2,8 +2,8 @@
 
 Phase 4 turns a private voter profile and a normalized proposal into a
 structured `FOR`, `AGAINST`, or `ABSTAIN` recommendation. The output includes
-personal precedents, explicit evidence scores, explanations, flags, and a
-clearly marked draft reason.
+personal precedents, explicit evidence scores, explanations, flags, a
+first-class review decision, and a clearly marked draft reason.
 
 ```bash
 npm run gavel -- predict \
@@ -59,9 +59,10 @@ After the observed recommendation is computed, policy layers apply in order:
 matching hard rule > newest matching stated preference > observed behavior
 ```
 
-## Confidence
+## Score labeling and review
 
-Confidence is explicitly labeled `confidenceCalibrated: false`. It is a bounded
+Uncalibrated confidence is explicitly labeled `confidenceKind:
+"HEURISTIC_SCORE"` and `confidenceCalibrated: false`. It is a bounded
 heuristic for Phase 4, not an LLM self-assessment and not yet an empirical
 probability until a qualifying Phase 5 calibration model is applied. The raw
 output exposes these normalized components:
@@ -89,6 +90,14 @@ the configured policy outcome. Matching stated preferences have a minimum
 heuristic confidence of `0.85`. Phase 5 chronological backtesting must measure
 accuracy by confidence bucket and replace or calibrate these raw values.
 
+Observed-behavior recommendations are currently advisory even when a bucket is
+calibrated. Their `predictionReview` requires human review and sets
+`autonomyAllowed: false`. When the complete chronological backtest report is
+passed to `--calibration`, the prediction records accuracy, majority-baseline
+accuracy, lift, balanced accuracy, and report identity. A result that does not
+beat its majority baseline is flagged explicitly. Calibration changes score
+interpretation; it does not silently promote the predictor into autonomous use.
+
 ## Draft reasons
 
 Draft reasons are deterministic templates shaped by the profile's historical
@@ -106,5 +115,6 @@ three historical reasons and no stated preferences are available.
   calldata, and conservative prose/action contradictions require human review.
   See [`PROPOSAL_SECURITY.md`](PROPOSAL_SECURITY.md).
 - Category extraction is deterministic and intentionally conservative.
-- Confidence remains uncalibrated until chronological backtesting is complete.
+- Confidence remains a heuristic score until an eligible chronological
+  backtest bucket is applied, and observed-behavior output remains advisory.
 - This phase recommends only. It does not prepare, sign, or broadcast a vote.

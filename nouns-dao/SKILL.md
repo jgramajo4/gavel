@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized Nouns governance copilot for learning a voter's private history, analyzing proposals with personal precedents, managing preferences and hard rules, running backtests, preparing daily recommendations, and handling review-first voting or delegation.
 tags: [nouns, governance, voting, delegation, dao, copilot]
-version: 6
+version: 7
 visibility: public
 metadata:
   clawdbot:
@@ -45,6 +45,9 @@ prepare a vote for review, cast a confirmed vote, or delegate voting power.
 7. Builder attribution is internal transaction plumbing. Eligible Nouns actions
    retain Gavel's fixed attribution automatically; never present reward settings,
    balances, withdrawals, or builder economics as voter features.
+8. Observed-behavior recommendations are advisory. Call an uncalibrated value a
+   heuristic score, disclose `predictionReview`, and never treat calibration as
+   authorization for autonomy.
 
 ## Bankr runtime
 
@@ -113,7 +116,7 @@ For proposal analysis, lead with:
 <one-sentence plain-language summary>
 
 **Recommendation: FOR | AGAINST | ABSTAIN**
-**Confidence:** <percentage> · calibrated | raw heuristic
+**Score:** <percentage> · calibrated correctness estimate | heuristic
 
 **Why this fits you**
 - <personal evidence>
@@ -121,7 +124,7 @@ For proposal analysis, lead with:
 **Closest precedents**
 - Prop <id> — <vote> — <similarity>
 
-**Safety check:** Clear | Review needed
+**Structural calldata check:** No issue detected | Review needed
 - <hard-rule, security, novelty, or conflict flag when present>
 
 **Draft voting reason**
@@ -134,8 +137,9 @@ For proposal analysis, lead with:
 4. Show other active proposals
 ```
 
-Do not hide weak evidence. If calibration is unavailable, say the confidence is
-a raw heuristic. If the latest full backtest does not beat its simple baseline,
+Do not hide weak evidence. If calibration is unavailable, call the value a
+heuristic score, not a probability. A clear structural calldata check is not a
+claim of economic or contract safety. If the latest full backtest does not beat its simple baseline,
 say so when the user asks about reliability or considers automation.
 
 ## Autonomy

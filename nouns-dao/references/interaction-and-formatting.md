@@ -109,19 +109,20 @@ Your detailed profile stays private in Gavel's persistent workspace.
 4. Check historical accuracy
 ```
 
-Avoid leading with internal terms such as `evidence cutoff`, `raw heuristic`,
+Avoid leading with internal terms such as `evidence cutoff`, `heuristic score`,
 filesystem paths, JSON, or the recency formula. Keep those available under a
 **Technical details** drill-down.
 
 ## Proposal result and next actions
 
 Use the proposal response shape in `SKILL.md`. Make the recommendation visually
-prominent, translate `raw heuristic` to **not yet calibrated**, and never make a
-confidence percentage look like a guarantee.
+prominent, label a heuristic score as **not an accuracy probability**, and never
+make a percentage look like a guarantee.
 
 Show at most three precedents in the first view and offer **Show more evidence**.
-Always state the safety result, including **Clear — no review flags found** when
-there are no flags. Keep the draft reason in a block quote so it cannot be
+Always state the structural calldata result, including **No issue detected by
+the limited structural check** when there are no flags. Do not translate
+`riskLevel: CLEAR` into a claim of economic or contract safety. Keep the draft reason in a block quote so it cannot be
 confused with the user's confirmed final reason.
 
 Offer the next actions that are actually available. Preparing a vote remains a

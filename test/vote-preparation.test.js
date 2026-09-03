@@ -67,7 +67,7 @@ function security(overrides = {}) {
 
 function prediction(overrides = {}) {
   return {
-    schemaVersion: "1.2.0",
+    schemaVersion: "1.3.0",
     generatedAt: "2026-01-02T00:00:00.000Z",
     asOf: "2026-01-02T00:00:00.000Z",
     dao: "nouns",
@@ -79,11 +79,18 @@ function prediction(overrides = {}) {
     confidence: 0.8,
     confidencePercent: 80,
     confidenceCalibrated: false,
+    confidenceKind: "HEURISTIC_SCORE",
     policySource: "OBSERVED_BEHAVIOR",
     policySourceId: null,
     precedents: [],
     reasoning: ["Personal historical evidence favors this proposal."],
     flags: ["Review the draft before signing."],
+    predictionReview: {
+      requiresHumanReview: true,
+      autonomyAllowed: false,
+      reasonCodes: ["OBSERVED_HEURISTIC_ADVISORY_ONLY"],
+      backtest: null,
+    },
     security: security(),
     draftReason: {
       isDraft: true,
@@ -204,7 +211,9 @@ test("uses the deployed compact proposal ABI and a separate action getter", () =
 
 test("prepares unsigned vote calldata only after every canonical gate passes", async () => {
   const { adapter, calls } = harness();
-  const result = await adapter.prepare({ prediction: prediction(), proposal: proposal(), selectedSupport: "FOR" });
+  const result = await adapter.prepare({
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR", acknowledgePredictionReview: true,
+  });
 
   assert.equal(result.status, "READY_TO_SIGN");
   assert.equal(result.blockers.length, 0);
@@ -213,6 +222,8 @@ test("prepares unsigned vote calldata only after every canonical gate passes", a
   assert.equal(result.modelVoter, VOTER);
   assert.equal(result.votingAddress, VOTER);
   assert.equal(result.verification.simulation.estimatedGas, "123456");
+  assert.equal(result.predictionReview.reviewAcknowledged, true);
+  assert.equal(result.predictionReview.autonomyAllowed, false);
   assert.deepEqual(calls.map(([name]) => name), ["call", "estimateGas"]);
 
   const decoded = new Interface(GOVERNANCE_ABI).decodeFunctionData(
@@ -227,7 +238,9 @@ test("prepares unsigned vote calldata only after every canonical gate passes", a
 
 test("blocks inactive and duplicate votes before simulation", async () => {
   const { adapter, calls } = harness({ state: 4, hasVoted: true });
-  const result = await adapter.prepare({ prediction: prediction(), proposal: proposal(), selectedSupport: "FOR" });
+  const result = await adapter.prepare({
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR", acknowledgePredictionReview: true,
+  });
 
   assert.equal(result.status, "BLOCKED");
   assert.equal(result.transaction, null);
@@ -241,6 +254,7 @@ test("keeps the modeled voter distinct from an explicitly delegated voting addre
     proposal: proposal(),
     selectedSupport: "FOR",
     votingAddress: DELEGATE,
+    acknowledgePredictionReview: true,
   });
   assert.equal(result.status, "READY_TO_SIGN");
   assert.equal(result.modelVoter, VOTER);
@@ -255,7 +269,9 @@ test("blocks missing voting power and canonical action drift", async () => {
     votingPower: 0n,
     canonicalActions: { targets: ["0x4444444444444444444444444444444444444444"] },
   });
-  const result = await adapter.prepare({ prediction: prediction(), proposal: proposal(), selectedSupport: "FOR" });
+  const result = await adapter.prepare({
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR", acknowledgePredictionReview: true,
+  });
 
   assert.equal(result.status, "BLOCKED");
   assert.ok(result.blockers.some((item) => item.code === "EXECUTABLE_ACTION_MISMATCH"));
@@ -264,7 +280,7 @@ test("blocks missing voting power and canonical action drift", async () => {
 
 test("fails closed on stale proposal prose or unavailable canonical version events", async () => {
   const stale = await harness({ canonicalDescription: "Updated canonical description", version: 2 }).adapter.prepare({
-    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR",
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR", acknowledgePredictionReview: true,
   });
   assert.equal(stale.status, "BLOCKED");
   assert.ok(stale.blockers.some((item) => item.code === "PROPOSAL_DESCRIPTION_STALE"));
@@ -272,7 +288,7 @@ test("fails closed on stale proposal prose or unavailable canonical version even
   assert.equal(stale.verification.freshness.descriptionMatches, false);
 
   const unavailable = await harness({ freshnessError: true }).adapter.prepare({
-    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR",
+    prediction: prediction(), proposal: proposal(), selectedSupport: "FOR", acknowledgePredictionReview: true,
   });
   assert.equal(unavailable.status, "BLOCKED");
   assert.ok(unavailable.blockers.some((item) => item.code === "CANONICAL_VERSION_UNAVAILABLE"));
@@ -305,6 +321,7 @@ test("requires exact recommendation confirmation and explicit acknowledgement of
     selectedSupport: "AGAINST",
   });
   assert.ok(first.blockers.some((item) => item.code === "RECOMMENDATION_NOT_CONFIRMED"));
+  assert.ok(first.blockers.some((item) => item.code === "PREDICTION_REVIEW_REQUIRED"));
   assert.ok(first.blockers.some((item) => item.code === "SECURITY_REVIEW_REQUIRED"));
 
   const second = await harness().adapter.prepare({
@@ -312,6 +329,7 @@ test("requires exact recommendation confirmation and explicit acknowledgement of
     proposal: proposal(),
     selectedSupport: "FOR",
     acknowledgeSecurityReview: true,
+    acknowledgePredictionReview: true,
     reason: "I reviewed the flagged call and confirm this vote reason.",
   });
   assert.equal(second.status, "READY_TO_SIGN");
@@ -323,6 +341,7 @@ test("blocks when canonical simulation reverts", async () => {
     prediction: prediction(),
     proposal: proposal(),
     selectedSupport: "FOR",
+    acknowledgePredictionReview: true,
   });
   assert.equal(result.status, "BLOCKED");
   assert.equal(result.transaction, null);

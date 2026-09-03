@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
 
 const { predictionDocumentSchema } = require("../schema/prediction");
-const { calibrationModelSchema } = require("../schema/backtest");
+const { backtestReportSchema, calibrationModelSchema } = require("../schema/backtest");
 
 const DEFAULT_BUCKETS = Object.freeze([
   [0, 0.5],
@@ -92,6 +92,18 @@ function buildCalibrationModel(results, options = {}) {
 
 function applyCalibrationToPrediction(prediction, model) {
   const calibrationModel = calibrationModelSchema.parse(model);
+  if (prediction.policySource !== "OBSERVED_BEHAVIOR") {
+    return predictionDocumentSchema.parse({
+      ...prediction,
+      calibration: {
+        applied: false,
+        modelId: calibrationModel.modelId,
+        bucketIndex: bucketFor(prediction.rawConfidence ?? prediction.confidence).index,
+        sampleCount: 0,
+        reason: "Calibration applies only to observed-behavior heuristic predictions",
+      },
+    });
+  }
   const rawConfidence = prediction.rawConfidence ?? prediction.confidence;
   const bucket = bucketFor(
     rawConfidence,
@@ -116,11 +128,12 @@ function applyCalibrationToPrediction(prediction, model) {
   const confidence = bin.recommendedConfidence;
   return predictionDocumentSchema.parse({
     ...prediction,
-    schemaVersion: prediction.schemaVersion === "1.2.0" ? "1.2.0" : "1.1.0",
+    schemaVersion: prediction.schemaVersion === "1.3.0" ? "1.3.0" : prediction.schemaVersion === "1.2.0" ? "1.2.0" : "1.1.0",
     rawConfidence,
     confidence,
     confidencePercent: Math.round(confidence * 100),
     confidenceCalibrated: true,
+    confidenceKind: prediction.confidenceKind ? "CALIBRATED_CORRECTNESS_ESTIMATE" : undefined,
     calibration: {
       applied: true,
       modelId: calibrationModel.modelId,
@@ -129,15 +142,71 @@ function applyCalibrationToPrediction(prediction, model) {
       reason: null,
     },
     flags: [
-      ...prediction.flags.filter((flag) => !/has not yet been calibrated/i.test(flag)),
+      ...prediction.flags.filter((flag) => !/heuristic score|has not yet been calibrated/i.test(flag)),
       `Confidence calibrated from ${bin.sampleCount} historical predictions in this confidence bucket.`,
     ],
     method: { ...prediction.method, calibrated: true },
   });
 }
 
+function applyBacktestEvaluationToPrediction(prediction, reportInput) {
+  const report = backtestReportSchema.parse(reportInput);
+  if (
+    report.dao !== prediction.dao ||
+    report.chainId !== prediction.chainId ||
+    report.voter.toLowerCase() !== prediction.voter.toLowerCase()
+  ) {
+    throw new Error("Backtest report does not match the prediction voter, DAO, and chain");
+  }
+  if (prediction.policySource !== "OBSERVED_BEHAVIOR") {
+    return predictionDocumentSchema.parse({
+      ...prediction,
+      flags: [
+        ...new Set([
+          ...prediction.flags,
+          "Backtest evaluation applies only to observed-behavior recommendations, not policy overrides.",
+        ]),
+      ],
+    });
+  }
+
+  const lift = report.summary.accuracyLiftOverMajority;
+  const doesNotBeatMajority = lift === null || lift <= 0;
+  const existingReview = prediction.predictionReview || {
+    requiresHumanReview: true,
+    autonomyAllowed: false,
+    reasonCodes: ["OBSERVED_HEURISTIC_ADVISORY_ONLY"],
+    backtest: null,
+  };
+  const reasonCodes = existingReview.reasonCodes.filter((code) => code !== "BACKTEST_NOT_ATTACHED");
+  if (doesNotBeatMajority) reasonCodes.push("BACKTEST_DOES_NOT_BEAT_MAJORITY");
+  const warning = doesNotBeatMajority
+    ? "Chronological backtesting does not beat the majority-class baseline; human review is required."
+    : "Chronological backtesting beats the majority-class baseline, but observed-behavior recommendations remain advisory.";
+
+  return predictionDocumentSchema.parse({
+    ...prediction,
+    flags: [...new Set([...prediction.flags, warning])],
+    predictionReview: {
+      requiresHumanReview: true,
+      autonomyAllowed: false,
+      reasonCodes: [...new Set(reasonCodes)],
+      backtest: {
+        reportGeneratedAt: report.generatedAt,
+        calibrationModelId: report.calibrationModel.modelId,
+        predictionCount: report.summary.predictionCount,
+        accuracy: report.summary.accuracy,
+        majorityClassAccuracy: report.summary.majorityClassAccuracy,
+        accuracyLiftOverMajority: lift,
+        balancedAccuracy: report.summary.balancedAccuracy,
+      },
+    },
+  });
+}
+
 module.exports = {
   DEFAULT_BUCKETS,
+  applyBacktestEvaluationToPrediction,
   applyCalibrationToPrediction,
   bucketFor,
   buildCalibrationModel,

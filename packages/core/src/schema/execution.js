@@ -30,23 +30,34 @@ const addressRolesSchema = z.object({
   requiredDelegateAddress: addressSchema,
 });
 
-const preparedGovernanceTransactionSchema = z.object({
-  schemaVersion: z.literal("1.0.0"),
-  kind: z.literal("PREPARED_GOVERNANCE_TRANSACTION"),
-  adapter: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
-  action: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
-  chainId: z.number().int().positive(),
-  target: addressSchema,
-  calldata: hexSchema,
-  value: decimalStringSchema,
-  proposalId: decimalStringSchema.nullable(),
-  support: z.enum(["FOR", "AGAINST", "ABSTAIN"]).nullable(),
-  reason: z.string().nullable(),
-  executionAddress: addressSchema,
-  validated: z.literal(true),
-  validatedAt: z.string().datetime(),
-  intentHash: z.string().regex(/^[0-9a-f]{64}$/),
-});
+const preparedGovernanceTransactionSchema = z
+  .object({
+    schemaVersion: z.enum(["1.0.0", "1.1.0"]),
+    kind: z.literal("PREPARED_GOVERNANCE_TRANSACTION"),
+    adapter: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    action: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+    chainId: z.number().int().positive(),
+    target: addressSchema,
+    calldata: hexSchema,
+    value: decimalStringSchema,
+    proposalId: decimalStringSchema.nullable(),
+    support: z.enum(["FOR", "AGAINST", "ABSTAIN"]).nullable(),
+    reason: z.string().nullable(),
+    executionAddress: addressSchema,
+    autonomyAllowed: z.boolean().optional(),
+    validated: z.literal(true),
+    validatedAt: z.string().datetime(),
+    intentHash: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .superRefine((document, context) => {
+    if (document.schemaVersion === "1.1.0" && document.autonomyAllowed === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["autonomyAllowed"],
+        message: "v1.1 prepared transactions require an explicit autonomy decision",
+      });
+    }
+  });
 
 const executionResultSchema = z.object({
   executor: z.enum(Object.values(ExecutionMode)),

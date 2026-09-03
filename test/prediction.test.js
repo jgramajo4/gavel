@@ -142,13 +142,16 @@ test("predicts from matching personal precedents and exposes uncalibrated confid
   assert.equal(result.recommendation, "FOR");
   assert.equal(result.policySource, "OBSERVED_BEHAVIOR");
   assert.equal(result.confidenceCalibrated, false);
+  assert.equal(result.confidenceKind, "HEURISTIC_SCORE");
+  assert.equal(result.predictionReview.requiresHumanReview, true);
+  assert.equal(result.predictionReview.autonomyAllowed, false);
   assert.ok(result.confidence >= 0 && result.confidence <= 1);
   assert.equal(result.confidencePercent, Math.round(result.confidence * 100));
   assert.ok(result.precedents.length > 0);
   assert.equal(result.precedents[0].vote, "FOR");
   assert.equal(result.draftReason.isDraft, true);
   assert.equal(result.draftReason.available, true);
-  assert.equal(result.schemaVersion, "1.2.0");
+  assert.equal(result.schemaVersion, "1.3.0");
   assert.equal(result.security.contentPolicy.instructionHandling, "NEVER_FOLLOW");
 });
 
@@ -197,6 +200,8 @@ test("hard rules override inferred recommendations with deterministic confidence
   assert.equal(result.recommendation, "AGAINST");
   assert.equal(result.policySource, "HARD_RULE");
   assert.equal(result.confidence, 1);
+  assert.equal(result.confidenceKind, "POLICY_OVERRIDE_SCORE");
+  assert.equal(result.predictionReview.autonomyAllowed, false);
   assert.ok(result.flags.includes("Large transfer requires rejection."));
   assert.ok(result.flags.includes("A matched hard rule blocks autonomous execution."));
 });
@@ -217,6 +222,8 @@ test("newest matching stated preference overrides observed behavior", () => {
   assert.equal(result.recommendation, "AGAINST");
   assert.equal(result.policySource, "STATED_PREFERENCE");
   assert.ok(result.confidence >= 0.85);
+  assert.equal(result.predictionReview.requiresHumanReview, false);
+  assert.equal(result.predictionReview.autonomyAllowed, true);
 });
 
 test("fails closed when the target proposal is already part of profile evidence", () => {

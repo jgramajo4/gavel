@@ -60,7 +60,7 @@ The inspector currently flags:
 - destructive calls and generic execution/delegatecall surfaces;
 - suspected instructions addressed to Gavel, an agent, or an automated reviewer.
 
-Risk is reported as `CLEAR`, `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. Warning,
+Structural inspection risk is reported as `CLEAR`, `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. Warning,
 danger, and critical flags set `requiresHumanReview`.
 
 ## Prose/action mismatches
@@ -79,6 +79,8 @@ emitted until token metadata can be independently verified.
 ## Limitations
 
 - This is static inspection, not transaction simulation.
+- `CLEAR` means this limited inspection detected no structural issue. It is not
+  a claim of economic safety, contract safety, or proposal quality.
 - Target labels are a small local registry, not proof of contract identity.
 - Proxy storage state, implementation code, nested calls, and dynamic external
   effects require direct chain reads or simulation.

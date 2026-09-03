@@ -12,7 +12,8 @@ npm run gavel -- prepare-vote \
   data/private/predictions/nouns/0xvoter/123.json \
   data/private/proposals/nouns/123.json \
   --support FOR \
-  --reason "Confirmed reason"
+  --reason "Confirmed reason" \
+  --acknowledge-prediction-review
 ```
 
 Gavel uses `https://eth.drpc.org` by default. Advanced users may set
@@ -32,6 +33,12 @@ If proposal security reports require human review, inspect the findings first
 and then pass `--acknowledge-security-review`. Critical findings cannot be
 overridden by that acknowledgement.
 
+Observed-behavior recommendations are advisory. Inspect their evidence and
+`predictionReview`, explicitly confirm the support choice, and then pass
+`--acknowledge-prediction-review`. This acknowledgement permits supervised
+unsigned or Safe preparation only; it does not make an advisory prediction
+eligible for WaaP autonomy.
+
 ## Canonical gates
 
 Before returning a transaction, Gavel verifies:
@@ -49,7 +56,7 @@ Before returning a transaction, Gavel verifies:
 8. the execution address had nonzero voting power at the proposal snapshot
    block and the asset owner delegates to that required execution address;
 9. the selected support exactly confirms the recommendation;
-10. required security review is acknowledged; and
+10. required prediction and security reviews are acknowledged; and
 11. `eth_call` and gas estimation succeed from the voter address.
 
 A failed gate produces status `BLOCKED`, explicit blocker codes, and no

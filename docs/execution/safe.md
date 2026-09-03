@@ -7,7 +7,8 @@ Safe proposer client. If the client echoes different material, Gavel fails
 closed.
 
 The client needs proposer/delegate capability only. Gavel does not request or
-store a Safe owner private key. A successful submission is `PROPOSED`; status
+store a Safe owner private key, create a Safe, or choose the Safe address. The
+operator supplies an existing Safe address. A successful submission is `PROPOSED`; status
 may progress through `AWAITING_APPROVAL`, `READY_TO_EXECUTE`, and `EXECUTED`, or
 end in `REJECTED`, `EXPIRED`, `FAILED`, or `BLOCKED`. Human Safe owners retain
 the authorization boundary.

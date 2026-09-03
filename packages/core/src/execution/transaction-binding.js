@@ -4,7 +4,7 @@ const { getAddress } = require("ethers");
 const { preparedGovernanceTransactionSchema } = require("../schema/execution");
 
 function intentMaterial(input) {
-  return [
+  const material = [
     input.adapter,
     input.action,
     Number(input.chainId),
@@ -16,6 +16,8 @@ function intentMaterial(input) {
     input.reason,
     getAddress(input.executionAddress),
   ];
+  if (input.schemaVersion === "1.1.0") material.push(input.autonomyAllowed === true);
+  return material;
 }
 
 function governanceIntentHash(input) {
@@ -24,7 +26,7 @@ function governanceIntentHash(input) {
 
 function createPreparedGovernanceTransaction(input) {
   const document = {
-    schemaVersion: "1.0.0",
+    schemaVersion: "1.1.0",
     kind: "PREPARED_GOVERNANCE_TRANSACTION",
     adapter: input.adapter,
     action: input.action,
@@ -36,6 +38,7 @@ function createPreparedGovernanceTransaction(input) {
     support: input.support || null,
     reason: input.reason == null ? null : String(input.reason),
     executionAddress: getAddress(input.executionAddress),
+    autonomyAllowed: input.autonomyAllowed === true,
     validated: true,
     validatedAt: new Date(input.validatedAt || new Date()).toISOString(),
   };
@@ -60,6 +63,7 @@ function fromVotePreparation(preparation) {
     support: preparation.selectedSupport,
     reason: preparation.reason?.text || null,
     executionAddress: preparation.addressRoles?.executionAddress || preparation.votingAddress,
+    autonomyAllowed: preparation.predictionReview?.autonomyAllowed === true,
     validatedAt: preparation.generatedAt,
   });
 }
@@ -87,6 +91,7 @@ function assertExecutorDidNotMutate(prepared, observed) {
     support: supplied("support", expected.support),
     reason: supplied("reason", expected.reason),
     executionAddress: supplied("executionAddress", supplied("from", expected.executionAddress)),
+    autonomyAllowed: supplied("autonomyAllowed", expected.autonomyAllowed),
   };
   if (governanceIntentHash(actual) !== expected.intentHash) {
     throw new Error("Executor mutated the validated governance transaction");

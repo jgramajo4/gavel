@@ -16,6 +16,7 @@ const {
 const {
   ExecutionMode,
   ONBOARDING_QUESTIONS,
+  applyBacktestEvaluationToPrediction,
   applyCalibrationToPrediction,
   buildOnboardingPreferences,
   buildVoterProfile,
@@ -60,6 +61,7 @@ Usage:
   gavel prepare-vote <prediction.json> <proposal.json> --support <choice>
                      [--from <voting-address>] [--asset-owner <address>]
                      [--execution-address <address>] [--reason <text>]
+                     [--acknowledge-prediction-review]
                      [--acknowledge-security-review]
                      [--rpc <url>] [--output <path>] [--stdout]
   gavel execution-status --dao nouns --mode <mode> --model-address <address>
@@ -315,6 +317,9 @@ async function predictCommand(argv) {
     const calibrationInput = await readJson(values.calibration);
     const calibrationModel = calibrationInput.calibrationModel || calibrationInput;
     prediction = applyCalibrationToPrediction(prediction, calibrationModel);
+    if (calibrationInput.calibrationModel && calibrationInput.summary) {
+      prediction = applyBacktestEvaluationToPrediction(prediction, calibrationInput);
+    }
   }
 
   if (values.stdout) {
@@ -338,6 +343,8 @@ async function predictCommand(argv) {
         confidence: prediction.confidence,
         confidencePercent: prediction.confidencePercent,
         confidenceCalibrated: prediction.confidenceCalibrated,
+        confidenceKind: prediction.confidenceKind,
+        predictionReview: prediction.predictionReview,
         policySource: prediction.policySource,
         precedents: prediction.precedents,
         reasoning: prediction.reasoning,
@@ -498,6 +505,7 @@ async function prepareVoteCommand(argv) {
       "execution-address": { type: "string" },
       reason: { type: "string" },
       "acknowledge-security-review": { type: "boolean", default: false },
+      "acknowledge-prediction-review": { type: "boolean", default: false },
       rpc: { type: "string" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
@@ -529,6 +537,7 @@ async function prepareVoteCommand(argv) {
     assetOwnerAddress: values["asset-owner"],
     reason: values.reason,
     acknowledgeSecurityReview: values["acknowledge-security-review"],
+    acknowledgePredictionReview: values["acknowledge-prediction-review"],
   });
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(preparation, null, 2)}\n`);
@@ -560,6 +569,7 @@ async function prepareVoteCommand(argv) {
           blockers: preparation.blockers,
           flags: preparation.flags,
           security: preparation.security,
+          predictionReview: preparation.predictionReview,
           transactionPrepared: preparation.transaction !== null,
           output: absolutePath,
         },

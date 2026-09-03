@@ -33,6 +33,9 @@ class WaapAutonomousExecutor {
     if (getAddress(prepared.executionAddress) !== this.executionAddress) {
       throw new Error("Prepared execution address does not match WaaP");
     }
+    if (prepared.autonomyAllowed !== true) {
+      throw new Error("Prediction review policy blocks autonomous execution");
+    }
     const policyResult = await this.policy(prepared);
     if (policyResult !== true && policyResult?.allowed !== true) {
       throw new Error(`WaaP policy blocked governance execution${policyResult?.reason ? `: ${policyResult.reason}` : ""}`);

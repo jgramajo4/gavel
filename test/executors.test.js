@@ -24,6 +24,7 @@ function prepared(executionAddress = SAFE, overrides = {}) {
     support: "FOR",
     reason: "Consistent with prior votes.",
     executionAddress,
+    autonomyAllowed: true,
     validatedAt: "2026-09-02T00:00:00.000Z",
     ...overrides,
   });
@@ -54,7 +55,7 @@ test("Safe proposes an immutable validated vote without an owner key", async () 
       async getStatus() { return { status: "AWAITING_APPROVAL" }; },
     },
   });
-  const result = await executor.submit(prepared());
+  const result = await executor.submit(prepared(SAFE, { autonomyAllowed: false }));
   assert.equal(result.status, "PROPOSED");
   assert.equal(result.executionId, "safe-42");
   assert.equal(proposal.safeAddress, SAFE);
@@ -89,6 +90,10 @@ test("WaaP accepts only adapter-approved governance actions after policy approva
     client: { submit: async ({ transaction }) => ({ executionId: "waap-42", status: "EXECUTED", transaction }) },
   });
   assert.equal((await accepted.submit(prepared(WAAP))).status, "EXECUTED");
+  await assert.rejects(
+    accepted.submit(prepared(WAAP, { autonomyAllowed: false })),
+    /blocks autonomous execution/,
+  );
 
   const disabled = new WaapAutonomousExecutor({
     adapter: dao({ capabilities: { prepareVote: true, safeSupervised: true, waapAutonomous: false } }),

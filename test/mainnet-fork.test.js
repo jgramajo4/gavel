@@ -29,6 +29,7 @@ test("mainnet fork: prepares a canonical unsigned vote and fails closed on local
     votingAddress: process.env.GAVEL_FORK_VOTING_ADDRESS,
     reason: process.env.GAVEL_FORK_REASON || "Deterministic Gavel mainnet-fork validation",
     acknowledgeSecurityReview: true,
+    acknowledgePredictionReview: true,
   };
 
   const ready = await adapter.prepare(input);
