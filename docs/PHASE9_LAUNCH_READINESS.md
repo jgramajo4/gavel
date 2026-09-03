@@ -66,8 +66,11 @@ had no mainnet-fork RPC, so the unchecked gate remains a launch blocker.
 - [ ] Proposal/recommendation/correction journey in Bankr.
 - [ ] Delegated wallet and wallet-approval handoff in Bankr.
 
-No Bankr runtime or credential was available. Repository skill tests are not
-represented as runtime proof.
+A live Bankr attempt on 2026-09-03 exposed two integration gaps: sandbox scripts
+had no Bankr-provided raw Ethereum RPC, and no generated voter profile was found
+in persistent Files storage. Gavel now supplies a public RPC default and requires
+an explicit cross-task private-file verification. These fixes still need a fresh
+Bankr end-to-end run; repository tests are not runtime proof.
 
 ## New voter
 

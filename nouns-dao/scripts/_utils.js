@@ -1,6 +1,10 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const {
+  DEFAULT_ETHEREUM_RPC_URL,
+  createEthereumProvider,
+} = require("../../packages/nouns-adapter");
 
 const ROOT = path.resolve(__dirname, "..");
 const REFERENCES = path.join(ROOT, "references");
@@ -39,9 +43,12 @@ function requireEnv(name) {
   return value;
 }
 
+function getRpcUrl(env = process.env) {
+  return env.ETHEREUM_RPC_URL || DEFAULT_ETHEREUM_RPC_URL;
+}
+
 function getProvider() {
-  const rpcUrl = requireEnv("ETHEREUM_RPC_URL");
-  return new ethers.JsonRpcProvider(rpcUrl);
+  return createEthereumProvider();
 }
 
 function getSigner() {
@@ -105,8 +112,10 @@ async function getMinBid(auctionContract) {
 
 module.exports = {
   ADDRESSES,
+  DEFAULT_ETHEREUM_RPC_URL,
   getConfig,
   getClientId,
+  getRpcUrl,
   getProvider,
   getSigner,
   getAbi,

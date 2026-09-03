@@ -15,9 +15,12 @@ npm run gavel -- prepare-vote \
   --reason "Confirmed reason"
 ```
 
-Set `ETHEREUM_RPC_URL` or pass `--rpc`. No private key is read. The selected
-support is mandatory and must confirm the prediction. When no `--reason` is
-provided, Gavel uses the clearly marked prediction draft if one exists.
+Gavel uses `https://eth.drpc.org` by default. Advanced users may set
+`ETHEREUM_RPC_URL` or pass `--rpc` for a dedicated provider. No private key is
+read. The selected support is mandatory and must confirm the prediction. When
+no `--reason` is provided, Gavel uses the clearly marked prediction draft if one
+exists. A dedicated provider may be needed if the public endpoint limits the
+historical log range required for proposal-freshness verification.
 
 The prediction address remains `modelAddress`. If the token owner and voting
 address differ, pass `--asset-owner 0xColdAddress` and

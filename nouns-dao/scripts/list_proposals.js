@@ -3,7 +3,7 @@
 /**
  * List active Nouns DAO proposals from the governance contract.
  * Environment:
- *   ETHEREUM_RPC_URL (required)
+ *   ETHEREUM_RPC_URL (optional advanced override)
  *
  * Usage:
  *   node list_proposals.js [--limit=10]
@@ -12,6 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const GOVERNANCE_ADDRESS = "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d";
 const ABI_PATH = path.resolve(__dirname, "../references/governance-abi.json");
@@ -38,17 +39,11 @@ function toStringSafe(value) {
 }
 
 async function main() {
-  const rpcUrl = process.env.ETHEREUM_RPC_URL;
-  if (!rpcUrl) {
-    console.error("Missing ETHEREUM_RPC_URL.");
-    process.exit(1);
-  }
-
   const limitArg = getArgValue("limit");
   const limit = limitArg ? Number(limitArg) : null;
 
   const abi = JSON.parse(fs.readFileSync(ABI_PATH, "utf8"));
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const governance = new ethers.Contract(GOVERNANCE_ADDRESS, abi, provider);
 
   const proposalCount = await governance.proposalCount();

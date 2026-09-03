@@ -53,11 +53,12 @@ tools/admin/nouns-rewards/         # builder-only; requires GAVEL_ADMIN_MODE=1
 
 ## Environment
 
-Required:
-- `ETHEREUM_RPC_URL` — Mainnet RPC endpoint
-- `AGENT_PRIVATE_KEY` — signer private key (required for txs)
+Required for legacy transactions only:
+- `AGENT_PRIVATE_KEY` — signer private key
 
 Optional:
+- `ETHEREUM_RPC_URL` — advanced mainnet RPC override; read and transaction
+  scripts default to the public `https://eth.drpc.org` endpoint
 - `CLIENT_ID` — not used; clientId is fixed in `config.json` (38)
 - `MAX_FEE_GWEI`, `MAX_PRIORITY_FEE_GWEI` — bid gas controls
 - `MAX_FEE_PER_GAS_GWEI`, `MAX_PRIORITY_FEE_PER_GAS_GWEI` — vote gas controls
@@ -97,8 +98,9 @@ NOUN_ID=123 node scripts/get_noun_metadata.js
 ### Daily Briefing (Optional)
 Read-only digest of the live auction, Active proposals, and what changed since
 the last briefing (bids, settlements, new auctions, new proposals, and votes
-cast over a recent block window, read from event logs). Signs nothing — only
-needs `ETHEREUM_RPC_URL`, so it is safe to run unattended on a schedule.
+cast over a recent block window, read from event logs). Signs nothing and uses
+the public RPC default, so it is safe to run unattended on a schedule. Set
+`ETHEREUM_RPC_URL` only to override that endpoint.
 ```
 node scripts/daily_briefing.js
 ```

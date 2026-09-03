@@ -3,12 +3,14 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
-const { getAddress, JsonRpcProvider } = require("ethers");
+const { getAddress } = require("ethers");
 
 const {
   DEFAULT_ENDPOINT,
+  DEFAULT_ETHEREUM_RPC_URL,
   NounsDaoAdapter,
   NounsSubgraphHistoryAdapter,
+  createEthereumProvider,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
 const {
@@ -78,6 +80,10 @@ Commands:
   prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
   execution-status  Fail-closed readiness for unsigned, Safe, or WaaP execution.
   prepare-delegation  Prepare, but never submit, Nouns delegation calldata.
+
+Network:
+  Chain-backed commands use ${DEFAULT_ETHEREUM_RPC_URL} by default.
+  Advanced users can override it with ETHEREUM_RPC_URL or --rpc.
 
 Privacy:
   Without --stdout or --output, history and profiles are stored under
@@ -492,7 +498,7 @@ async function prepareVoteCommand(argv) {
       "execution-address": { type: "string" },
       reason: { type: "string" },
       "acknowledge-security-review": { type: "boolean", default: false },
-      rpc: { type: "string", default: process.env.ETHEREUM_RPC_URL },
+      rpc: { type: "string" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
@@ -508,14 +514,11 @@ async function prepareVoteCommand(argv) {
   if (!values.support) {
     throw new Error("prepare-vote requires --support AGAINST, FOR, or ABSTAIN as explicit confirmation");
   }
-  if (!values.rpc) {
-    throw new Error("prepare-vote requires --rpc or ETHEREUM_RPC_URL");
-  }
   const [prediction, proposalInput] = await Promise.all([
     readJson(positionals[0]),
     readJson(positionals[1]),
   ]);
-  const provider = new JsonRpcProvider(values.rpc, 1, { staticNetwork: false });
+  const provider = createEthereumProvider({ rpcUrl: values.rpc });
   const adapter = new NounsDaoAdapter({ provider });
   const preparation = await adapter.prepareVote({
     prediction,
@@ -597,7 +600,7 @@ async function executionStatusCommand(argv) {
       "execution-address": { type: "string" },
       "safe-address": { type: "string" },
       "waap-address": { type: "string" },
-      rpc: { type: "string", default: process.env.ETHEREUM_RPC_URL },
+      rpc: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -608,11 +611,10 @@ async function executionStatusCommand(argv) {
   if (positionals.length !== 0) throw new Error("execution-status accepts no positional arguments");
   if (values.dao !== "nouns") throw new Error(`Unsupported DAO: ${values.dao}`);
   if (!values["model-address"]) throw new Error("execution-status requires --model-address or GAVEL_MODEL_ADDRESS");
-  if (!values.rpc) throw new Error("execution-status requires --rpc or ETHEREUM_RPC_URL");
   const mode = normalizeMode(values.mode);
   const executionAddress = configuredExecutionAddress(mode, values, values["model-address"]);
   if (!executionAddress) throw new Error(`No execution address configured for ${mode}`);
-  const provider = new JsonRpcProvider(values.rpc, 1, { staticNetwork: false });
+  const provider = createEthereumProvider({ rpcUrl: values.rpc });
   const adapter = new NounsDaoAdapter({ provider });
   const status = await resolveExecutionReadiness({
     adapter,
@@ -637,7 +639,7 @@ async function prepareDelegationCommand(argv) {
       "model-address": { type: "string", default: process.env.GAVEL_MODEL_ADDRESS },
       "safe-address": { type: "string" },
       "waap-address": { type: "string" },
-      rpc: { type: "string", default: process.env.ETHEREUM_RPC_URL },
+      rpc: { type: "string" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
@@ -649,7 +651,6 @@ async function prepareDelegationCommand(argv) {
   }
   if (positionals.length !== 0) throw new Error("prepare-delegation accepts no positional arguments");
   if (values.dao !== "nouns") throw new Error(`Unsupported DAO: ${values.dao}`);
-  if (!values.rpc) throw new Error("prepare-delegation requires --rpc or ETHEREUM_RPC_URL");
   const assetOwnerAddress = values["asset-owner-address"] || values["model-address"];
   if (!assetOwnerAddress) {
     throw new Error("prepare-delegation requires --asset-owner-address (or an explicit model-address fallback)");
@@ -662,7 +663,7 @@ async function prepareDelegationCommand(argv) {
   if (!requiredDelegateAddress) {
     throw new Error("prepare-delegation requires --to or --executor with a configured Safe/WaaP address");
   }
-  const provider = new JsonRpcProvider(values.rpc, 1, { staticNetwork: false });
+  const provider = createEthereumProvider({ rpcUrl: values.rpc });
   const adapter = new NounsDaoAdapter({ provider });
   const preparation = await adapter.prepareDelegation({ assetOwnerAddress, requiredDelegateAddress });
   if (values.stdout) {

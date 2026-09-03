@@ -15,6 +15,7 @@ const requiredReferences = [
   "daily-and-review.md",
   "legacy-nouns-tools.md",
   "interaction-and-formatting.md",
+  "profile-storage.md",
 ];
 
 test("declares Gavel as a discoverable personalized governance copilot", () => {
@@ -97,6 +98,17 @@ test("defines a persistent self-installing Bankr runtime boundary", () => {
   assert.match(runtime, /npm test/);
   assert.match(runtime, /end the Bankr conversation and start a new one/i);
   assert.match(runtime, /No private key is required/);
+  assert.match(runtime, /https:\/\/eth\.drpc\.org/);
+  assert.match(runtime, /optional advanced\s+override/i);
+});
+
+test("keeps private voter state out of public Bankr Agent Profiles", () => {
+  const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
+  assert.match(skill, /Agent Profiles are public publishing pages/i);
+  assert.match(storage, /must never\s+receive voting reasons/i);
+  assert.match(storage, /persistent Files storage/i);
+  assert.match(storage, /later task/i);
+  assert.match(storage, /Never fall back to an Agent\s+Profile/i);
 });
 
 test("orders proposal analysis defensively and keeps preparation separate from broadcast", () => {

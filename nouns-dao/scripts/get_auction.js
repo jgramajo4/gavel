@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const AUCTION_ADDRESS = "0x830BD73E4184ceF73443C15111a1DF14e495C706";
 
@@ -20,15 +21,10 @@ function formatEth(wei) {
 }
 
 async function main() {
-  const rpcUrl = process.env.ETHEREUM_RPC_URL;
-  if (!rpcUrl) {
-    throw new Error("Missing ETHEREUM_RPC_URL in environment.");
-  }
-
   const abiPath = path.join(__dirname, "..", "references", "auction-abi.json");
   const auctionAbi = readJson(abiPath);
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const auctionContract = new ethers.Contract(AUCTION_ADDRESS, auctionAbi, provider);
 
   const auction = await auctionContract.auction();

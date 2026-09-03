@@ -65,6 +65,17 @@ Keep all voter-specific files under:
 The repository excludes this directory from Git. Never run `git add -f` on it,
 copy it into a skill resource, publish it in chat, or mix files between voters.
 
+`execute_cli` processes may be short-lived. After any state-producing command,
+read its JSON `output` path, verify that exact file is nonempty, and confirm it
+appears in Bankr's persistent Files storage. Do not claim persistence merely
+because the file exists inside the current sandbox process.
+
+Bankr Agent Profiles and their project-update feeds are public. Never store a
+Gavel voter profile, preferences, rules, reasons, or prepared transaction there.
+With the user's consent, Bankr memory may retain only a minimal pointer (voter
+address and private file path), not the profile JSON. See `profile-storage.md`
+for the full policy.
+
 For the persistence pilot:
 
 1. onboard and build a profile;
@@ -77,11 +88,15 @@ For the persistence pilot:
 Passing a unit test or seeing a file during the same conversation is not
 persistence evidence.
 
-## Required environment
+## Network configuration
 
 - Public history/proposal ingestion needs outbound HTTPS.
-- Vote preparation needs `ETHEREUM_RPC_URL` configured in Bankr's secure Env Vars
-  settings. Refer to the variable by name and never echo its value.
+- Chain-backed commands default to the public `https://eth.drpc.org` endpoint;
+  Bankr does not need to provide its own raw RPC URL for the basic workflow.
+- `ETHEREUM_RPC_URL` in Bankr's secure Env Vars settings is an optional advanced
+  override for higher limits, privacy requirements, or a dedicated provider.
+  Archive-heavy proposal checks can require this override. Refer to the variable
+  by name and never echo its value.
 - No private key is required by Gavel. It produces unsigned calldata only.
 
 If runtime installation, dependency installation, RPC access, or persistence

@@ -7,10 +7,12 @@ Choose a durable, private directory owned by the Hermes runtime:
 export GAVEL_DATA_DIR=/persistent/private/gavel
 ```
 
-Common non-secret/runtime settings are `ETHEREUM_RPC_URL`,
-`NOUNS_SUBGRAPH_URL`, `GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`,
-`GAVEL_SAFE_ADDRESS`, and `GAVEL_WAAP_ADDRESS`. Store RPC credentials through
-Hermes secret facilities and do not persist or echo raw private keys.
+Common non-secret/runtime settings are `NOUNS_SUBGRAPH_URL`,
+`GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`, `GAVEL_SAFE_ADDRESS`, and
+`GAVEL_WAAP_ADDRESS`. Chain-backed commands default to `https://eth.drpc.org`.
+`ETHEREUM_RPC_URL` or `--rpc` is an optional advanced override; store any RPC
+credentials through Hermes secret facilities and do not persist or echo raw
+private keys.
 
 The address roles are independent:
 

@@ -10,7 +10,7 @@
  * sends a transaction — it only needs an RPC URL.
  *
  * Environment:
- *   ETHEREUM_RPC_URL (required)
+ *   ETHEREUM_RPC_URL (optional advanced override)
  *   VOTER_ADDRESS    (optional) — annotate each Active proposal with whether
  *                                 this address has already voted
  *
@@ -23,6 +23,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const AUCTION_ADDRESS = "0x830BD73E4184ceF73443C15111a1DF14e495C706";
 const GOVERNANCE_ADDRESS = "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d";
@@ -314,11 +315,6 @@ function buildHeadlines(auction, governance, changes) {
 }
 
 async function main() {
-  const rpcUrl = process.env.ETHEREUM_RPC_URL;
-  if (!rpcUrl) {
-    console.error("Missing ETHEREUM_RPC_URL.");
-    process.exit(1);
-  }
 
   const limitArg = getArgValue("limit");
   const limit = limitArg ? Number(limitArg) : null;
@@ -337,7 +333,7 @@ async function main() {
     ? Number(sinceBlocksArg)
     : Math.round((sinceHours * 3600) / SECONDS_PER_BLOCK);
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const auctionAbi = readJson(path.join(REFERENCES, "auction-abi.json"));
   const governanceAbi = readJson(path.join(REFERENCES, "governance-abi.json"));
   const auctionContract = new ethers.Contract(AUCTION_ADDRESS, auctionAbi, provider);

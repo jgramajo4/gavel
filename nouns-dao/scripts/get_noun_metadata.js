@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const NOUNS_TOKEN_ADDRESS = "0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03";
 
@@ -30,17 +31,13 @@ function decodeTokenUri(tokenUri) {
 }
 
 async function main() {
-  const rpcUrl = process.env.ETHEREUM_RPC_URL;
   const nounId = process.env.NOUN_ID;
 
-  if (!rpcUrl) {
-    throw new Error("Missing ETHEREUM_RPC_URL env var");
-  }
   if (!nounId) {
     throw new Error("Missing NOUN_ID env var");
   }
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const abi = loadAbi();
   const contract = new ethers.Contract(NOUNS_TOKEN_ADDRESS, abi, provider);
 

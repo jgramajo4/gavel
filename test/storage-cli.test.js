@@ -44,3 +44,13 @@ test("legacy and canonical CLI entry points expose the same machine-readable con
     assert.deepEqual(output.answers, ["FOR", "AGAINST", "ABSTAIN", "DEPENDS", "SKIP"]);
   }
 });
+
+test("CLI help documents the public RPC default and advanced overrides", () => {
+  const result = spawnSync(process.execPath, [cli, "--help"], {
+    encoding: "utf8",
+    env: { ...process.env, ETHEREUM_RPC_URL: "" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /https:\/\/eth\.drpc\.org/);
+  assert.match(result.stdout, /ETHEREUM_RPC_URL or --rpc/);
+});
