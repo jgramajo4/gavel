@@ -30,8 +30,7 @@ nouns-dao/
 ├── references/
 │   ├── auction-abi.json
 │   ├── governance-abi.json
-│   ├── nouns-token-abi.json
-│   └── rewards-abi.json
+│   └── nouns-token-abi.json
 └── scripts/
     ├── _utils.js
     ├── get_auction.js
@@ -42,11 +41,7 @@ nouns-dao/
     ├── list_proposals.js
     ├── cast_vote.js
     ├── delegate_votes.js
-    ├── propose.js
-    ├── update_rewards.js          # deprecated admin compatibility shim
-    └── withdraw_rewards.js        # deprecated admin compatibility shim
-
-tools/admin/nouns-rewards/         # builder-only; requires GAVEL_ADMIN_MODE=1
+    └── propose.js
 ```
 
 ---
@@ -140,12 +135,11 @@ node scripts/delegate_votes.js --to 0xYourAddress
 node scripts/propose.js --targets 0xTarget1,0xTarget2 --values 0,0 --signatures "", "" --calldatas 0x,0x --description "Proposal description"
 ```
 
-### Builder reward administration
+### Builder rewards
 
-Reward maintenance and withdrawal are intentionally excluded from voter-facing
-skill actions. Gavel builders can use the explicitly gated tools documented in
-`../tools/admin/nouns-rewards/README.md`. The old script paths remain temporary
-compatibility shims and enforce the same admin gate.
+Eligible transactions retain Gavel's fixed client attribution, but this
+repository intentionally ships no reward-maintenance or withdrawal scripts.
+Those are owner operations and are administered outside the public skill.
 
 ---
 
@@ -195,4 +189,3 @@ ETHEREUM_RPC_URL=http://127.0.0.1:8545 node scripts/get_auction.js
 - Auction House: `0x830BD73E4184ceF73443C15111a1DF14e495C706`
 - Governance: `0x6f3E6272A167e8AcCb32072d08E0957F9c79223d`
 - Nouns Token: `0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03`
-- Rewards: `0x883860178f95d0c82413edc1d6de530cb4771d55`

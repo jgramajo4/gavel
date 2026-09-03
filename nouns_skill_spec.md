@@ -26,7 +26,6 @@ This document defines the technical specification for a Bankr Skill that gives a
 | Auction Implementation | `0x1D835808ddca38fbe14e560d8e25b3d256810aF0` |
 | Governance Proxy | `0x6f3E6272A167e8AcCb32072d08E0957F9c79223d` |
 | Nouns Token (ERC-721) | `0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03` |
-| Rewards Contract | `0x883860178f95d0c82413edc1d6de530cb4771d55` |
 
 ---
 
@@ -44,7 +43,6 @@ This document defines the technical specification for a Bankr Skill that gives a
 | Cast Vote | Optional | Call `castRefundableVoteWithReason(proposalId, support, reason, clientId)` |
 | Get Vote Receipt | Optional | Check if agent wallet has already voted on a given proposal |
 | Delegate Votes | Optional | Call `delegate(address)` on the Nouns Token to assign voting power |
-| Withdraw Rewards | Optional | Call `withdrawClientBalance(clientId, to, amount)` on Rewards contract |
 
 ---
 
@@ -179,27 +177,19 @@ A scheduled digest that drives a daily governance loop. Performs **no signing**
 
 ---
 
-## 5. Client Incentives (Rewards Program)
+## 5. Client Attribution
 
 > Reference: https://paragraph.com/@verbsteam/how-to-participate-in-nouns-client-incentives
 
-Nouns DAO pays registered clients (frontends) for interactions they facilitate. Every on-chain call must include `clientId` **38** for attribution and rewards.
+Eligible Nouns calls include client ID **38** for Gavel attribution.
 
 ### ✅ Client ID: `38`
 - Nouns Client Token #38 minted to `gramajo.eth`
 - Tx: `0x2a4f0e52ae83331de3fe08c776a704be6adf8c14c6aa202bfadae0e1b66dc691`
-- Rewards contract: `0x883860178f95d0c82413edc1d6de530cb4771d55`
 
-### Rewards Lifecycle
-
-1. **Register** — `registerClient(name, descriptor)` → mints Client Token NFT (done ✓)
-2. **Use clientId** — pass `38` in every eligible function call
-3. **Get approved** — DAO proposal must call `setClientApproval(38, true)` to enable withdrawals
-4. **Withdraw** — call `withdrawClientBalance(38, to, amount)` on Rewards contract
-
-> Rewards are NOT updated in real time. Anyone can trigger calculation by calling
-> `updateRewardsForAuctions()` or `updateRewardsForProposalWritingAndVoting()` on the
-> Rewards contract. Gas is refunded from the contract's WETH balance.
+Reward maintenance, balances, metadata administration, and withdrawals are not
+skill actions and no scripts or ABI for those operations are shipped in this
+public repository. They are administered separately by the client owner.
 
 ### clientId-Aware Function Signatures
 
@@ -209,8 +199,6 @@ Nouns DAO pays registered clients (frontends) for interactions they facilitate. 
 | Cast vote | `castRefundableVoteWithReason(proposalId, support, reason, 38)` |
 | Cast vote (no reason) | `castRefundableVote(proposalId, support, 38)` |
 | Submit proposal | `propose(targets, values, sigs, calldatas, description, 38)` |
-| Withdraw rewards | `withdrawClientBalance(38, to, amount)` |
-| Update metadata | `updateClientMetadata(38, name, descriptor)` |
 
 ---
 
@@ -238,7 +226,6 @@ clientId: 38
 - get_noun_metadata  — tokenURI(nounId) → traits + SVG
 - list_proposals     — enumerate Active governance proposals  [optional]
 - cast_vote          — castRefundableVoteWithReason(..., 38)  [optional]
-- withdraw_rewards   — withdrawClientBalance(38, to, amount)  [optional]
 ```
 
 ---
@@ -252,8 +239,7 @@ nouns-dao/
 ├── references/
 │   ├── auction-abi.json         ← ABI for 0x830BD73E...
 │   ├── governance-abi.json      ← ABI for 0x6f3E6272...
-│   ├── nouns-token-abi.json     ← ERC-721 ABI
-│   └── rewards-abi.json         ← ABI for 0x883860178f...
+│   └── nouns-token-abi.json     ← ERC-721 ABI
 └── scripts/
     ├── _utils.js                ← shared helpers (provider, ABIs, formatting)
     ├── get_auction.js
@@ -264,9 +250,7 @@ nouns-dao/
     ├── list_proposals.js        ← [optional]
     ├── cast_vote.js             ← castRefundableVoteWithReason(..., 38)
     ├── delegate_votes.js        ← [optional] delegate(address)
-    ├── propose.js               ← [optional] propose(..., 38)
-    ├── update_rewards.js        ← [optional] recompute reward balances
-    └── withdraw_rewards.js      ← withdrawClientBalance(38, to, amount)
+    └── propose.js               ← [optional] propose(..., 38)
 ```
 
 ---
@@ -283,7 +267,6 @@ nouns-dao/
 | Auction Contract | `0x830BD73E4184ceF73443C15111a1DF14e495C706` |
 | Governance Contract | `0x6f3E6272A167e8AcCb32072d08E0957F9c79223d` |
 | Nouns Token | `0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03` |
-| Rewards Contract | `0x883860178f95d0c82413edc1d6de530cb4771d55` |
 
 ---
 
@@ -312,13 +295,13 @@ Call `delegate(selfAddress)` on the Nouns Token at least once to activate voting
 ## 10. Submission Checklist
 
 - [ ] `SKILL.md` present at `nouns-dao/SKILL.md` with correct frontmatter
-- [ ] All four ABIs in `references/` (including `rewards-abi.json`)
+- [ ] Auction, governance, and Nouns token ABIs in `references/`
 - [ ] `config.json` present with `{ "clientId": 38 }`
 - [ ] `get_auction.js`, `place_bid.js`, `settle_auction.js` functional on mainnet
 - [ ] `place_bid.js` uses `createBid(nounId, 38)` — not the clientId-less variant
 - [ ] `cast_vote.js` uses `castRefundableVoteWithReason(..., 38)` for reward attribution
 - [ ] `daily_briefing.js` is read-only — requires no `AGENT_PRIVATE_KEY` and sends no tx
-- [ ] `withdraw_rewards.js` script present
+- [ ] No reward-maintenance or withdrawal tooling is shipped in the public skill
 - [ ] Bid validation enforces both `reservePrice` and `minBidIncrementPercentage`
 - [ ] Scripts are stateless — all config via env vars and `config.json`
 - [ ] PR description explains what the skill does and which contracts it calls
