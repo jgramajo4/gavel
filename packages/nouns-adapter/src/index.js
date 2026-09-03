@@ -11,6 +11,11 @@ const {
   NounsVotePreparationAdapter,
 } = require("./vote");
 const { NounsDelegationPreparationAdapter } = require("./delegation");
+const {
+  DEFAULT_ETHEREUM_RPC_URL,
+  createEthereumProvider,
+  resolveEthereumRpcUrl,
+} = require("./rpc");
 
 class NounsDaoAdapter {
   constructor(options) {
@@ -79,6 +84,9 @@ module.exports = {
   NounsDelegationPreparationAdapter,
   NounsSubgraphHistoryAdapter,
   DEFAULT_ENDPOINT,
+  DEFAULT_ETHEREUM_RPC_URL,
+  createEthereumProvider,
+  resolveEthereumRpcUrl,
   inspectNounsProposal,
   CHAIN_ID,
   GOVERNANCE_ADDRESS,

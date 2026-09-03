@@ -4,7 +4,7 @@
  * Delegate Nouns voting power to a delegatee address.
  *
  * Env:
- *  - ETHEREUM_RPC_URL (required)
+ *  - ETHEREUM_RPC_URL (optional advanced override)
  *  - AGENT_PRIVATE_KEY (required)
  *
  * Usage:
@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const NOUNS_TOKEN_ADDRESS = "0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03";
 
@@ -45,7 +46,6 @@ async function main() {
     throw new Error("Usage: node scripts/delegate_votes.js <delegatee> or --to <delegatee>");
   }
 
-  const rpcUrl = getEnv("ETHEREUM_RPC_URL", true);
   const privateKey = getEnv("AGENT_PRIVATE_KEY", true);
 
   if (!ethers.isAddress(delegatee)) {
@@ -56,7 +56,7 @@ async function main() {
   const abiPath = path.join(rootDir, "references", "nouns-token-abi.json");
   const nounsTokenAbi = readJson(abiPath);
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const wallet = new ethers.Wallet(privateKey, provider);
   const nounsToken = new ethers.Contract(
     NOUNS_TOKEN_ADDRESS,

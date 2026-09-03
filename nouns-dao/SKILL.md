@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized Nouns governance copilot for learning a voter's private history, analyzing proposals with personal precedents, managing preferences and hard rules, running backtests, preparing daily recommendations, and handling review-first voting or delegation.
 tags: [nouns, governance, voting, delegation, dao, copilot]
-version: 3
+version: 4
 visibility: public
 metadata:
   clawdbot:
@@ -58,6 +58,11 @@ inside the installed skill directory. Keep them in `/cli/gavel/data/private/`,
 which is excluded from Git, and verify they survive a later session before
 claiming persistence works.
 
+Bankr Agent Profiles are public publishing pages, not voter-profile storage.
+For every generated profile, load `references/profile-storage.md` and verify the
+exact output file in persistent Files storage before telling the user it was
+saved. Never paste the private JSON into Bankr memory or a project update.
+
 ## Route by user intent
 
 | User intent | Workflow |
@@ -65,6 +70,7 @@ claiming persistence works.
 | First Gavel interaction, "start", "help", or unclear onboarding state | Follow `references/interaction-and-formatting.md` → Welcome and choose a path |
 | "Onboard me", "learn my voting", "sync my history" | Follow `references/gavel-workflows.md` → Onboard and sync |
 | "Install Gavel", first Gavel request, or missing runtime | Follow `references/bankr-runtime.md` → Install or verify runtime |
+| Missing profile, persistence question, or completed profile write | Follow `references/profile-storage.md` → Verify private durable storage |
 | "What did you learn?", "show my profile" | Follow `references/gavel-workflows.md` → Explain the profile |
 | "I changed my mind", "remember that I…", "your call was wrong" | Follow `references/policy-and-corrections.md` → Preference or correction |
 | "Always…", "never…", "flag anything over…" | Follow `references/policy-and-corrections.md` → Hard rule |

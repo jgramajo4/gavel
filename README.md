@@ -75,7 +75,7 @@ do not commit a populated `.env` file.
 | --- | --- | --- |
 | `GAVEL_DATA_DIR` | Recommended for every persistent runtime | Private histories, profiles, policies, proposals, predictions, and prepared transactions |
 | `NOUNS_SUBGRAPH_URL` | Optional | Override the default Nouns governance subgraph |
-| `ETHEREUM_RPC_URL` | Chain verification, readiness, delegation, and vote preparation | Ethereum mainnet JSON-RPC endpoint |
+| `ETHEREUM_RPC_URL` | Optional advanced override | Ethereum mainnet JSON-RPC endpoint; defaults to `https://eth.drpc.org` |
 | `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
 | `GAVEL_ASSET_OWNER_ADDRESS` | Delegated voting | Address that owns the Noun or voting power |
 | `GAVEL_SAFE_ADDRESS` | Safe-supervised execution | Safe that must receive delegated voting power and propose the validated vote |
@@ -99,15 +99,17 @@ npm ci
 npm test
 ```
 
-Set these in Bankr's secure environment settings:
+Gavel needs no Bankr-provided RPC for the basic workflow. It defaults to the
+public `https://eth.drpc.org` endpoint. Advanced users can set
+`ETHEREUM_RPC_URL` in Bankr's secure environment settings for higher limits,
+different privacy requirements, or a dedicated provider. To make the private
+path explicit, set:
 
 ```text
 GAVEL_DATA_DIR=/cli/gavel/data/private
-ETHEREUM_RPC_URL=<ethereum-mainnet-rpc>
 ```
 
-The RPC variable is only needed for chain-backed checks and transaction
-preparation. No private key is required for the canonical Gavel workflow.
+No private key is required for the canonical Gavel workflow.
 
 People can then use natural-language requests such as:
 
@@ -125,9 +127,10 @@ cd /cli/gavel && node bin/gavel.js <command>
 
 Private artifacts stay under `/cli/gavel/data/private/` and should never be
 copied into the skill directory or pasted into chat. Confirm persistence across
-a new Bankr conversation before relying on it. See the complete
+a new Bankr conversation before relying on it. Bankr Agent Profiles and project
+updates are public and must not store private Gavel profiles. See the complete
 [`Bankr runtime guide`](nouns-dao/references/bankr-runtime.md) and
-[`Bankr integration boundary`](integrations/bankr/README.md).
+[`private profile storage policy`](docs/storage/PROFILE_STORAGE.md).
 
 ### BYOH: bring your own harness
 
@@ -141,7 +144,6 @@ A complete explicit-file workflow looks like this in a POSIX shell:
 
 ```bash
 export GAVEL_DATA_DIR="$PWD/private/alice"
-export ETHEREUM_RPC_URL="https://your-mainnet-rpc.example"
 export VOTER="0xYourVoterAddress"
 
 npm run gavel -- history "$VOTER" --output "$GAVEL_DATA_DIR/history.json"
@@ -151,6 +153,13 @@ npm run gavel -- predict "$GAVEL_DATA_DIR/profile.json" "$GAVEL_DATA_DIR/proposa
 npm run gavel -- inspect "$GAVEL_DATA_DIR/proposal-123.json" --stdout
 npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --stdout
 ```
+
+The public `https://eth.drpc.org` endpoint is used automatically for the
+chain-backed commands. Set `ETHEREUM_RPC_URL` or pass `--rpc` only when the host
+needs a dedicated provider, higher limits, or different privacy properties.
+Public endpoint availability is not guaranteed; Gavel fails closed on RPC
+uncertainty. Archive-heavy proposal validation may require a dedicated provider
+override.
 
 An orchestrator must treat a nonzero exit, `BLOCKED`, or uncertain RPC result as
 a hard stop. It must also keep recommendation, human review, preparation, and
@@ -219,7 +228,7 @@ To deploy a headless job:
 
    ```text
    GAVEL_DATA_DIR=/data/gavel
-   ETHEREUM_RPC_URL=<ethereum-mainnet-rpc>
+   # Optional advanced override: ETHEREUM_RPC_URL=<ethereum-mainnet-rpc>
    NOUNS_SUBGRAPH_URL=https://www.nouns.camp/subgraphs/nouns
    GAVEL_STRUCTURED_ERRORS=1
    ```
@@ -351,7 +360,8 @@ npm run gavel -- prepare-vote \
   --reason "Confirmed voting reason"
 ```
 
-This read-only gate uses `ETHEREUM_RPC_URL` but no private key. It verifies the
+This read-only gate uses the public default RPC, or `ETHEREUM_RPC_URL`/`--rpc`
+when overridden, but no private key. It verifies the
 canonical contracts, proposal version/description events, exact proposal actions and voting window, active state,
 duplicate-vote status, snapshot voting power, security review, and transaction
 simulation. A failed gate returns `BLOCKED` with no transaction. A passing gate

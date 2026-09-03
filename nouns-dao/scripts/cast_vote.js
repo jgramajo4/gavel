@@ -4,7 +4,7 @@
  * Cast a refundable governance vote with reason (clientId-aware).
  *
  * Env:
- *  - ETHEREUM_RPC_URL (required)
+ *  - ETHEREUM_RPC_URL (optional advanced override)
  *  - AGENT_PRIVATE_KEY (required)
  *  - MAX_FEE_PER_GAS_GWEI (optional)
  *  - MAX_PRIORITY_FEE_PER_GAS_GWEI (optional)
@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const GOVERNANCE_ADDRESS = "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d";
 
@@ -54,7 +55,6 @@ async function main() {
     throw new Error("Support must be 0 (Against), 1 (For), or 2 (Abstain)");
   }
 
-  const rpcUrl = getEnv("ETHEREUM_RPC_URL", true);
   const privateKey = getEnv("AGENT_PRIVATE_KEY", true);
 
   const rootDir = path.resolve(__dirname, "..");
@@ -69,7 +69,7 @@ async function main() {
   }
   const clientIdUint32 = clientId >>> 0;
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const wallet = new ethers.Wallet(privateKey, provider);
   const governance = new ethers.Contract(
     GOVERNANCE_ADDRESS,

@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const AUCTION_HOUSE = "0x830BD73E4184ceF73443C15111a1DF14e495C706";
 
@@ -42,10 +43,9 @@ function toBigInt(value, label) {
 }
 
 async function main() {
-  const rpcUrl = getEnv("ETHEREUM_RPC_URL");
   const privateKey = getEnv("AGENT_PRIVATE_KEY");
-  if (!rpcUrl || !privateKey) {
-    throw new Error("Missing ETHEREUM_RPC_URL or AGENT_PRIVATE_KEY.");
+  if (!privateKey) {
+    throw new Error("Missing AGENT_PRIVATE_KEY.");
   }
 
   const config = loadJson("config.json");
@@ -57,7 +57,7 @@ async function main() {
 
   const auctionAbi = loadJson("references/auction-abi.json");
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const wallet = new ethers.Wallet(privateKey, provider);
   const auction = new ethers.Contract(AUCTION_HOUSE, auctionAbi, wallet);
 

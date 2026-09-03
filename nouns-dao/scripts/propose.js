@@ -4,7 +4,7 @@
  * Create a Nouns DAO proposal (clientId-aware, uint32).
  *
  * Env:
- *  - ETHEREUM_RPC_URL (required)
+ *  - ETHEREUM_RPC_URL (optional advanced override)
  *  - AGENT_PRIVATE_KEY (required)
  *
  * Usage:
@@ -19,6 +19,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const GOVERNANCE_ADDRESS = "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d";
 
@@ -44,18 +45,17 @@ function usage() {
       "  node scripts/propose.js --targets <comma-separated-addresses> --values <comma-separated-wei> --signatures <comma-separated-signatures-or-empty> --calldatas <comma-separated-hex> --description \"...\"",
       "",
       "Env:",
-      "  ETHEREUM_RPC_URL   Mainnet RPC endpoint",
+      "  ETHEREUM_RPC_URL   Optional mainnet RPC override",
       "  AGENT_PRIVATE_KEY  Signer private key",
     ].join("\n"),
   );
 }
 
 async function main() {
-  const rpcUrl = process.env.ETHEREUM_RPC_URL;
   const privateKey = process.env.AGENT_PRIVATE_KEY;
 
-  if (!rpcUrl || !privateKey) {
-    console.error("Missing ETHEREUM_RPC_URL or AGENT_PRIVATE_KEY in env.");
+  if (!privateKey) {
+    console.error("Missing AGENT_PRIVATE_KEY in env.");
     usage();
     process.exit(1);
   }
@@ -115,7 +115,7 @@ async function main() {
   }
   const clientIdUint32 = clientId >>> 0;
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const wallet = new ethers.Wallet(privateKey, provider);
   const governance = new ethers.Contract(GOVERNANCE_ADDRESS, governanceAbi, wallet);
 

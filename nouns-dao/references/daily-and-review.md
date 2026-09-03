@@ -61,7 +61,8 @@ Preparation produces canonical-verified unsigned calldata, not a broadcast:
    Use `--acknowledge-security-review` only after the user actually reviews the
    findings. If a separate delegated wallet will vote, add `--from
    0xVotingAddress`; do not replace or merge the historical voter model.
-   `ETHEREUM_RPC_URL` supplies the canonical mainnet RPC.
+   Gavel defaults to the public `https://eth.drpc.org` mainnet RPC.
+   `ETHEREUM_RPC_URL` or `--rpc` is an optional advanced override.
 6. Present every blocker if status is `BLOCKED`. If status is `READY_TO_SIGN`,
    show the checked block, active state, snapshot voting power, successful
    simulation, selected support, reason, flags, and destination. Keep the raw

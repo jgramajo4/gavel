@@ -32,7 +32,11 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
    ```
 
    Omit a policy option when its file does not exist.
-5. Use the onboarding-completion shape in `interaction-and-formatting.md`, then
+5. Parse the command's JSON summary and verify its exact `output` path using
+   `profile-storage.md`. Confirm the file is in Bankr's persistent Files storage,
+   not only the current sandbox. Do not say the profile was saved until this
+   check passes.
+6. Use the onboarding-completion shape in `interaction-and-formatting.md`, then
    offer relevant next actions. Keep the exact evidence cutoff in technical
    details. Do not claim a profile is accurate merely because it was created.
 

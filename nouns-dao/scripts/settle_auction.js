@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { getProvider } = require("./_utils");
 
 const AUCTION_HOUSE_PROXY = "0x830BD73E4184ceF73443C15111a1DF14e495C706";
 
@@ -17,10 +18,9 @@ function getEnv(name) {
 }
 
 async function main() {
-  const rpcUrl = getEnv("ETHEREUM_RPC_URL");
   const privateKey = getEnv("AGENT_PRIVATE_KEY");
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = getProvider();
   const wallet = new ethers.Wallet(privateKey, provider);
 
   const abiPath = path.join(__dirname, "..", "references", "auction-abi.json");
