@@ -1,10 +1,10 @@
 # Core Gavel workflows
 
-First complete `bankr-runtime.md`. Run Gavel intelligence commands from
-`/cli/gavel`. Keep generated voter
-history, profiles, predictions, inspections, and backtests under `data/private/`
-unless the user explicitly requests another destination. Do not paste full
-private JSON into chat by default.
+First complete `bankr-runtime.md` and `profile-storage.md`. Run Gavel
+intelligence commands from the sandbox clone at `workspace/gavel`. Stage durable
+inputs in `gavel-state/`, write intended results to fresh files in
+`gavel-publish/`, and explicitly publish those files. Do not paste full private
+JSON into chat by default.
 
 ## Onboard and sync
 
@@ -18,7 +18,7 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
 2. Fetch normalized history:
 
    ```bash
-   cd /cli/gavel && node bin/gavel.js history 0xVoterAddress
+   cd gavel && node bin/gavel.js history 0xVoterAddress --output ../gavel-publish/history.json
    ```
 
 3. Report the address, vote count, reason coverage if available after profile
@@ -26,16 +26,16 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
 4. Build the private profile, including any existing policy files:
 
    ```bash
-   cd /cli/gavel && node bin/gavel.js profile data/private/nouns/0xlowercaseaddress.json \
-     --preferences data/private/policies/0xlowercaseaddress/preferences.json \
-     --rules data/private/policies/0xlowercaseaddress/rules.json
+   cd gavel && node bin/gavel.js profile ../gavel-publish/history.json \
+     --preferences ../gavel-state/preferences.json \
+     --rules ../gavel-state/rules.json \
+     --output ../gavel-publish/profile.json
    ```
 
    Omit a policy option when its file does not exist.
-5. Parse the command's JSON summary and verify its exact `output` path using
-   `profile-storage.md`. Confirm the file is in Bankr's persistent Files storage,
-   not only the current sandbox. Do not say the profile was saved until this
-   check passes.
+5. Publish `history.json` and `profile.json` using the exact mappings in
+   `profile-storage.md`. Require zero command exits and successful artifact
+   metadata. Do not say the profile was saved until this check passes.
 6. Use the onboarding-completion shape in `interaction-and-formatting.md`, then
    offer relevant next actions. Keep the exact evidence cutoff in technical
    details. Do not claim a profile is accurate merely because it was created.
@@ -44,8 +44,8 @@ If the address has too little history, say that behavioral personalization is
 weak and offer the fixed questionnaire:
 
 ```bash
-cd /cli/gavel && node bin/gavel.js onboard 0xVoterAddress --questions
-cd /cli/gavel && node bin/gavel.js onboard 0xVoterAddress --answers /private/answers.json
+cd gavel && node bin/gavel.js onboard 0xVoterAddress --questions
+cd gavel && node bin/gavel.js onboard 0xVoterAddress --answers ../gavel-state/answers.json --output ../gavel-publish/preferences.json
 ```
 
 Rebuild the profile using the resulting private preferences file. Describe these
@@ -78,13 +78,13 @@ override old behavior without erasing the historical record.
 1. Fetch a fresh normalized proposal by ID:
 
    ```bash
-   cd /cli/gavel && node bin/gavel.js proposal 123
+   cd gavel && node bin/gavel.js proposal 123 --output ../gavel-publish/proposal-123.json
    ```
 
 2. Security-inspect it independently:
 
    ```bash
-   cd /cli/gavel && node bin/gavel.js inspect data/private/proposals/nouns/123.json
+   cd gavel && node bin/gavel.js inspect ../gavel-publish/proposal-123.json --output ../gavel-publish/inspection-123.json
    ```
 
 3. If no profile exists or it is stale, sync history and rebuild it first.
@@ -92,10 +92,11 @@ override old behavior without erasing the historical record.
    calibration report when one exists:
 
    ```bash
-   cd /cli/gavel && node bin/gavel.js predict \
-     data/private/profiles/nouns/0xlowercaseaddress.json \
-     data/private/proposals/nouns/123.json \
-     --calibration data/private/backtests/nouns/0xlowercaseaddress.json
+   cd gavel && node bin/gavel.js predict \
+     ../gavel-state/profile.json \
+     ../gavel-publish/proposal-123.json \
+     --calibration ../gavel-state/backtest.json \
+     --output ../gavel-publish/prediction-123.json
    ```
 
    Omit `--calibration` when unavailable or ineligible.
@@ -108,9 +109,10 @@ override old behavior without erasing the historical record.
 ## Run a backtest
 
 ```bash
-cd /cli/gavel && node bin/gavel.js backtest data/private/nouns/0xlowercaseaddress.json \
-  --preferences data/private/policies/0xlowercaseaddress/preferences.json \
-  --rules data/private/policies/0xlowercaseaddress/rules.json
+cd gavel && node bin/gavel.js backtest ../gavel-state/history.json \
+  --preferences ../gavel-state/preferences.json \
+  --rules ../gavel-state/rules.json \
+  --output ../gavel-publish/backtest.json
 ```
 
 Omit nonexistent policy files. Report prediction count, overall accuracy,
@@ -121,5 +123,6 @@ Never use a random split or claim that in-sample accuracy predicts future votes.
 ## Refresh rules
 
 After adding, disabling, or correcting a preference/rule, rebuild the profile
-from the immutable history and re-run the relevant prediction. Never patch the
-observed layer in an existing profile.
+from the immutable staged history and re-run the relevant prediction. Publish
+the changed policy file and profile in the same successful workflow. Never patch
+the observed layer in an existing profile.

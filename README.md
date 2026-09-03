@@ -88,13 +88,13 @@ read it.
 ### Bankr
 
 Bankr supplies the conversation and tool runtime; Gavel remains the governance
-engine. Install or expose [`nouns-dao/`](nouns-dao/) as the Gavel skill, then
-install the repository into Bankr's persistent CLI workspace with Bankr's
-`execute_cli` tool:
+engine. Install or expose [`nouns-dao/`](nouns-dao/) as the Gavel skill. Bankr
+`execute_cli` containers are ephemeral, so each workflow clones the repository
+inside its current sandbox rather than relying on `/cli/gavel` to survive:
 
 ```bash
-git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git /cli/gavel
-cd /cli/gavel
+git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
+cd gavel
 npm ci
 npm test
 ```
@@ -102,12 +102,7 @@ npm test
 Gavel needs no Bankr-provided RPC for the basic workflow. It defaults to the
 public `https://eth.drpc.org` endpoint. Advanced users can set
 `ETHEREUM_RPC_URL` in Bankr's secure environment settings for higher limits,
-different privacy requirements, or a dedicated provider. To make the private
-path explicit, set:
-
-```text
-GAVEL_DATA_DIR=/cli/gavel/data/private
-```
+different privacy requirements, or a dedicated provider.
 
 No private key is required for the canonical Gavel workflow.
 
@@ -122,13 +117,16 @@ People can then use natural-language requests such as:
 The skill routes those requests to the canonical command form:
 
 ```bash
-cd /cli/gavel && node bin/gavel.js <command>
+cd gavel && node bin/gavel.js <command>
 ```
 
-Private artifacts stay under `/cli/gavel/data/private/` and should never be
-copied into the skill directory or pasted into chat. Confirm persistence across
-a new Bankr conversation before relying on it. Bankr Agent Profiles and project
-updates are public and must not store private Gavel profiles. See the complete
+For returning voters, the Bankr skill stages private inputs from
+`/gavel/data/private/` with `filesFromUserFs`. It writes results to a fresh
+sandbox directory and explicitly exports each file back with `publishArtifacts`.
+An ordinary sandbox write is not durable. The skill requires both zero command
+exits and successful artifact metadata, then verifies restoration from a new
+task. Bankr Agent Profiles and project updates are public and must not store
+private Gavel profiles. See the complete
 [`Bankr runtime guide`](nouns-dao/references/bankr-runtime.md) and
 [`private profile storage policy`](docs/storage/PROFILE_STORAGE.md).
 
