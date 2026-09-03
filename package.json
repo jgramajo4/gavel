@@ -23,10 +23,14 @@
     "test:backtest": "node --test test/backtest.test.js",
     "test:security": "node --test test/security.test.js",
     "test:bankr-skill": "node --test test/bankr-skill.test.js",
-    "test:prepare-vote": "node --test test/vote-preparation.test.js"
+    "test:prepare-vote": "node --test test/vote-preparation.test.js",
+    "tui": "npm run dev --workspace @gavel/tui",
+    "tui:build": "npm run build --workspace @gavel/tui",
+    "tui:typecheck": "npm run typecheck --workspace @gavel/tui"
   },
   "dependencies": {
     "ethers": "^6.15.0",
     "zod": "^3.25.76"
   }
 }
+
