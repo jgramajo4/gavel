@@ -91,6 +91,12 @@ npm run gavel -- predict profile.json proposal.json \
   --calibration data/private/backtests/nouns/0xyourvoteraddress.json
 ```
 
+Pass the complete backtest report, not only its nested calibration model, when
+you want the prediction to carry the report's majority-baseline comparison in
+`predictionReview`. Calibration only changes how an eligible score bucket is
+interpreted. It does not authorize an observed-behavior recommendation for
+autonomous execution.
+
 If the selected bucket lacks the minimum sample count, Gavel leaves the raw
 confidence unchanged and reports why calibration was not applied. Applied
 outputs preserve `rawConfidence`, set `confidenceCalibrated: true`, include the

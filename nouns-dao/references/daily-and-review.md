@@ -41,12 +41,15 @@ say so briefly rather than manufacturing engagement.
 Preparation produces canonical-verified unsigned calldata, not a broadcast:
 
 1. Re-fetch the proposal and compare its content hash with the analyzed version.
-2. Show the recommendation, confidence status, policy source, personal
-   precedents, all security/hard-rule flags, and the draft reason.
+2. Show the recommendation, score kind, `predictionReview`, policy source,
+   personal precedents, all structural-inspection/hard-rule flags, and the draft
+   reason. Never call a heuristic score an accuracy probability.
 3. Ask the user to confirm the exact `FOR`, `AGAINST`, or `ABSTAIN` choice and
    reason. A choice that differs from the prediction requires correcting or
    regenerating the prediction first.
-4. If security inspection requires human review, explain the findings and obtain
+4. Obtain explicit review of every advisory observed-behavior prediction before
+   using `--acknowledge-prediction-review`. If structural calldata inspection
+   requires human review, explain the findings and obtain
    explicit acknowledgement before using the acknowledgement flag.
 5. Run the read-only preparation gate from the repository root:
 
@@ -55,10 +58,12 @@ Preparation produces canonical-verified unsigned calldata, not a broadcast:
      ../gavel-state/prediction-123.json \
      ../gavel-state/proposal-123.json \
      --support FOR \
-     --reason "Confirmed voting reason"
+     --reason "Confirmed voting reason" \
+     --acknowledge-prediction-review
    ```
 
-   Use `--acknowledge-security-review` only after the user actually reviews the
+   Never add either acknowledgement automatically. Use
+   `--acknowledge-security-review` only after the user actually reviews the
    findings. If a separate delegated wallet will vote, add `--from
    0xVotingAddress`; do not replace or merge the historical voter model.
    Gavel defaults to the public `https://eth.drpc.org` mainnet RPC.
@@ -70,7 +75,7 @@ Preparation produces canonical-verified unsigned calldata, not a broadcast:
 
 The command verifies Ethereum mainnet, deployed canonical contracts, exact
 proposal actions and voting window, active state, duplicate-vote status,
-snapshot voting power, security acknowledgement, and a read-only simulation.
+snapshot voting power, prediction/security acknowledgement, and a read-only simulation.
 It needs no private key and never signs or broadcasts.
 
 ## Cast a vote

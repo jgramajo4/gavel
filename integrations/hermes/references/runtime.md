@@ -21,7 +21,7 @@ moves, imports, or overwrites voter data.
 The ordinary end-user flow is only:
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --now
+hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --yes
 ```
 
 Then invoke `/gavel-governance` with a natural-language request. The skill runs
@@ -51,8 +51,9 @@ gavel execution-status --dao nouns --mode waap-autonomous --model-address 0xMODE
 If the result reports `redelegationRequired`, disclose both addresses and use
 `gavel prepare-delegation`; that command never submits the change.
 
-Safe clients integrate with the proposer-only `SafeSupervisedExecutor` API. No
-Safe owner key belongs in Gavel. WaaP clients integrate with the
+Safe clients integrate with the proposer-only `SafeSupervisedExecutor` API.
+Gavel does not create a Safe or choose its address; operators configure an
+existing Safe. No Safe owner key belongs in Gavel. WaaP clients integrate with the
 `WaapAutonomousExecutor` API and must provide a policy hook; live WaaP broadcast
 is intentionally not supplied by this integration.
 

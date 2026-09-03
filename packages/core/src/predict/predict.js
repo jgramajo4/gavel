@@ -87,7 +87,14 @@ function buildReasoning({ profile, recommendation, policy, precedents, scores })
 }
 
 function buildFlags({ profile, policy, precedents, supportScores, asOf }) {
-  const flags = ["Confidence is heuristic and has not yet been calibrated by chronological backtesting."];
+  const flags = [];
+  if (policy.source === "OBSERVED_BEHAVIOR") {
+    flags.push("The displayed confidence is a heuristic score, not an empirical probability.");
+  } else if (policy.source === "STATED_PREFERENCE") {
+    flags.push("The displayed score reflects a stated-preference override, not an empirical probability.");
+  } else {
+    flags.push("The displayed score reflects a deterministic hard-rule override, not an empirical probability.");
+  }
   if (profile.observedBehavior.voteCount === 0) flags.push("No historical voting evidence is available.");
   else if (profile.observedBehavior.voteCount < 5) flags.push("Fewer than five historical votes are available.");
   if (precedents.length === 0) flags.push("No sufficiently similar historical precedent was found.");
@@ -103,6 +110,21 @@ function buildFlags({ profile, policy, precedents, supportScores, asOf }) {
   if (policy.blockAutonomy) flags.push("A matched hard rule blocks autonomous execution.");
   flags.push(...policy.flags);
   return [...new Set(flags)];
+}
+
+function buildPredictionReview(policy) {
+  const reasonCodes = [];
+  if (policy.source === "OBSERVED_BEHAVIOR") {
+    reasonCodes.push("OBSERVED_HEURISTIC_ADVISORY_ONLY", "BACKTEST_NOT_ATTACHED");
+  }
+  if (policy.blockAutonomy) reasonCodes.push("POLICY_BLOCKS_AUTONOMY");
+  const requiresHumanReview = policy.source === "OBSERVED_BEHAVIOR" || policy.blockAutonomy;
+  return {
+    requiresHumanReview,
+    autonomyAllowed: !requiresHumanReview,
+    reasonCodes,
+    backtest: null,
+  };
 }
 
 function predictVote(profileInput, proposalInput, options = {}) {
@@ -150,6 +172,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
     profileVoteCount: profile.observedBehavior.voteCount,
     policySource: policy.source,
   });
+  const predictionReview = buildPredictionReview(policy);
   const flags = buildFlags({ profile, policy, precedents, supportScores, asOf });
   if (security) {
     for (const securityFlag of security.flags) {
@@ -180,7 +203,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
   }));
 
   return predictionDocumentSchema.parse({
-    schemaVersion: security ? "1.2.0" : "1.0.0",
+    schemaVersion: "1.3.0",
     generatedAt,
     asOf,
     dao: profile.dao,
@@ -192,6 +215,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
     confidence: confidenceResult.confidence,
     confidencePercent: Math.round(confidenceResult.confidence * 100),
     confidenceCalibrated: false,
+    confidenceKind: policy.source === "OBSERVED_BEHAVIOR" ? "HEURISTIC_SCORE" : "POLICY_OVERRIDE_SCORE",
     policySource: policy.source,
     policySourceId: policy.sourceId,
     precedents: mappedPrecedents,
@@ -203,6 +227,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
       scores: supportScores,
     }),
     flags,
+    predictionReview,
     security: security || undefined,
     draftReason,
     evidence: {
@@ -224,6 +249,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
 
 module.exports = {
   buildFlags,
+  buildPredictionReview,
   normalizeScores,
   observedScores,
   predictVote,

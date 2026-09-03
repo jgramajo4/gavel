@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   applyCalibrationToPrediction,
+  applyBacktestEvaluationToPrediction,
   bucketFor,
   buildCalibrationModel,
   onlineCalibratedConfidence,
@@ -203,4 +204,31 @@ test("builds a future-use model and applies only eligible calibration buckets", 
   assert.equal(unchanged.confidenceCalibrated, false);
   assert.equal(unchanged.confidence, 0.75);
   assert.match(unchanged.calibration.reason, /requires 10 samples/);
+});
+
+test("attaches baseline evaluation without authorizing observed-behavior autonomy", () => {
+  const report = runChronologicalBacktest(history(), {
+    minTrainingVotes: 2,
+    generatedAt: AS_OF,
+    minCalibrationSamples: 2,
+  });
+  const evaluated = applyBacktestEvaluationToPrediction(rawPrediction(0.75), report);
+  assert.equal(evaluated.predictionReview.requiresHumanReview, true);
+  assert.equal(evaluated.predictionReview.autonomyAllowed, false);
+  assert.equal(evaluated.predictionReview.backtest.predictionCount, report.summary.predictionCount);
+  assert.equal(
+    evaluated.predictionReview.backtest.accuracyLiftOverMajority,
+    report.summary.accuracyLiftOverMajority,
+  );
+});
+
+test("does not calibrate explicit policy overrides as empirical predictions", () => {
+  const override = { ...rawPrediction(0.75), policySource: "STATED_PREFERENCE" };
+  const model = buildCalibrationModel(
+    [{ rawConfidence: 0.75, correct: true }, { rawConfidence: 0.76, correct: true }],
+    { minSamplesPerBucket: 2, generatedAt: AS_OF },
+  );
+  const unchanged = applyCalibrationToPrediction(override, model);
+  assert.equal(unchanged.confidenceCalibrated, false);
+  assert.match(unchanged.calibration.reason, /observed-behavior/);
 });

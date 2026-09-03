@@ -15,7 +15,17 @@ test("Hermes skill is thin, routes to the stable CLI, and preserves execution bo
   assert.match(skill, /Do not ask the user to clone[\s\S]*npm link/i);
   assert.match(skill, /Safe mode, propose only/i);
   assert.match(skill, /never submit arbitrary/i);
+  assert.match(skill, /Gavel never creates or selects a Safe/i);
+  assert.match(skill, /heuristic score/i);
   assert.doesNotMatch(skill, /AGENT_PRIVATE_KEY|GAVEL_PRIVATE_KEY/);
+});
+
+test("Hermes install instructions use supported CLI flags and the runner does not pass through the full environment", () => {
+  const runtime = fs.readFileSync(path.join(integration, "references", "runtime.md"), "utf8");
+  const runner = fs.readFileSync(path.join(integration, "scripts", "gavel.js"), "utf8");
+  assert.match(runtime, /hermes skills install[^\n]+--yes/);
+  assert.doesNotMatch(runtime, /--now/);
+  assert.doesNotMatch(runner, /env:\s*(?:options\.env\s*\|\|\s*)?process\.env/);
 });
 
 test("Hermes runner bootstraps a pinned runtime once and reuses it", () => {

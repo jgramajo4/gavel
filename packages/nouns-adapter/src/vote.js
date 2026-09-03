@@ -120,6 +120,19 @@ class NounsVotePreparationAdapter {
       block("RECOMMENDATION_NOT_CONFIRMED", `Selected support ${selectedSupport} does not confirm recommendation ${prediction.recommendation}.`);
     }
 
+    const predictionReview = prediction.predictionReview || {
+      requiresHumanReview: true,
+      autonomyAllowed: false,
+      reasonCodes: ["LEGACY_PREDICTION_REQUIRES_REVIEW"],
+    };
+    const predictionReviewAcknowledged = Boolean(input.acknowledgePredictionReview);
+    if (predictionReview.requiresHumanReview && !predictionReviewAcknowledged) {
+      block(
+        "PREDICTION_REVIEW_REQUIRED",
+        "This recommendation is advisory and requires explicit human review acknowledgement.",
+      );
+    }
+
     const security = prediction.security;
     if (!security || security.proposalContentHash !== proposal.contentHash) {
       block("SECURITY_REPORT_MISSING_OR_STALE", "A matching Gavel proposal security inspection is required.");
@@ -226,7 +239,7 @@ class NounsVotePreparationAdapter {
 
     const status = blockers.length === 0 ? "READY_TO_SIGN" : "BLOCKED";
     return votePreparationSchema.parse({
-      schemaVersion: "1.0.0",
+      schemaVersion: "1.1.0",
       generatedAt: this.now().toISOString(),
       dao: "nouns",
       chainId: CHAIN_ID,
@@ -248,6 +261,12 @@ class NounsVotePreparationAdapter {
       policySourceId: prediction.policySourceId,
       reason: { text: reason, source: explicitReason ? "USER_CONFIRMED" : "PREDICTION_DRAFT" },
       flags: prediction.flags,
+      predictionReview: {
+        requiresHumanReview: predictionReview.requiresHumanReview,
+        reviewAcknowledged: predictionReviewAcknowledged,
+        autonomyAllowed: predictionReview.autonomyAllowed,
+        reasonCodes: predictionReview.reasonCodes,
+      },
       security: {
         riskLevel: security?.summary.riskLevel || "CRITICAL",
         requiresHumanReview,

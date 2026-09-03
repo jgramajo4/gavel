@@ -136,7 +136,7 @@ private Gavel profiles. See the complete
 Hermes users install one skill and then start a Gavel conversation:
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --now
+hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --yes
 ```
 
 ```text
@@ -175,7 +175,7 @@ npm run gavel -- profile "$GAVEL_DATA_DIR/history.json" --output "$GAVEL_DATA_DI
 npm run gavel -- proposal 123 --output "$GAVEL_DATA_DIR/proposal-123.json"
 npm run gavel -- predict "$GAVEL_DATA_DIR/profile.json" "$GAVEL_DATA_DIR/proposal-123.json" --output "$GAVEL_DATA_DIR/prediction-123.json"
 npm run gavel -- inspect "$GAVEL_DATA_DIR/proposal-123.json" --stdout
-npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --stdout
+npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --acknowledge-prediction-review --stdout
 ```
 
 The public `https://eth.drpc.org` endpoint is used automatically for the
@@ -363,9 +363,11 @@ npm run gavel -- predict \
   examples/normalized-proposal.json
 ```
 
-The result contains `FOR`, `AGAINST`, or `ABSTAIN`, an explicitly uncalibrated
-confidence score, personal historical precedents, evidence-based explanations,
-review flags, and a clearly marked draft reason. The full methodology and its
+The result contains `FOR`, `AGAINST`, or `ABSTAIN`, an explicitly labeled
+heuristic score (or calibrated correctness estimate), personal historical
+precedents, evidence-based explanations, a first-class `predictionReview`
+decision, and a clearly marked draft reason. Observed-behavior recommendations
+are advisory and cannot enter autonomous execution. The full methodology and its
 limits are documented in [`docs/PREDICTION_ENGINE.md`](docs/PREDICTION_ENGINE.md).
 A leakage-free real-history holdout is recorded in
 [`docs/PREDICTION_EXAMPLE.md`](docs/PREDICTION_EXAMPLE.md).
@@ -382,7 +384,8 @@ npm run gavel -- prepare-vote \
   data/private/predictions/nouns/0xyourvoteraddress/123.json \
   data/private/proposals/nouns/123.json \
   --support FOR \
-  --reason "Confirmed voting reason"
+  --reason "Confirmed voting reason" \
+  --acknowledge-prediction-review
 ```
 
 This read-only gate uses the public default RPC, or `ETHEREUM_RPC_URL`/`--rpc`
@@ -417,8 +420,9 @@ explicit unsigned delegation change with:
 gavel prepare-delegation --dao nouns --asset-owner-address 0xCOLD --to 0xNEWDELEGATE
 ```
 
-Safe execution uses a proposer-only client and preserves human approval; no Safe
-owner key is required. WaaP execution is available only when the registered DAO
+Safe execution uses a proposer-only client and preserves human approval. Gavel
+does not create or select a Safe, and no Safe owner key is required. WaaP
+execution is available only when the registered DAO
 adapter explicitly enables autonomy, the action is allowlisted, delegation and
 address roles match, and a policy hook approves the immutable prepared intent.
 Live WaaP broadcast is intentionally left to an official deterministic client.
@@ -434,7 +438,7 @@ npm run gavel -- inspect examples/normalized-proposal.json -- --stdout
 ```
 
 Gavel quarantines proposal prose as untrusted data, decodes structured Nouns
-actions where possible, inspects targets and privileged calls, and flags unknown
+actions where possible, structurally inspects targets and privileged calls, and flags unknown
 or dangerous execution. Conservative mismatch checks compare explicit ETH amount
 and recipient claims against decoded actions. Prediction output embeds the same
 security report, while keeping security review separate from the personalized
@@ -457,7 +461,8 @@ The first full Nouncil result—including the finding that the current predictor
 does not beat its majority-class baseline—is documented in
 [`docs/BACKTEST_EXAMPLE.md`](docs/BACKTEST_EXAMPLE.md).
 
-An eligible model can calibrate a later prediction:
+An eligible model can calibrate a later prediction. Passing the complete report
+also attaches its baseline comparison to `predictionReview`:
 
 ```bash
 npm run gavel -- predict profile.json proposal.json --calibration backtest.json
@@ -477,8 +482,11 @@ one voter's model with another voter.
 - Proposal content is stored as untrusted evidence. It is never interpreted as
   Gavel instructions. Static action inspection does not replace direct chain
   verification or transaction simulation.
-- Raw confidence remains an exposed heuristic. A prediction is marked calibrated
-  only when a chronological backtest bucket meets its minimum evidence count.
+- The numeric confidence field is explicitly labeled by `confidenceKind`. It is
+  a heuristic score unless a chronological backtest bucket meets its minimum
+  evidence count. Calibration does not by itself authorize autonomy.
+- Observed-behavior recommendations are advisory, require explicit review before
+  vote preparation, and are blocked from WaaP autonomy.
 - Unknown arbitrary calldata is flagged for human review. Preparation requires
   explicit review acknowledgement, and critical findings remain blocked.
 - Canonical preparation produces immutable validated calldata. Unsigned mode

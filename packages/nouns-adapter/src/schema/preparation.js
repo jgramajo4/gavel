@@ -16,7 +16,7 @@ const blockerSchema = z.object({
 
 const votePreparationSchema = z
   .object({
-    schemaVersion: z.literal("1.0.0"),
+    schemaVersion: z.enum(["1.0.0", "1.1.0"]),
     generatedAt: z.string().datetime(),
     dao: z.literal("nouns"),
     chainId: z.literal(1),
@@ -35,6 +35,14 @@ const votePreparationSchema = z
       source: z.enum(["PREDICTION_DRAFT", "USER_CONFIRMED"]),
     }),
     flags: z.array(z.string().min(1)),
+    predictionReview: z
+      .object({
+        requiresHumanReview: z.boolean(),
+        reviewAcknowledged: z.boolean(),
+        autonomyAllowed: z.boolean(),
+        reasonCodes: z.array(z.string().regex(/^[A-Z0-9_]+$/)),
+      })
+      .optional(),
     security: z.object({
       riskLevel: z.enum(["CLEAR", "LOW", "MEDIUM", "HIGH", "CRITICAL"]),
       requiresHumanReview: z.boolean(),
@@ -105,6 +113,13 @@ const votePreparationSchema = z
     }),
   })
   .superRefine((document, context) => {
+    if (document.schemaVersion === "1.1.0" && !document.predictionReview) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["predictionReview"],
+        message: "v1.1 vote preparations require prediction review metadata",
+      });
+    }
     const ready = document.status === "READY_TO_SIGN";
     if (ready !== (document.transaction !== null) || ready !== (document.blockers.length === 0)) {
       context.addIssue({
@@ -118,6 +133,13 @@ const votePreparationSchema = z
         code: z.ZodIssueCode.custom,
         path: ["security", "reviewAcknowledged"],
         message: "human-review security findings must be acknowledged before preparation",
+      });
+    }
+    if (document.predictionReview?.requiresHumanReview && !document.predictionReview.reviewAcknowledged && ready) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["predictionReview", "reviewAcknowledged"],
+        message: "prediction review must be acknowledged before preparation",
       });
     }
   });

@@ -119,7 +119,7 @@ The primary Gavel path prepares canonical-verified unsigned calldata from the
 repository root before any wallet approval:
 
 ```
-node bin/gavel.js prepare-vote prediction.json proposal.json --support FOR --reason "Confirmed reason"
+node bin/gavel.js prepare-vote prediction.json proposal.json --support FOR --reason "Confirmed reason" --acknowledge-prediction-review
 ```
 
 See `../docs/PREPARE_VOTE.md`. The direct script above broadcasts immediately

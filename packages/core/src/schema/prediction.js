@@ -7,6 +7,29 @@ const supportSchema = z.enum(Object.values(Support));
 const boundedScore = z.number().finite().min(0).max(1);
 const decimalStringSchema = z.string().regex(/^\d+$/, "expected an unsigned integer string");
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "expected an EVM address");
+const predictionReviewReasonSchema = z.enum([
+  "OBSERVED_HEURISTIC_ADVISORY_ONLY",
+  "BACKTEST_NOT_ATTACHED",
+  "BACKTEST_DOES_NOT_BEAT_MAJORITY",
+  "POLICY_BLOCKS_AUTONOMY",
+]);
+
+const predictionReviewSchema = z.object({
+  requiresHumanReview: z.boolean(),
+  autonomyAllowed: z.boolean(),
+  reasonCodes: z.array(predictionReviewReasonSchema),
+  backtest: z
+    .object({
+      reportGeneratedAt: z.string().datetime(),
+      calibrationModelId: z.string().regex(/^[0-9a-f]{64}$/),
+      predictionCount: z.number().int().nonnegative(),
+      accuracy: boundedScore.nullable(),
+      majorityClassAccuracy: boundedScore.nullable(),
+      accuracyLiftOverMajority: z.number().finite().min(-1).max(1).nullable(),
+      balancedAccuracy: boundedScore.nullable(),
+    })
+    .nullable(),
+});
 
 const precedentSchema = z.object({
   proposalId: decimalStringSchema,
@@ -26,7 +49,7 @@ const precedentSchema = z.object({
 
 const predictionDocumentSchema = z
   .object({
-    schemaVersion: z.enum(["1.0.0", "1.1.0", "1.2.0"]),
+    schemaVersion: z.enum(["1.0.0", "1.1.0", "1.2.0", "1.3.0"]),
     generatedAt: z.string().datetime(),
     asOf: z.string().datetime(),
     dao: z.string().min(1),
@@ -39,6 +62,9 @@ const predictionDocumentSchema = z
     rawConfidence: boundedScore.optional(),
     confidencePercent: z.number().int().min(0).max(100),
     confidenceCalibrated: z.boolean(),
+    confidenceKind: z
+      .enum(["HEURISTIC_SCORE", "CALIBRATED_CORRECTNESS_ESTIMATE", "POLICY_OVERRIDE_SCORE"])
+      .optional(),
     calibration: z
       .object({
         applied: z.boolean(),
@@ -53,6 +79,7 @@ const predictionDocumentSchema = z
     precedents: z.array(precedentSchema).max(5),
     reasoning: z.array(z.string().min(1)),
     flags: z.array(z.string().min(1)),
+    predictionReview: predictionReviewSchema.optional(),
     security: proposalSecurityReportSchema.optional(),
     draftReason: z.object({
       isDraft: z.literal(true),
@@ -87,6 +114,13 @@ const predictionDocumentSchema = z
     }),
   })
   .superRefine((prediction, context) => {
+    if (prediction.schemaVersion === "1.3.0" && (!prediction.confidenceKind || !prediction.predictionReview)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["predictionReview"],
+        message: "v1.3 predictions require confidenceKind and predictionReview",
+      });
+    }
     if (prediction.confidencePercent !== Math.round(prediction.confidence * 100)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -129,6 +163,25 @@ const predictionDocumentSchema = z
         message: "method cannot be calibrated when confidenceCalibrated is false",
       });
     }
+    if (prediction.confidenceKind === "CALIBRATED_CORRECTNESS_ESTIMATE" && !prediction.confidenceCalibrated) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["confidenceKind"],
+        message: "calibrated correctness estimates require confidenceCalibrated",
+      });
+    }
+    if (prediction.predictionReview?.autonomyAllowed && prediction.predictionReview.requiresHumanReview) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["predictionReview"],
+        message: "autonomy cannot be allowed while human review is required",
+      });
+    }
   });
 
-module.exports = { predictionDocumentSchema, precedentSchema };
+module.exports = {
+  predictionDocumentSchema,
+  predictionReviewReasonSchema,
+  predictionReviewSchema,
+  precedentSchema,
+};

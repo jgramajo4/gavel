@@ -8,6 +8,8 @@ by canonical Gavel validation. It then requires:
 - an adapter-supported governance action;
 - matching DAO, chain, execution address, and canonical governor scope;
 - a positive policy-hook decision;
+- `autonomyAllowed: true` in the immutable prepared intent (advisory
+  observed-behavior recommendations set it to false);
 - no material mutation by the WaaP client.
 
 `execution-status` separately verifies that the asset owner delegates to the

@@ -23,14 +23,25 @@ environment-variable values or bypass the runner with a different checkout.
 For an on-demand governance workflow:
 
 1. Fetch history and build/load the private profile.
-2. Fetch the canonical proposal, then predict and inspect it.
-3. Run `prepare-vote`; treat `BLOCKED` and any nonzero exit as a hard stop.
+2. Fetch the canonical proposal, then predict and inspect it. Call an
+   uncalibrated value a `heuristic score`, never an accuracy probability. If
+   `predictionReview.requiresHumanReview` is true, explain why and keep the
+   recommendation advisory.
+3. Run `prepare-vote` only after the user explicitly reviews the recommendation
+   and confirms its support. Pass `--acknowledge-prediction-review` only for
+   that confirmed request; treat `BLOCKED` and any nonzero exit as a hard stop.
 4. Leave the transaction unsigned unless the user has configured a supported
    executor and authorized the specific execution step.
 5. In Safe mode, propose only; a human Safe owner authorizes execution.
 6. In WaaP mode, require adapter autonomy approval, policy success, matching
    execution address, voting power, and delegation. Never submit arbitrary
    target/calldata.
+
+Describe `security.summary.riskLevel` as the result of structural calldata
+inspection. `CLEAR` means no issue was detected by that limited inspection; it
+does not establish economic safety, contract safety, or proposal quality.
+Gavel never creates or selects a Safe. The user or operator must configure an
+existing Safe execution address.
 
 Read [references/runtime.md](references/runtime.md) when bootstrap fails,
 overriding state paths, moving a profile between runtimes, configuring address
