@@ -102,13 +102,9 @@ were visually reviewed, including the install panel and the layered model.
 - `node --check website/script.js` passes.
 - `npm test`: 94 pass, 0 fail, 1 opt-in mainnet-fork test skipped.
 
-The Hermes bootstrap test references a commit outside the default branch's
-ancestry. For a fresh clone that reports `not our ref`, fetch the exact existing
-runtime pin before rerunning that test:
-
-```bash
-git fetch origin a1a88a837350d86f0df9ba8e5f774e3914191d7a
-```
+The Hermes runtime pin is `7b90ad363e80dcfd5dfc13b4d8bd63883bf40cb8` on
+`main`. That commit is advertised by GitHub, so CI can `git fetch --depth 1`
+it without the previous `not our ref` failure from the pre-squash pin.
 
 No core, integration, or package dependency change was needed for the website.
 
