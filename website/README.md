@@ -135,3 +135,9 @@ The title, description, Open Graph and Twitter text metadata, theme color, and
 SVG favicon are already present. No social-preview raster image is required.
 
 Publish only the four public assets; this README is implementation documentation.
+
+## Product roadmap additions
+
+At the maintainer’s request, the architecture section lists ENS, Railgun, and
+lobbying agents beneath Gavel Core and the Nouns adapter. All three are labeled
+as planned extensions, without inventing implementation details or dates.
