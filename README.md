@@ -39,6 +39,11 @@ first read-only migration slice from the former standalone TUI.
 See [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md)
 for the pre-change audit and staged migration map.
 
+## Public website
+
+The static Gavel landing page lives in [`website/`](website/). See its
+[preview, design, validation, and deployment notes](website/README.md).
+
 ## Requirements
 
 - Node.js 20 or newer

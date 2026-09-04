@@ -37,7 +37,9 @@ test("Hermes runner bootstraps a pinned runtime once and reuses it", () => {
     HERMES_HOME: path.join(temporaryRoot, "hermes"),
   };
   const options = {
-    sourceConfig: { source: root, ref: RUNTIME_REF },
+    // Fetch the advertised pin from GitHub. A local checkout SHA is often
+    // unreachable after squash-merges (`not our ref`) and CI is depth-1.
+    sourceConfig: { source: REPOSITORY_URL, ref: RUNTIME_REF },
     skipNpm: true,
   };
 
