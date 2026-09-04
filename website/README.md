@@ -52,9 +52,9 @@ Reviewed against repository commit
 | Unsigned preparation, review, chain checks, fail-closed behavior | [`PREPARE_VOTE.md`](../docs/PREPARE_VOTE.md) |
 | Runtime-owned storage; no public agent profile | [`PROFILE_STORAGE.md`](../docs/storage/PROFILE_STORAGE.md) |
 | Exact Hermes install command and first-use bootstrap | [`runtime.md`](../integrations/hermes/references/runtime.md), [`SKILL.md`](../integrations/hermes/SKILL.md) |
-| Bankr sandbox bootstrap and private artifact lifecycle | [`README.md`](../integrations/bankr/README.md), [`bankr-runtime.md`](../nouns-dao/references/bankr-runtime.md) |
+| Bankr skill installation and private artifact lifecycle | [`README.md`](../integrations/bankr/README.md), [`bankr-runtime.md`](../nouns-dao/references/bankr-runtime.md) |
 | BYOH JSON and error contract | [`generic-cli.md`](../docs/runtimes/generic-cli.md) |
-| Read-only TUI commands and transitional logic | [`TUI README`](../packages/tui/README.md), [`migration`](../docs/architecture/TUI_MIGRATION.md) |
+| TUI commands and architecture (status updated by maintainer) | [`TUI README`](../packages/tui/README.md), [`migration`](../docs/architecture/TUI_MIGRATION.md) |
 | One core and reserved server boundary | [`architecture`](../docs/architecture/MONOREPO_AUDIT_AND_PLAN.md), [`server`](../packages/server/README.md) |
 | Safe proposer-only and WaaP scaffold | [`safe.md`](../docs/execution/safe.md), [`waap.md`](../docs/execution/waap.md) |
 | Model figures and unverified mainnet-fork positive path | [`PHASE9_LAUNCH_READINESS.md`](../docs/PHASE9_LAUNCH_READINESS.md) |
@@ -62,6 +62,9 @@ Reviewed against repository commit
 On September 3, 2026, the maintainer confirmed completed Bankr end-to-end testing
 and BYOH/Hermes readiness. The page incorporates this newer statement instead
 of repeating the stale Bankr runtime blockers in the launch-readiness document.
+The maintainer subsequently confirmed completion of the TUI integration and
+provided the Bankr install-or-update instruction now shown in the copy control.
+The public page simply labels this runtime “TUI.”
 This is maintainer-reported runtime validation, not a claim that this website
 change repeated those live tests or closed the separate model/mainnet gates.
 
@@ -73,7 +76,8 @@ Deliberately bounded claims:
   calibration still does not authorize observed-behavior autonomy.
 - Safe uses a host-supplied proposer client and human owner approval.
 - WaaP is a scoped executor scaffold with no bundled live broadcaster.
-- TUI is read-only and still has transitional domain logic.
+- The TUI uses the canonical engine, per the maintainer’s completion update.
+  Review and wallet approval remain separate boundaries.
 - Headless CLI jobs exist; an HTTP service and additional DAO adapters do not.
 - Private storage is host-controlled; no claim of built-in encryption or
   automatic cross-runtime profile sync.
