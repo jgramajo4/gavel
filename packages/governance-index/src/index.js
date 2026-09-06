@@ -4,8 +4,8 @@ const { GovernanceSyncWorker } = require("./worker");
 const { EnsGovernorSource, RailgunVotingSource } = require("./sources");
 const { createReadOnlyApi } = require("./api");
 const { proposalContentHash } = require("./hash");
-const { IndexApiClient } = require("./client");
+const { IndexApiClient, IndexStaleError } = require("./client");
 const { NounsSubgraphSource } = require("./nouns-source");
 
-module.exports = { DAO_CONFIGS, MemoryGovernanceStore, GovernanceSyncWorker, EnsGovernorSource, RailgunVotingSource, NounsSubgraphSource, createReadOnlyApi, proposalContentHash, IndexApiClient };
+module.exports = { DAO_CONFIGS, MemoryGovernanceStore, GovernanceSyncWorker, EnsGovernorSource, RailgunVotingSource, NounsSubgraphSource, createReadOnlyApi, proposalContentHash, IndexApiClient, IndexStaleError };
 try { module.exports.PostgresGovernanceStore = require("./postgres-store").PostgresGovernanceStore; } catch (error) { if (error.code !== "MODULE_NOT_FOUND") throw error; }

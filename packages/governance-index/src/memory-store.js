@@ -30,6 +30,7 @@ function decodeProposalCursor(value) {
   try { const parsed = JSON.parse(Buffer.from(value, "base64url").toString()); if (parsed[0] !== "proposal" || !/^\d+$/.test(parsed[1])) throw new Error(); return parsed[1]; }
   catch { throw new TypeError("invalid cursor"); }
 }
+const TERMINAL_PROPOSAL_STATES = new Set(["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"]);
 function canonicalMaterial(row) { return JSON.stringify({ blockNumber: String(row.blockNumber), blockHash: row.blockHash || null, recordType: row.recordType, proposalId: row.proposalId || null, contentHash: row.contentHash || null, payload: row.payload }); }
 function immutableEventMaterial(row) { return JSON.stringify({ recordType: row.recordType, proposalId: row.proposalId || null, contentHash: row.contentHash || null, payload: row.payload }); }
 
@@ -52,10 +53,10 @@ class MemoryGovernanceStore {
     row = { ...row, lastError: row.lastError == null ? null : redactErrorMessage(row.lastError) };
     const key = `${row.daoId}:${row.sourceId}`; const existing = this.checkpoints.get(key);
     if (existing && BigInt(row.nextBlock) < BigInt(existing.nextBlock)) {
-      this.checkpoints.set(key, { ...existing, updatedAt: row.updatedAt, lastError: row.lastError });
+      this.checkpoints.set(key, { ...existing, updatedAt: row.updatedAt, lastError: row.lastError, lastFullScanAt: row.lastFullScanAt || existing.lastFullScanAt || null });
       return;
     }
-    this.checkpoints.set(key, { ...existing, ...row });
+    this.checkpoints.set(key, { ...existing, ...row, lastFullScanAt: row.lastFullScanAt || existing?.lastFullScanAt || null });
   }
   upsertProposal(row) {
     const index = this.proposals.findIndex((x) => x.daoId === row.daoId && x.proposalId === row.proposalId);
@@ -70,7 +71,14 @@ class MemoryGovernanceStore {
   ingest(record) {
     const raw = sanitizeProvenance({ ...record.raw, proposalId: record.raw.proposalId || record.proposal?.proposalId || record.vote?.proposalId || null, contentHash: record.raw.contentHash || record.proposal?.contentHash || null }); const key = eventKey(raw);
     const existing = this.rawRecords.find((x) => eventKey(x) === key);
-    if (existing) { if (canonicalMaterial(existing) !== canonicalMaterial(raw)) throw new Error(`canonical event drift for ${key}`); if (record.proposal) this.upsertProposal(record.proposal); return false; }
+    if (existing) {
+      if (canonicalMaterial(existing) !== canonicalMaterial(raw)) throw new Error(`canonical event drift for ${key}`);
+      if (record.proposal) this.upsertProposal(record.proposal);
+      // Repair normalized rows that an earlier partial write dropped.
+      if (record.vote) this.insertVote(record.vote);
+      if (record.delegation) this.insertDelegation(record.delegation);
+      return false;
+    }
     this._keys.add(`r:${key}`); this.rawRecords.push(raw);
     if (record.proposal) this.upsertProposal(record.proposal);
     if (record.vote) this.insertVote(record.vote);
@@ -112,6 +120,15 @@ class MemoryGovernanceStore {
       }
     }
   }
+  getProposalSyncContext(daoId) {
+    const rows = this.proposals.filter((row) => row.daoId === daoId);
+    const maxProposalId = rows.reduce((max, row) => (max == null || BigInt(row.proposalId) > BigInt(max) ? row.proposalId : max), null);
+    const refreshProposals = rows
+      .filter((row) => !TERMINAL_PROPOSAL_STATES.has(String(row.normalized?.state || "").toUpperCase()))
+      .map((row) => ({ proposalId: row.proposalId, contentHash: row.contentHash, normalized: row.normalized }));
+    return { maxProposalId, refreshProposals };
+  }
+
   async listDaos() { return [...this.daos.values()].sort((a,b) => a.id.localeCompare(b.id)); }
   async getDao(id) { return this.daos.get(id) || null; }
   async getProposal(daoId, proposalId) { return this.proposals.find((x) => x.daoId === daoId && x.proposalId === proposalId)?.normalized || null; }

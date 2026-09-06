@@ -6,7 +6,7 @@ const { redactErrorMessage } = require("./redaction");
 
 const limitSchema = z.coerce.number().int().min(1).max(100).default(25);
 const daoSchema = z.enum(["nouns", "ens", "railgun-eth"]);
-const proposalSchema = z.string().regex(/^\d+$/);
+const proposalSchema = z.string().regex(/^\d+$/).max(78);
 function json(res, status, body) { const payload = JSON.stringify(body); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "cache-control": "no-store" }); res.end(payload); }
 function publicProposal(row) { return row?.normalized || row; }
 function publicEndpoint(value, explicit) {
@@ -22,7 +22,15 @@ function publicEndpoint(value, explicit) {
 function publicVote(row) {
   if (!row) return row;
   const { normalized, sourcePublicEndpoint, ...event } = row;
-  return { ...event, sourceEndpoint: publicEndpoint(event.sourceEndpoint, sourcePublicEndpoint) };
+  // The normalized blob stays private (it embeds source transport detail), but
+  // the two fields downstream materialization needs are surfaced explicitly so
+  // an indexed history keeps the fidelity of a subgraph-generated one.
+  return {
+    ...event,
+    clientId: Number(normalized?.clientId ?? 0),
+    entityId: normalized?.source?.entityId ?? null,
+    sourceEndpoint: publicEndpoint(event.sourceEndpoint, sourcePublicEndpoint),
+  };
 }
 function publicCheckpoint(row) {
   return { ...row, lastError: row.lastError ? "sync_failed" : null };

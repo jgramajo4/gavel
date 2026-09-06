@@ -132,26 +132,10 @@ CREATE TABLE IF NOT EXISTS sync_checkpoints (
   next_block bigint NOT NULL CHECK (next_block > 0),
   finalized_head bigint NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
+  last_full_scan_at timestamptz,
   last_error text,
   PRIMARY KEY (dao_id, source_id),
   FOREIGN KEY (dao_id, source_id) REFERENCES governance_sources(dao_id, id)
 );
-DO $roles$
-BEGIN
-  EXECUTE 'REVOKE CREATE ON SCHEMA public FROM PUBLIC';
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'gavel_indexer') THEN
-    EXECUTE 'GRANT USAGE ON SCHEMA public TO gavel_indexer';
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO gavel_indexer';
-    EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO gavel_indexer';
-    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO gavel_indexer';
-    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO gavel_indexer';
-  END IF;
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'gavel_api') THEN
-    EXECUTE 'GRANT USAGE ON SCHEMA public TO gavel_api';
-    EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO gavel_api';
-    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO gavel_api';
-  END IF;
-END
-$roles$;
 INSERT INTO schema_migrations(version) VALUES ('001_initial') ON CONFLICT DO NOTHING;
 COMMIT;

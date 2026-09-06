@@ -10,6 +10,8 @@ const {
   encodeProposalCursor,
 } = require("./memory-store");
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
+
+const TERMINAL_PROPOSAL_STATES = ["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"];
 const { redactErrorMessage } = require("./redaction");
 
 function proposalCursor(value) {
@@ -80,13 +82,15 @@ class PostgresTransaction {
   async setCheckpoint(row) {
     const lastError = row.lastError == null ? null : redactErrorMessage(row.lastError);
     await this.client.query(`
-      INSERT INTO sync_checkpoints(dao_id,source_id,next_block,finalized_head,updated_at,last_error)
-      VALUES($1,$2,$3,$4,now(),$5)
+      INSERT INTO sync_checkpoints(dao_id,source_id,next_block,finalized_head,updated_at,last_full_scan_at,last_error)
+      VALUES($1,$2,$3,$4,now(),$5,$6)
       ON CONFLICT(dao_id,source_id) DO UPDATE SET
         next_block=GREATEST(sync_checkpoints.next_block,excluded.next_block),
         finalized_head=GREATEST(sync_checkpoints.finalized_head,excluded.finalized_head),
-        updated_at=now(),last_error=excluded.last_error
-    `, [row.daoId, row.sourceId, row.nextBlock, row.finalizedHead, lastError]);
+        updated_at=now(),
+        last_full_scan_at=COALESCE(excluded.last_full_scan_at,sync_checkpoints.last_full_scan_at),
+        last_error=excluded.last_error
+    `, [row.daoId, row.sourceId, row.nextBlock, row.finalizedHead, row.lastFullScanAt || null, lastError]);
   }
 
   async upsertProposal(row) {
@@ -131,7 +135,9 @@ class PostgresTransaction {
         dao_id,source_id,source_record_key,chain_id,contract_address,proposal_id,voter,support,reason,vote_weight,
         block_number,block_time,transaction_hash,log_index,source_kind,source_endpoint,source_public_endpoint,observed_head,normalized
       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-      ON CONFLICT DO NOTHING
+      ON CONFLICT(chain_id,contract_address,transaction_hash,log_index) DO UPDATE SET
+        normalized=COALESCE(excluded.normalized,vote_events.normalized),
+        observed_head=GREATEST(vote_events.observed_head,excluded.observed_head)
     `, [
       safeRow.daoId, safeRow.sourceId || null, safeRow.sourceRecordKey || null, safeRow.chainId, safeRow.contractAddress,
       safeRow.proposalId, safeRow.voter, safeRow.support, safeRow.reason, safeRow.voteWeight, safeRow.blockNumber, safeRow.timestamp,
@@ -171,13 +177,13 @@ class PostgresTransaction {
       raw.transactionHash, raw.logIndex, raw.blockNumber, raw.blockHash, raw.recordType,
       raw.proposalId, raw.contentHash, raw.payload, raw.sourceKind, raw.sourceEndpoint, raw.observedHead,
     ]);
-    // Refresh mutable normalized proposal state even when the immutable raw
-    // source record was already indexed.
+    // Normalized rows are reconciled even when the immutable raw source record
+    // was already indexed, so a vote dropped by an earlier partial write is
+    // repaired by re-running the sync instead of being lost permanently.
     if (record.proposal) await this.upsertProposal(record.proposal);
-    if (!result.rowCount) return false;
     if (record.vote) await this.insertVote(record.vote);
     if (record.delegation) await this.insertDelegation(record.delegation);
-    return true;
+    return result.rowCount > 0;
   }
 
   async reconcileRange({ daoId, sourceId, fromBlock, toBlock, records }) {
@@ -329,9 +335,48 @@ class PostgresGovernanceStore {
   async close() { await this.pool.end(); }
 
   async migrate() {
-    const sql = await fs.readFile(path.join(__dirname, "..", "migrations", "001_initial.sql"), "utf8");
-    await this.pool.query(sql);
-    return { ok: true, version: "001_initial" };
+    const dir = path.join(__dirname, "..", "migrations");
+    await this.pool.query(await fs.readFile(path.join(dir, "001_initial.sql"), "utf8"));
+    const roles = (await this.pool.query(
+      "SELECT rolname FROM pg_roles WHERE rolname IN ('gavel_indexer','gavel_api')",
+    )).rows.map((row) => row.rolname);
+    if (roles.length === 2) {
+      await this.pool.query(await fs.readFile(path.join(dir, "002_roles.sql"), "utf8"));
+      return { ok: true, versions: ["001_initial", "002_roles"], roles: "granted" };
+    }
+    // Never fail silently: an ungranted API role is a deployment fault, not a
+    // detail. `verify-permissions` is the gate that must pass before serving.
+    return {
+      ok: true,
+      versions: ["001_initial"],
+      roles: "skipped",
+      missingRoles: ["gavel_indexer", "gavel_api"].filter((role) => !roles.includes(role)),
+      warning: "Role grants were skipped because the roles do not exist. Create them (docker/init-db.sh) and re-run migrate, then run `gavel-indexer verify-permissions`.",
+    };
+  }
+
+  // Proves the API role cannot write, rather than trusting the role's name.
+  async verifyPermissions(role = "gavel_api") {
+    const tables = (await this.pool.query(
+      "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )).rows.map((row) => row.tablename);
+    if (!tables.length) throw new Error("no public tables found; run migrate first");
+    const exists = (await this.pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [role])).rowCount;
+    if (!exists) throw new Error(`role ${role} does not exist`);
+    const writable = [];
+    for (const table of tables) {
+      for (const privilege of ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]) {
+        const granted = (await this.pool.query(
+          "SELECT has_table_privilege($1,$2,$3) AS granted", [role, `public.${table}`, privilege],
+        )).rows[0].granted;
+        if (granted) writable.push(`${table}:${privilege}`);
+      }
+    }
+    const canCreate = (await this.pool.query(
+      "SELECT has_schema_privilege($1,'public','CREATE') AS granted", [role],
+    )).rows[0].granted;
+    if (canCreate) writable.push("schema public:CREATE");
+    return { ok: writable.length === 0, role, tables: tables.length, writable };
   }
 
   async transaction(callback) {
@@ -364,10 +409,26 @@ class PostgresGovernanceStore {
   async getCheckpoint(daoId, sourceId) {
     const result = await this.pool.query(`
       SELECT dao_id AS "daoId",source_id AS "sourceId",next_block::text AS "nextBlock",
-        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",last_error AS "lastError"
+        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",
+        last_full_scan_at AS "lastFullScanAt",last_error AS "lastError"
       FROM sync_checkpoints WHERE dao_id=$1 AND source_id=$2
     `, [daoId, sourceId]);
     return result.rows[0] || null;
+  }
+
+  // Feeds incremental proposal enumeration: the highest indexed proposal id and
+  // the proposals whose state can still change.
+  async getProposalSyncContext(daoId) {
+    const max = (await this.pool.query(
+      "SELECT max(proposal_id)::text AS \"maxProposalId\" FROM proposals WHERE dao_id=$1", [daoId],
+    )).rows[0]?.maxProposalId ?? null;
+    const refreshProposals = (await this.pool.query(`
+      SELECT proposal_id::text AS "proposalId",content_hash AS "contentHash",normalized
+      FROM proposals
+      WHERE dao_id=$1 AND upper(proposal_status) <> ALL($2::text[])
+      ORDER BY proposal_id
+    `, [daoId, TERMINAL_PROPOSAL_STATES])).rows;
+    return { maxProposalId: max, refreshProposals };
   }
 
   async listDaos() {
@@ -449,7 +510,8 @@ class PostgresGovernanceStore {
     `);
     const checkpoints = await this.pool.query(`
       SELECT dao_id AS "daoId",source_id AS "sourceId",next_block::text AS "nextBlock",
-        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",last_error AS "lastError"
+        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",
+        last_full_scan_at AS "lastFullScanAt",last_error AS "lastError"
       FROM sync_checkpoints ORDER BY dao_id,source_id
     `);
     return { ...counts.rows[0], checkpoints: checkpoints.rows };
@@ -458,7 +520,8 @@ class PostgresGovernanceStore {
   async syncStatus(daoId) {
     return (await this.pool.query(`
       SELECT dao_id AS "daoId",source_id AS "sourceId",next_block::text AS "nextBlock",
-        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",last_error AS "lastError"
+        finalized_head::text AS "finalizedHead",updated_at AS "updatedAt",
+        last_full_scan_at AS "lastFullScanAt",last_error AS "lastError"
       FROM sync_checkpoints WHERE dao_id=$1 ORDER BY source_id
     `, [daoId])).rows;
   }

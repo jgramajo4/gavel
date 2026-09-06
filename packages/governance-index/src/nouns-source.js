@@ -8,6 +8,11 @@ const VOTE_FIELDS = `id supportDetailed votesRaw reason blockNumber blockTimesta
 const SNAPSHOT = `query { _meta { block { number } } }`;
 const PAGE = `query Votes($first:Int!,$after:ID!,$from:BigInt!,$to:BigInt!,$snapshot:Int!){votes(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after,blockNumber_gte:$from,blockNumber_lte:$to}){${VOTE_FIELDS}}}`;
 const PROPOSALS_PAGE = `query Proposals($first:Int!,$after:ID!,$snapshot:Int!){proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after}){${PROPOSAL_FIELDS}}}`;
+// Discovery restricted to proposals created in the synced range, and a targeted
+// refresh for proposals whose state can still change. Together these replace the
+// full re-enumeration on every cycle.
+const NEW_PROPOSALS_PAGE = `query NewProposals($first:Int!,$after:ID!,$from:BigInt!,$snapshot:Int!){proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after,createdBlock_gte:$from}){${PROPOSAL_FIELDS}}}`;
+const REFRESH_PROPOSALS = `query RefreshProposals($ids:[ID!]!,$snapshot:Int!){proposals(first:1000,where:{id_in:$ids},block:{number:$snapshot}){${PROPOSAL_FIELDS}}}`;
 
 class NounsSubgraphSource {
   constructor(options = {}) {
@@ -43,8 +48,25 @@ class NounsSubgraphSource {
     }
   }
   async fetchRange(fromBlock, toBlock, snapshot = toBlock) { return this.page(PAGE, "votes", fromBlock, toBlock, snapshot); }
-  async fetchProposals(fromBlock, toBlock, snapshot = toBlock) {
-    const rows = await this.page(PROPOSALS_PAGE, "proposals", 0, snapshot, snapshot);
+  async incrementalProposals(fromBlock, snapshot, context) {
+    const rows = await this.page(NEW_PROPOSALS_PAGE, "proposals", fromBlock, snapshot, snapshot);
+    const discovered = new Set(rows.map((row) => String(row.id)));
+    const refreshIds = (context.refreshProposals || [])
+      .filter((row) => !discovered.has(String(row.proposalId)))
+      .map((row) => String(row.proposalId));
+    for (let index = 0; index < refreshIds.length; index += 100) {
+      const data = await this.request(REFRESH_PROPOSALS, { ids: refreshIds.slice(index, index + 100), snapshot: Number(snapshot) });
+      const page = data?.proposals;
+      if (!Array.isArray(page)) throw new Error("Nouns subgraph response missing proposals array");
+      rows.push(...page);
+    }
+    return rows;
+  }
+
+  async fetchProposals(fromBlock, toBlock, snapshot = toBlock, context = {}) {
+    const rows = context.full
+      ? await this.page(PROPOSALS_PAGE, "proposals", 0, snapshot, snapshot)
+      : await this.incrementalProposals(fromBlock, snapshot, context);
     return rows.map((proposal) => {
       const normalized = { ...normalizeProposal(proposal, { endpoint: this.endpoint, queriedAt: new Date().toISOString(), subgraphBlock: String(snapshot) }), dao: "nouns", chainId: 1, venue: "governor", timing: "block" };
       const payload = { id: proposal.id, title: proposal.title, description: proposal.description, proposer: proposal.proposer, targets: proposal.targets, values: proposal.values, signatures: proposal.signatures, calldatas: proposal.calldatas, createdTimestamp: proposal.createdTimestamp, createdBlock: proposal.createdBlock, startBlock: proposal.startBlock, endBlock: proposal.endBlock };
@@ -62,4 +84,4 @@ class NounsSubgraphSource {
     return { raw: base, vote: { daoId: "nouns", sourceId: this.id, sourceRecordKey: `vote:${vote.id}`, chainId: 1, contractAddress: this.config.contractAddress, proposalId: normalized.proposalId, voter: getAddress(normalized.voter), support: normalized.support, reason: normalized.reason, voteWeight: normalized.voteWeight, blockNumber: normalized.blockNumber, timestamp: normalized.timestamp, transactionHash: normalized.source.transactionHash, logIndex, sourceKind: normalized.source.kind, sourceEndpoint: this.endpoint, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(head), normalized } };
   }
 }
-module.exports = { NounsSubgraphSource, NOUNS_INDEX_QUERY: PAGE, NOUNS_PROPOSALS_QUERY: PROPOSALS_PAGE };
+module.exports = { NounsSubgraphSource, NOUNS_INDEX_QUERY: PAGE, NOUNS_PROPOSALS_QUERY: PROPOSALS_PAGE, NOUNS_NEW_PROPOSALS_QUERY: NEW_PROPOSALS_PAGE, NOUNS_REFRESH_PROPOSALS_QUERY: REFRESH_PROPOSALS };

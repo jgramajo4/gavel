@@ -186,7 +186,10 @@ test("indexed history materializes the existing history schema without collapsin
   const { IndexApiClient } = require("../packages/governance-index");
   const proposal = { id: "3", contentHash: "f".repeat(64), title: "Railgun proposal 3", description: "ipfs://cid", proposer: ADDRESS, state: "ACTIVE", outcome: "ACTIVE", createdBlock: "0", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "0", endBlock: "0", quorumVotes: "1", forVotes: "3", againstVotes: "0", abstainVotes: "0", actions: [], dao: "railgun-eth", chainId: 1, venue: "railgun-voting", timing: "timestamp", startTime: null, endTime: null, choices: ["AGAINST", "FOR"] };
   const events = [0, 1].map((logIndex) => ({ daoId: "railgun-eth", chainId: 1, contractAddress: DAO_CONFIGS["railgun-eth"].contractAddress, proposalId: "3", voter: ADDRESS, support: logIndex ? "AGAINST" : "FOR", reason: null, voteWeight: "1", blockNumber: String(10 + logIndex), timestamp: "2023-11-14T22:13:20.000Z", transactionHash: logIndex ? TX2 : TX, logIndex, sourceKind: "railgun-voting-logs", sourceEndpoint: "https://rpc.example", observedHead: "20" }));
-  const client = new IndexApiClient({ baseUrl: "http://index.example", fetch: async (url) => ({ ok: true, status: 200, async json() { return url.includes("/proposals/3") ? proposal : { items: events, nextCursor: null }; } }) });
+  const client = new IndexApiClient({ baseUrl: "http://index.example", fetch: async (url) => ({ ok: true, status: 200, async json() {
+    if (url.includes("/sync-status")) return { sources: [{ sourceId: "voting-logs", finalizedHead: "20", updatedAt: new Date().toISOString(), lastError: null }] };
+    return url.includes("/proposals/3") ? proposal : { items: events, nextCursor: null };
+  } }) });
   const history = await client.fetchHistory("railgun-eth", ADDRESS);
   assert.equal(history.voteCount, 2);
   assert.equal(history.votes[0].proposal.id, "3");
@@ -234,4 +237,105 @@ test("Nouns backfill source imports normalized votes and enumerated proposals", 
   assert.equal(result.records, 2);
   assert.equal(store.proposals[0].proposalId, "1");
   assert.equal(store.voteEvents[0].normalized.dao, "nouns");
+});
+
+test("ENS incremental sync scans only the requested range and skips terminal proposals", async () => {
+  const ranges = [];
+  let views = 0;
+  const tick = () => { views += 1; };
+  const governor = {
+    async state(){ tick(); return 1; }, async proposalSnapshot(){ tick(); return 100n; },
+    async proposalDeadline(){ tick(); return 200n; }, async proposalVotes(){ tick(); return [0n, 0n, 0n]; },
+    async quorum(){ tick(); return 1n; },
+  };
+  const source = new EnsGovernorSource({ rpcUrl: "https://rpc.example", fromBlock: 100, proposalBatchSize: 50, governor, provider: {
+    async getLogs(filter){ ranges.push([filter.fromBlock, filter.toBlock]); return []; },
+    async getBlock(){ return { timestamp: 1_700_000_000 }; },
+  } });
+  const refreshProposals = [
+    { proposalId: "1", contentHash: "a".repeat(64), normalized: { id: "1", state: "ACTIVE", actions: [] } },
+    { proposalId: "2", contentHash: "b".repeat(64), normalized: { id: "2", state: "EXECUTED", actions: [] } },
+  ];
+  const refreshed = await source.fetchProposals(1000, 1020, 1020, { full: false, refreshProposals });
+  assert.deepEqual(ranges, [[1000, 1020]], "incremental discovery never rescans Governor history");
+  assert.equal(views, 5, "only the non-terminal proposal is re-read");
+  assert.deepEqual(refreshed.map((row) => row.proposal.proposalId), ["1"]);
+  assert.equal(refreshed.every((row) => !row.raw), true, "refreshes are materialized, not new canonical records");
+
+  ranges.length = 0;
+  await source.fetchProposals(1000, 1020, 220, { full: true, refreshProposals: [] });
+  assert.deepEqual(ranges, [[100, 149], [150, 199], [200, 220]], "a full scan still walks history in batches");
+});
+
+test("worker enumerates fully on backfill and incrementally afterwards", async () => {
+  const store = new MemoryGovernanceStore();
+  const seen = [];
+  const source = {
+    id: "governor-logs", fromBlock: 10, replayBlocks: 2, config: DAO_CONFIGS.ens,
+    rpcUrl: "https://rpc.example", publicEndpoint: "https://rpc.example",
+    async head(){ return 40; }, async fetchRange(){ return []; },
+    async normalizeLog(){ throw new Error("unexpected log"); },
+    async fetchProposals(_from, _to, _head, context){ seen.push(context.full); return []; },
+  };
+  const worker = new GovernanceSyncWorker({ store, sources: { ens: source }, batchSize: 100, fullScanIntervalMs: 60_000 });
+  await worker.syncDao("ens");
+  await worker.syncDao("ens");
+  assert.deepEqual(seen, [true, false], "first pass backfills, the next is incremental");
+  assert.ok(store.checkpoints.get("ens:governor-logs").lastFullScanAt, "the full scan is stamped");
+});
+
+test("history fails closed when the index is empty, failing or stale", async () => {
+  const { IndexApiClient, IndexStaleError } = require("../packages/governance-index");
+  const build = (sources, now) => new IndexApiClient({
+    baseUrl: "http://index.example", now: () => new Date(now),
+    fetch: async (url) => ({ ok: true, status: 200, async json(){
+      if (url.includes("/sync-status")) return { sources };
+      return { items: [], nextCursor: null };
+    } }),
+  });
+  const now = 1_700_000_000_000;
+  const fresh = new Date(now).toISOString();
+  await assert.rejects(build([], now).fetchHistory("nouns", ADDRESS), IndexStaleError, "no checkpoint must fail closed");
+  await assert.rejects(
+    build([{ sourceId: "s", finalizedHead: "10", updatedAt: fresh, lastError: "sync_failed" }], now).fetchHistory("nouns", ADDRESS),
+    IndexStaleError, "a failing sync must fail closed",
+  );
+  await assert.rejects(
+    build([{ sourceId: "s", finalizedHead: "10", updatedAt: new Date(now - 7_200_000).toISOString(), lastError: null }], now).fetchHistory("nouns", ADDRESS),
+    IndexStaleError, "a stale checkpoint must fail closed",
+  );
+  const document = await build([{ sourceId: "s", finalizedHead: "12345", updatedAt: fresh, lastError: null }], now).fetchHistory("nouns", ADDRESS);
+  assert.equal(document.voteCount, 0);
+  assert.equal(document.source.subgraphBlock, "12345", "an empty history reports the verified checkpoint, never block 0");
+});
+
+test("index client rejects unknown DAOs and never leaks credentials into provenance", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const client = new IndexApiClient({
+    baseUrl: "https://user:secret@index.example/base",
+    fetch: async (url) => ({ ok: true, status: 200, async json(){
+      if (url.includes("/sync-status")) return { sources: [{ sourceId: "s", finalizedHead: "5", updatedAt: new Date().toISOString(), lastError: null }] };
+      return { items: [], nextCursor: null };
+    } }),
+  });
+  await assert.rejects(client.fetchHistory("../../etc", ADDRESS), /invalid DAO/);
+  await assert.rejects(client.fetchProposal("nouns", "9".repeat(100)), /invalid proposal id/);
+  const document = await client.fetchHistory("nouns", ADDRESS);
+  assert.doesNotMatch(JSON.stringify(document), /secret/);
+});
+
+test("indexed votes keep upstream entity ids and client ids", async () => {
+  const store = new MemoryGovernanceStore();
+  await store.transaction(async (tx) => {
+    tx.upsertDao({ id: "nouns", chainId: 1 });
+    tx.insertVote({ daoId: "nouns", chainId: 1, contractAddress: DAO_CONFIGS.nouns.contractAddress, proposalId: "9",
+      voter: ADDRESS, support: "FOR", reason: null, voteWeight: "1", blockNumber: "3", transactionHash: TX, logIndex: 4,
+      sourceKind: "nouns-subgraph", sourceEndpoint: "https://subgraph.example", observedHead: "10",
+      normalized: { clientId: 11, source: { entityId: "9-0x1", endpoint: "https://subgraph.example" } } });
+  });
+  const response = await request(createReadOnlyApi({ store }), `/v1/daos/nouns/voters/${ADDRESS}/history`);
+  const [item] = (await response.json()).items;
+  assert.equal(item.entityId, "9-0x1");
+  assert.equal(item.clientId, 11);
+  assert.equal(item.normalized, undefined, "the private normalized blob is never served");
 });

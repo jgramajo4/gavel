@@ -2,12 +2,25 @@ const { DAO_CONFIGS } = require("./config");
 const { redactErrorMessage } = require("./redaction");
 
 class GovernanceSyncWorker {
-  constructor({ store, sources, batchSize = 20_000, concurrency = 4, retries = 3, logger = null }) { this.store = store; this.sources = sources; this.batchSize = batchSize; this.concurrency = concurrency; this.retries = retries; this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); }
+  constructor({ store, sources, batchSize = 20_000, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, logger = null }) { this.store = store; this.sources = sources; this.batchSize = batchSize; this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); }
   async syncDao(daoId, options = {}) {
     const source = this.sources[daoId]; if (!source) throw new Error(`No source configured for ${daoId}`);
     const run = () => this._syncDao(daoId, source, options);
     return this.store.withSourceLock ? this.store.withSourceLock(daoId, source.id, run) : run();
   }
+  _shouldFullScan(checkpoint, options) {
+    if (options.fullProposalScan != null) return Boolean(options.fullProposalScan);
+    if (!checkpoint || options.fromBlock != null) return true;
+    if (!checkpoint.lastFullScanAt) return true;
+    const age = Date.now() - new Date(checkpoint.lastFullScanAt).getTime();
+    return !Number.isFinite(age) || age >= this.fullScanIntervalMs;
+  }
+
+  async _proposalContext(daoId, full) {
+    if (full || typeof this.store.getProposalSyncContext !== "function") return { refreshProposals: [], maxProposalId: null };
+    return this.store.getProposalSyncContext(daoId);
+  }
+
   async _syncDao(daoId, source, options) {
     await this.store.transaction(async (tx) => {
       const config = DAO_CONFIGS[daoId];
@@ -19,9 +32,13 @@ class GovernanceSyncWorker {
     const finalHead = options.toBlock == null ? await source.head() : Number(options.toBlock);
     let batches = 0; let records = 0;
     const enumeratesProposals = typeof source.fetchProposals === "function";
+    // A full enumeration is the only pass that may conclude a proposal has
+    // disappeared, so it is also the only pass allowed to reconcile deletions.
+    const full = this._shouldFullScan(checkpoint, options);
+    const proposalContext = { full, ...(await this._proposalContext(daoId, full)) };
     let fetchedProposals = [];
     try {
-      fetchedProposals = enumeratesProposals ? await source.fetchProposals(start, finalHead, finalHead) : [];
+      fetchedProposals = enumeratesProposals ? await source.fetchProposals(start, finalHead, finalHead, proposalContext) : [];
     } catch (error) {
       const safeError = redactErrorMessage(error);
       this.logger.error({ event: "proposal_sync_failed", dao: daoId, source: source.id, error: safeError });
@@ -54,11 +71,13 @@ class GovernanceSyncWorker {
     // Replay canonical event placement first. Proposal enumeration is then the
     // authoritative finalized-head refresh for mutable state and tallies.
     if (enumeratesProposals) await this.store.transaction(async (tx) => {
-      for (const proposal of materializedProposals) await tx.upsertProposal(proposal);
-      if (tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: proposalRecords });
+      for (const proposal of materializedProposals) await tx.upsertProposal(proposal.proposal || proposal);
+      // Only a full enumeration is authoritative about which proposals exist.
+      if (full && tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: proposalRecords });
       for (const row of proposalRecords) if (await tx.ingest(row)) records += 1;
+      if (full) await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: Math.max(finalHead + 1, Number(checkpoint?.nextBlock || 0)), finalizedHead: finalHead, updatedAt: new Date().toISOString(), lastFullScanAt: new Date().toISOString(), lastError: null });
     });
-    return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records };
+    return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records, fullProposalScan: full };
   }
   async syncAll(options = {}) { const results = []; for (const daoId of Object.keys(this.sources)) results.push(await this.syncDao(daoId, options)); return results; }
 }

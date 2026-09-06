@@ -4,7 +4,7 @@ A self-hosted, read-only PostgreSQL index for Nouns, ENS and Railgun Ethereum go
 
 ## Configure
 
-Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH`, `INDEXER_BLOCK_BATCH_SIZE`, `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
+Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH` (default 64), `INDEXER_BLOCK_BATCH_SIZE`, `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `INDEXER_FULL_SCAN_INTERVAL_SECONDS` (default 21600), `INDEXER_MAX_CHECKPOINT_AGE_SECONDS` (default 900), `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default 3600), `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
 
 Node does not load `.env` implicitly. Export it before using the npm CLI:
 
@@ -19,6 +19,7 @@ Docker Compose loads `.env` automatically and supplies its own container databas
 ```bash
 npm ci
 npm run indexer -- migrate
+npm run indexer -- verify-permissions --role gavel_api
 npm run indexer -- backfill --dao nouns
 npm run indexer -- backfill --dao ens
 npm run indexer -- backfill --dao railgun-eth
@@ -26,9 +27,12 @@ npm run indexer -- sync --dao ens
 npm run indexer -- sync --all
 npm run indexer -- status
 npm run indexer -- health
+npm run indexer -- sync --all --full
 npm run indexer -- reconcile --dao ens
 npm run indexer -- serve
 ```
+
+`backfill` performs a **full** proposal enumeration; `sync` performs an **incremental** one unless `--full` is passed or `INDEXER_FULL_SCAN_INTERVAL_SECONDS` has elapsed since the last full pass. Only a full enumeration is authoritative about which proposals exist, so only a full pass may delete indexed rows; an incremental pass discovers proposals created in the synced block range and re-reads mutable state solely for proposals that are not in a terminal state. This is what keeps a steady-state cycle from rescanning DAO history.
 
 `backfill --dao nouns` paginates Nouns subgraph votes and independently enumerates every proposal at one pinned snapshot, preserving immutable source records while refreshing mutable status and tallies. ENS ProposalCreated and VoteCast logs persist proposals and votes; a VoteCast with unavailable ProposalCreated metadata remains stored but cannot form a complete history document until its proposal exists. Railgun VoteCast ingestion calls the existing `RailgunDaoAdapter.fetchProposal` and persists the materialized proposal. Delegation tables/API counts exist, but delegation ingestion is not implemented (coverage is PARTIAL).
 
@@ -41,9 +45,10 @@ cp .env.example .env
 # Edit .env: set all three database passwords, ETHEREUM_RPC_URL, and enabled DAOs.
 docker compose up -d --build postgres
 docker compose run --rm migrate
+docker compose run --rm migrate verify-permissions --role gavel_api
 docker compose run --rm indexer backfill --dao nouns
 docker compose run --rm indexer backfill --dao ens
-docker compose run --rm indexer backfill --dao railgun-eth
+# Railgun requires INDEXER_ENABLED_DAOS to include railgun-eth.
 docker compose run --rm indexer sync --all
 docker compose up -d api indexer
 docker compose ps
@@ -51,7 +56,7 @@ curl --fail http://localhost:${API_PORT:-8080}/health
 docker compose run --rm indexer status
 ```
 
-The one-shot `migrate` service must finish successfully before API/indexer startup. Re-running backfill or sync is safe; source locking, unique event identities, and transactional checkpoints make ingestion restart-safe.
+`docker/init-db.sh` creates the `gavel_indexer` and `gavel_api` roles, and only runs when the PostgreSQL volume is first created. On a reused volume the roles are absent and `migrate` reports `"roles": "skipped"` with the roles it needs; create them and re-run. `verify-permissions` proves `gavel_api` holds no write privilege and exits 2 if it does — run it before serving. The one-shot `migrate` service must finish successfully before API/indexer startup. Re-running backfill or sync is safe; source locking, unique event identities, and transactional checkpoints make ingestion restart-safe.
 
 ## API
 

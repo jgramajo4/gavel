@@ -177,7 +177,12 @@ test("Nouns proposal records reconcile independently and disappearing proposals 
   assert.equal(store.rawRecords.length, 1);
   assert.ok(await store.getProposal("nouns", "7"));
   proposals = [];
-  await worker.syncDao("nouns");
+  // An incremental pass is not authoritative about which proposals exist, so it
+  // must never delete one.
+  await worker.syncDao("nouns", { fullProposalScan: false });
+  assert.equal(store.rawRecords.length, 1);
+  assert.ok(await store.getProposal("nouns", "7"));
+  await worker.syncDao("nouns", { fullProposalScan: true });
   assert.equal(store.rawRecords.length, 0);
   assert.equal(await store.getProposal("nouns", "7"), null);
 });
@@ -274,7 +279,9 @@ test("Railgun proposal enumeration removes proposals that disappear at a later f
   assert.deepEqual(store.proposals.map((x) => x.proposalId), ["0", "1"]);
   head = 101;
   count = 1n;
-  await worker.syncDao("railgun-eth");
+  await worker.syncDao("railgun-eth", { fullProposalScan: false });
+  assert.deepEqual(store.proposals.map((x) => x.proposalId), ["0", "1"], "an incremental pass never deletes proposals");
+  await worker.syncDao("railgun-eth", { fullProposalScan: true });
   assert.deepEqual(store.proposals.map((x) => x.proposalId), ["0"]);
   assert.deepEqual(store.rawRecords.filter((x) => x.recordType === "proposal").map((x) => x.proposalId), ["0"]);
 });
@@ -284,10 +291,11 @@ test("Index API client caps history page size at the API maximum", async () => {
   const urls = [];
   const client = new IndexApiClient({ baseUrl: "https://index.example", pageSize: 1000, fetch: async (url) => {
     urls.push(url);
+    if (url.includes("/sync-status")) return { ok: true, async json(){ return { sources: [{ sourceId: "nouns-subgraph", finalizedHead: "500", updatedAt: new Date().toISOString(), lastError: null }] }; } };
     return { ok: true, async json(){ return { items: [], nextCursor: null }; } };
   } });
   await client.fetchHistory("ens", ADDRESS);
-  assert.match(urls[0], /limit=100(?:&|$)/);
+  assert.match(urls.find((url) => url.includes("/history")), /limit=100(?:&|$)/);
 });
 
 test("API returns a fixed 500 response while logging the internal error", async () => {
@@ -480,17 +488,26 @@ test("migration constrains vote and delegation provenance fields", () => {
   assert.match(delegation, /delegatee text NOT NULL CHECK/);
 });
 
-test("indexer health requires a clean checkpoint for every enabled DAO", () => {
+test("indexer health requires a clean, advancing checkpoint for every enabled DAO", () => {
+  const now = 1_700_000_000_000;
+  const fresh = new Date(now - 30_000).toISOString();
+  const options = { now, maxAgeSeconds: 900 };
   const healthy = healthStatus({ checkpoints: [
-    { daoId: "nouns", sourceId: "nouns-subgraph", lastError: null },
-    { daoId: "ens", sourceId: "governor-logs", lastError: null },
-  ] }, ["nouns", "ens"]);
+    { daoId: "nouns", sourceId: "nouns-subgraph", updatedAt: fresh, lastError: null },
+    { daoId: "ens", sourceId: "governor-logs", updatedAt: fresh, lastError: null },
+  ] }, ["nouns", "ens"], options);
   assert.equal(healthy.ok, true);
-  const missing = healthStatus({ checkpoints: healthy.checkpoints.slice(0, 1) }, ["nouns", "ens"]);
+  const missing = healthStatus({ checkpoints: healthy.checkpoints.slice(0, 1) }, ["nouns", "ens"], options);
   assert.equal(missing.ok, false);
   assert.deepEqual(missing.missing, ["ens:governor-logs"]);
-  const failed = healthStatus({ checkpoints: [{ daoId: "ens", sourceId: "governor-logs", lastError: "boom" }] }, ["ens"]);
+  const failed = healthStatus({ checkpoints: [{ daoId: "ens", sourceId: "governor-logs", updatedAt: fresh, lastError: "boom" }] }, ["ens"], options);
   assert.deepEqual(failed.errors, [{ daoId: "ens", sourceId: "governor-logs", lastError: "boom" }]);
+  // A stalled indexer that recorded no error must not report healthy.
+  const stalled = healthStatus({ checkpoints: [
+    { daoId: "ens", sourceId: "governor-logs", updatedAt: new Date(now - 7_200_000).toISOString(), lastError: null },
+  ] }, ["ens"], options);
+  assert.equal(stalled.ok, false);
+  assert.equal(stalled.stale[0].sourceId, "governor-logs");
 });
 
 test("request logs exclude attacker-controlled query strings", async () => {
@@ -567,7 +584,7 @@ test("worker reconciles a moved proposal creation before applying its refresh", 
 
 test("Compose separates bootstrap, indexer, and SELECT-only API database roles", () => {
   const compose = fs.readFileSync(path.join(__dirname, "../docker-compose.yml"), "utf8");
-  const migration = fs.readFileSync(path.join(__dirname, "../packages/governance-index/migrations/001_initial.sql"), "utf8");
+  const migration = fs.readFileSync(path.join(__dirname, "../packages/governance-index/migrations/002_roles.sql"), "utf8");
   const init = fs.readFileSync(path.join(__dirname, "../packages/governance-index/docker/init-db.sh"), "utf8");
   assert.match(compose, /PGUSER: gavel_indexer/);
   assert.match(compose, /PGPASSWORD: \$\{GAVEL_INDEXER_DB_PASSWORD/);

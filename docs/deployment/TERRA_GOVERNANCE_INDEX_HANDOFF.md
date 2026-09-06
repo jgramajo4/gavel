@@ -127,11 +127,33 @@ Tally variables are reserved only. Tally is not a durable or required source in 
 
 ## 6. RPC Efficiency
 
-- Scanned once: ENS `ProposalCreated`/`VoteCast`; Railgun `VoteCast`; Nouns historical votes/proposals through paginated pinned subgraph queries.
-- Incremental: only finalized blocks after the checkpoint, plus a 64-block trailing replay window.
-- Live RPC: proposal refresh/materialization where required and transaction-time vote safety checks.
-- Served from PostgreSQL: proposal lookup, proposal lists, vote lists, voter histories, DAO metadata, and sync status.
-- No per-history-request historical RPC reconstruction.
+Two distinct passes:
+
+**Full enumeration** — every proposal is re-read. Runs on `backfill`, on any
+`sync --full`, and otherwise at most once per `INDEXER_FULL_SCAN_INTERVAL_SECONDS`
+(default 21600, six hours). This is the only pass that may conclude a proposal
+has disappeared, so it is the only pass permitted to delete indexed rows.
+For ENS it walks `ProposalCreated` from block 13699665 in
+`INDEXER_BLOCK_BATCH_SIZE` steps: roughly 470 `eth_getLogs` calls at current
+mainnet height.
+
+**Incremental sync** — the steady state, every `--interval-ms` (default 60s).
+Discovery is scoped to the checkpoint range plus the 64-block trailing replay,
+and mutable state is re-read only for proposals that are not in a terminal
+state (`EXECUTED`, `CANCELLED`, `VETOED`, `EXPIRED`, `DEFEATED`,
+`SPONSORSHIP_EXPIRED`). A cycle with 1000 new blocks costs one `eth_getLogs`
+plus five view calls per still-open proposal — not a historical rescan.
+
+**Request time** — proposal lookup, proposal lists, vote lists, voter histories,
+DAO metadata and sync status are served entirely from PostgreSQL. No API request
+and no `gavel history` invocation triggers an RPC call or a historical scan.
+
+**Transaction time** — `prepareVote` still performs full live canonical
+verification against the chain for all three DAOs. The index never substitutes
+for it.
+
+Budget accordingly: the sustained cost is the incremental figure; the full
+enumeration spike happens on backfill and every six hours.
 
 ## 7. Deployment
 
@@ -145,10 +167,13 @@ GAVEL_INDEXER_DB_PASSWORD=<different-strong-random-secret>
 GAVEL_API_DB_PASSWORD=<different-strong-random-secret>
 ETHEREUM_RPC_URL=<credential-bearing-mainnet-rpc-url>
 INDEXER_ENABLED_DAOS=nouns,ens
-INDEXER_CONFIRMATION_DEPTH=12
+INDEXER_CONFIRMATION_DEPTH=64
 INDEXER_BLOCK_BATCH_SIZE=20000
 INDEXER_RPC_CONCURRENCY=4
 INDEXER_DB_POOL_SIZE=10
+INDEXER_FULL_SCAN_INTERVAL_SECONDS=21600
+INDEXER_MAX_CHECKPOINT_AGE_SECONDS=900
+GAVEL_INDEX_MAX_STALENESS_SECONDS=3600
 NOUNS_SUBGRAPH_URL=https://www.nouns.camp/subgraphs/nouns
 API_HOST=0.0.0.0
 API_PORT=8080
@@ -164,6 +189,12 @@ INDEXER_ENABLED_DAOS=nouns,ens,railgun-eth
 
 ### Exact fresh-host sequence
 
+`docker/init-db.sh` runs **only when the PostgreSQL data volume is first
+created**. On a fresh host that is automatic. If you are reusing an existing
+`postgres-data` volume, the `gavel_indexer` and `gavel_api` roles will not be
+created and `migrate` will report `"roles": "skipped"` — create them by hand
+before continuing (see *Update procedure* below).
+
 ```bash
 git clone https://github.com/jgramajo4/gavel.git /srv/docker/gavel-index
 cd /srv/docker/gavel-index
@@ -173,16 +204,82 @@ chmod 600 .env
 # provision values above using Terra's normal secret workflow
 
 docker compose up -d --build postgres
-docker compose run --rm migrate
+docker compose run --rm migrate            # must print "roles": "granted"
+
+# Prove the API role is read-only before anything is served.
+docker compose run --rm migrate verify-permissions --role gavel_api
+
+# INDEXER_ENABLED_DAOS gates which backfills are possible. With the default
+# (nouns,ens) the railgun line below will fail; set the variable first if you
+# want Railgun indexed.
 docker compose run --rm indexer backfill --dao nouns
 docker compose run --rm indexer backfill --dao ens
-docker compose run --rm indexer backfill --dao railgun-eth
+# INDEXER_ENABLED_DAOS=nouns,ens,railgun-eth docker compose run --rm indexer backfill --dao railgun-eth
+
 docker compose run --rm indexer sync --all
 docker compose up -d api indexer
 
 docker compose ps
 curl --fail http://127.0.0.1:${API_PORT:-8080}/health
 docker compose run --rm indexer status
+docker compose run --rm indexer health     # exits 2 if a checkpoint stalled
+```
+
+### Update procedure
+
+```bash
+cd /srv/docker/gavel-index
+docker compose exec -T postgres pg_dump -U gavel -Fc gavel > pre-update-$(date +%F).dump
+git fetch origin && git checkout <new-commit-sha>
+docker compose build
+docker compose run --rm migrate
+docker compose run --rm migrate verify-permissions --role gavel_api
+docker compose up -d api indexer
+docker compose run --rm indexer health
+```
+
+Creating the roles by hand on a reused volume:
+
+```bash
+docker compose exec -T postgres psql -U gavel -d gavel -c \
+  "CREATE ROLE gavel_indexer LOGIN PASSWORD '<indexer-secret>';" -c \
+  "CREATE ROLE gavel_api LOGIN PASSWORD '<api-secret>';" -c \
+  "GRANT CONNECT ON DATABASE gavel TO gavel_indexer, gavel_api;"
+docker compose run --rm migrate
+```
+
+### Rollback procedure
+
+The index holds only public, rebuildable governance data, so rollback is a
+code rollback plus either a restore or a re-backfill.
+
+```bash
+cd /srv/docker/gavel-index
+docker compose down                        # leaves the postgres-data volume intact
+git checkout <previous-known-good-sha>
+docker compose build
+
+# Schema rollback is only needed if the new commit changed migrations.
+docker compose exec -T postgres pg_restore -U gavel -d gavel --clean --if-exists \
+  < pre-update-YYYY-MM-DD.dump
+
+docker compose up -d postgres
+docker compose run --rm migrate
+docker compose run --rm migrate verify-permissions --role gavel_api
+docker compose up -d api indexer
+docker compose run --rm indexer health
+```
+
+If the dump is unusable, rebuild from scratch instead — nothing in the index is
+irreplaceable:
+
+```bash
+docker compose down -v                     # destroys the volume and all indexed data
+docker compose up -d --build postgres
+docker compose run --rm migrate
+docker compose run --rm indexer backfill --dao nouns
+docker compose run --rm indexer backfill --dao ens
+docker compose up -d api indexer
 ```
 
 Railgun's pin is verified from creation receipt `0xcf73b70bbbc9a4fc322c1d0ed6cdb7ed1728681fbcdb2b44fd8c6812df381cb0`, the official Railgun deployment package, and L2BEAT. Postgres has no host port. The API is the only published service.
@@ -214,6 +311,8 @@ Confirmed in code/review:
 - app containers run as non-root `node`
 - credential-bearing RPC/subgraph transport URLs stay in process environment only; PostgreSQL, backups, logs, checkpoints, and the public API retain only explicit or origin-only public provenance
 - upstream errors are redacted before structured logs/checkpoints and masked in public status responses
+- the API role's read-only property is proven, not assumed: `gavel-indexer verify-permissions` fails the deploy if `gavel_api` holds any INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER grant or CREATE on the public schema
+- the CLI refuses to build a history document from an index that has no checkpoint, is reporting a sync error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`
 
 Terra must put API ingress behind Cloudflare Tunnel or the normal reverse proxy. Admin operations should remain Tailscale/SSH-only.
 
@@ -221,21 +320,44 @@ Terra must put API ingress behind Cloudflare Tunnel or the normal reverse proxy.
 
 Latest coding-host results:
 
-- focused governance suites: **55 passed, 0 failed**
-- full repository suite: **156 passed, 1 skipped, 0 failed**
+- full repository suite: **161 passed, 10 skipped, 0 failed**
+- PostgreSQL integration suite: **9 passed** against a real PostgreSQL 16 server
+  (`GAVEL_TEST_DATABASE_URL=... node --test test/governance-index-postgres.test.js`),
+  covering migration execution, canonical uniqueness, ingest idempotency,
+  checkpoint atomicity under a failed batch, reorg replay deletion, credential
+  redaction, and a wire-level proof that `gavel_api` receives `permission denied`
+  on INSERT/DELETE/CREATE while SELECT succeeds
+- skipped without that variable set, so CI without a database does not silently pass
 - `npm audit`: zero vulnerabilities
 - clean production dependency tree after `npm ci --omit=dev`
 - API smoke: `/health` returned `200`; mutation request returned `405`
 - Compose static checks: private Postgres, internal DB network, external indexer egress, consistent credentials, health checks
 - `git diff --check`: passed
 
-Skipped test: live mainnet-fork test requiring external fork infrastructure.
+Skipped without external infrastructure: the live mainnet-fork test, and the nine PostgreSQL integration tests when `GAVEL_TEST_DATABASE_URL` is unset.
 
 Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot, backup/restore, and network-isolation tests. Docker and PostgreSQL were unavailable on the coding Pi.
 
 ## 10. Known Limitations
 
 - Terra runtime deployment is not yet validated.
+- The incremental Nouns discovery query uses the subgraph filters
+  `createdBlock_gte` and `id_in`. These could not be exercised against the live
+  subgraph from the coding host (egress blocked), only against fixtures. The
+  full enumeration path is unchanged and known good, and a rejected filter fails
+  the sync loudly rather than returning partial data — but confirm the first
+  incremental Nouns cycle succeeds on Terra before leaving it unattended.
+- `INDEXER_CONFIRMATION_DEPTH` defaults to 64. A reorg deeper than the
+  confirmation depth plus the 64-block replay window would leave orphaned rows
+  that no incremental pass detects; recover with
+  `gavel-indexer backfill --dao <dao> --from-block <before the reorg>`.
+- The Nouns raw vote `log_index` is derived from a hash of the subgraph vote id
+  rather than a real receipt log index. Two Nouns votes in one transaction whose
+  hashes collide now raise a unique-violation sync error instead of dropping a
+  vote silently, but the synthetic value should be replaced with the real one.
+- `GET /v1/daos/:dao/proposals` returns full proposal descriptions, so a
+  `limit=100` request can return several megabytes. Put the public API behind a
+  rate limit as well as a reverse proxy.
 - Railgun indexes the current Voting contract from its verified creation block; legacy governor `0xfc4B580C9bda2EEf4E94D9Fb4bcB1F7a61660cf9` is outside this release.
 - delegation-event ingestion is not implemented.
 - Tally enrichment/bootstrap is not implemented.
@@ -265,12 +387,16 @@ Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot
 - [ ] Postgres volume persists and has no host port
 - [ ] API ingress uses Cloudflare Tunnel/reverse proxy; no router forwarding
 - [ ] admin path is SSH/Tailscale only
-- [ ] migrations complete against real PostgreSQL
+- [ ] migrations complete against real PostgreSQL and report `"roles": "granted"`
+- [ ] `verify-permissions --role gavel_api` exits 0
 - [ ] Nouns, ENS, Railgun backfills complete
 - [ ] `sync --all` resumes cleanly and remains idempotent
 - [ ] API queries return indexed records
 - [ ] private RPC URL absent from API and logs
-- [ ] health monitoring and Pushover alert configured
+- [ ] health monitoring and Pushover alert configured (`indexer health` exits 2 on a stalled checkpoint)
+- [ ] first incremental Nouns cycle succeeds (`indexer sync --dao nouns` after a backfill, exit 0, checkpoint advanced)
+- [ ] steady-state RPC volume observed for one hour and matches the incremental figure in section 6
+- [ ] rollback rehearsed once from the pre-update dump
 - [ ] backup scheduled and restore tested
 - [ ] host reboot preserves volume and restarts healthy services
 - [ ] Docker network inspection confirms Postgres isolation

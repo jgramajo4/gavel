@@ -15,6 +15,11 @@ const RAILGUN_ABI = ["event VoteCast(uint256 indexed id,address indexed voter,bo
 const ENS_IFACE = new Interface(ENS_ABI); const RAILGUN_IFACE = new Interface(RAILGUN_ABI);
 const SUPPORT = ["AGAINST", "FOR", "ABSTAIN"];
 const ENS_STATES = ["PENDING", "ACTIVE", "CANCELLED", "DEFEATED", "SUCCEEDED", "QUEUED", "EXPIRED", "EXECUTED"];
+// States that can never change again. Anything else is re-read at the finalized
+// head. Unknown labels are deliberately treated as non-terminal so a new state
+// is refreshed rather than frozen.
+const TERMINAL_STATES = new Set(["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"]);
+function isTerminalState(state) { return TERMINAL_STATES.has(String(state || "").toUpperCase()); }
 function timestamp(block) { return new Date(Number(block.timestamp) * 1000).toISOString(); }
 function raw(config, log, head, kind, endpoint) { return { daoId: config.id, sourceId: config.source.id, chainId: config.chainId, contractAddress: getAddress(log.address), transactionHash: log.transactionHash, logIndex: Number(log.index ?? log.logIndex), blockNumber: String(log.blockNumber), blockHash: log.blockHash || null, recordType: kind, payload: { topics: log.topics, data: log.data }, sourceKind: config.source.kind, sourceEndpoint: endpoint, observedHead: String(head) }; }
 
@@ -49,16 +54,32 @@ class EnsGovernorSource extends BlockRangeSource {
     };
     return { ...record, proposal: { ...record.proposal, normalized } };
   }
-  async fetchProposals(_fromBlock, _toBlock, head) {
+  // Discovery is scoped to the requested range unless a full enumeration was
+  // asked for. Mutable state for proposals created earlier is refreshed from
+  // the indexed rows the worker supplies, so a steady-state sync never rescans
+  // Governor history.
+  async fetchProposals(fromBlock, toBlock, head, context = {}) {
     const proposalTopic = ENS_IFACE.getEvent("ProposalCreated").topicHash;
+    const scanFrom = context.full ? this.fromBlock : Math.max(this.fromBlock, Number(fromBlock));
+    const scanTo = Math.min(Number(head), context.full ? Number(head) : Number(toBlock));
     const logs = [];
-    for (let fromBlock = this.fromBlock; fromBlock <= head; fromBlock += this.proposalBatchSize) {
-      const toBlock = Math.min(head, fromBlock + this.proposalBatchSize - 1);
-      logs.push(...await this.provider.getLogs({ address: this.config.contractAddress, fromBlock, toBlock, topics: [proposalTopic] }));
+    for (let from = scanFrom; from <= scanTo; from += this.proposalBatchSize) {
+      const to = Math.min(scanTo, from + this.proposalBatchSize - 1);
+      logs.push(...await this.provider.getLogs({ address: this.config.contractAddress, fromBlock: from, toBlock: to, topics: [proposalTopic] }));
     }
     const records = [];
+    const discovered = new Set();
     for (const log of logs.filter((entry) => entry.topics?.[0] === proposalTopic)) {
-      records.push(await this.refreshProposal(await this.normalizeLog(log, head), head));
+      const record = await this.normalizeLog(log, head);
+      discovered.add(String(record.proposal.proposalId));
+      records.push(await this.refreshProposal(record, head));
+    }
+    for (const row of context.refreshProposals || []) {
+      const proposalId = String(row.proposalId);
+      if (discovered.has(proposalId) || isTerminalState(row.normalized?.state)) continue;
+      records.push(await this.refreshProposal({
+        proposal: { daoId: "ens", proposalId, contentHash: row.contentHash, normalized: row.normalized, actions: row.normalized?.actions },
+      }, head));
     }
     return records;
   }
@@ -82,11 +103,21 @@ class EnsGovernorSource extends BlockRangeSource {
 class RailgunVotingSource extends BlockRangeSource {
   constructor(options = {}) { super(DAO_CONFIGS["railgun-eth"], { rpcUrl: options.rpcUrl || process.env.ETHEREUM_RPC_URL, ...options }); this.topics = RAILGUN_IFACE.getEvent("VoteCast").topicHash; this.proposalLoader = options.proposalLoader; this.proposalCountLoader = options.proposalCountLoader; }
   async loadProposal(id, head) { if (!this.proposalLoader) return null; const normalized = await this.proposalLoader(String(id), head); return { daoId: "railgun-eth", proposalId: String(id), contentHash: normalized.contentHash, normalized, actions: normalized.actions }; }
-  async fetchProposals(_fromBlock, _toBlock, head) {
+  async fetchProposals(_fromBlock, _toBlock, head, context = {}) {
     if (!this.proposalCountLoader || !this.proposalLoader) return [];
     const count = Number(await this.proposalCountLoader(head)); if (!Number.isSafeInteger(count) || count < 0) throw new Error("invalid Railgun proposalsLength");
     const records = [];
-    for (let id = 0; id < count; id++) {
+    // Only ids past the highest indexed proposal are new. Older proposals are
+    // re-read only while their state can still change.
+    const firstNewId = context.full ? 0 : Math.max(0, Number(context.maxProposalId ?? -1) + 1);
+    if (!context.full) {
+      for (const row of context.refreshProposals || []) {
+        const proposalId = String(row.proposalId);
+        if (Number(proposalId) >= firstNewId || isTerminalState(row.normalized?.state)) continue;
+        records.push({ proposal: await this.loadProposal(proposalId, head) });
+      }
+    }
+    for (let id = firstNewId; id < count; id++) {
       const proposal = await this.loadProposal(id, head);
       records.push({ raw: { daoId: "railgun-eth", sourceId: this.id, sourceRecordKey: `proposal:${id}`, externalId: String(id), chainId: 1, contractAddress: this.config.contractAddress, transactionHash: null, logIndex: null, blockNumber: String(this.fromBlock), blockHash: null, recordType: "proposal", proposalId: String(id), contentHash: proposal.contentHash, payload: { id: String(id), contentHash: proposal.contentHash }, sourceKind: this.config.source.kind, sourceEndpoint: this.rpcUrl, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(head) }, proposal });
     }
@@ -94,4 +125,4 @@ class RailgunVotingSource extends BlockRangeSource {
   }
   async normalizeLog(log, head) { const parsed = RAILGUN_IFACE.parseLog(log); const block = await this.provider.getBlock(log.blockNumber); if (!block) throw new Error(`missing block ${log.blockNumber}`); const a = parsed.args; const id=a.id.toString(); const proposal = await this.loadProposal(id, head); const rawRecord = raw(this.config, log, head, "vote", this.rpcUrl); rawRecord.sourcePublicEndpoint = this.publicEndpoint; rawRecord.proposalId = id; return { raw: rawRecord, proposal, vote: { daoId: "railgun-eth", chainId: 1, contractAddress: this.config.contractAddress, proposalId: id, voter: getAddress(a.voter), support: a.affirmative ? "FOR" : "AGAINST", reason: null, voteWeight: a.votes.toString(), blockNumber: String(log.blockNumber), timestamp: timestamp(block), transactionHash: log.transactionHash, logIndex: Number(log.index ?? log.logIndex), sourceKind: this.config.source.kind, sourceEndpoint: this.rpcUrl, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(head) } }; }
 }
-module.exports = { ENS_ABI, RAILGUN_ABI, BlockRangeSource, EnsGovernorSource, RailgunVotingSource };
+module.exports = { ENS_ABI, RAILGUN_ABI, BlockRangeSource, EnsGovernorSource, RailgunVotingSource, isTerminalState };

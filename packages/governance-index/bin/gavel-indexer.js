@@ -37,6 +37,7 @@ function usage() {
     "  status\n" +
     "  health\n" +
     "  reconcile --dao ens\n" +
+    "  verify-permissions [--role gavel_api]\n" +
     "  serve\n" +
     "  run\n\n" +
     "A positional DAO is also accepted. RAILGUN_FROM_BLOCK optionally overrides the verified default.\n";
@@ -49,8 +50,10 @@ function store() {
 function enabled() {
   return (process.env.INDEXER_ENABLED_DAOS || "nouns,ens").split(",").map((value) => value.trim()).filter(Boolean);
 }
-function healthStatus(status, daoIds = enabled()) {
+function healthStatus(status, daoIds = enabled(), options = {}) {
   const checkpoints = Array.isArray(status?.checkpoints) ? status.checkpoints : [];
+  const maxAgeMs = Number(options.maxAgeSeconds ?? process.env.INDEXER_MAX_CHECKPOINT_AGE_SECONDS ?? 900) * 1000;
+  const now = Number(options.now ?? Date.now());
   const missing = [];
   for (const daoId of daoIds) {
     const sourceId = DAO_CONFIGS[daoId]?.source?.id;
@@ -62,14 +65,20 @@ function healthStatus(status, daoIds = enabled()) {
   const errors = checkpoints
     .filter((row) => enabledSet.has(row.daoId) && row.lastError)
     .map(({ daoId, sourceId, lastError }) => ({ daoId, sourceId, lastError }));
-  return { ok: missing.length === 0 && errors.length === 0, missing, errors, checkpoints };
+  // A checkpoint that stopped advancing is a stalled indexer. Without this an
+  // indexer that died cleanly reports healthy forever.
+  const stale = checkpoints
+    .filter((row) => enabledSet.has(row.daoId))
+    .map((row) => ({ daoId: row.daoId, sourceId: row.sourceId, ageSeconds: Math.round((now - new Date(row.updatedAt).getTime()) / 1000) }))
+    .filter((row) => !Number.isFinite(row.ageSeconds) || row.ageSeconds * 1000 > maxAgeMs);
+  return { ok: missing.length === 0 && errors.length === 0 && stale.length === 0, missing, errors, stale, checkpoints };
 }
 function buildRuntime(db) {
   const rpcUrl = process.env.ETHEREUM_RPC_URL;
   const sources = {};
   let provider;
   const common = {
-    finalityDepth: integer(process.env.INDEXER_CONFIRMATION_DEPTH || "12", "INDEXER_CONFIRMATION_DEPTH"),
+    finalityDepth: integer(process.env.INDEXER_CONFIRMATION_DEPTH || "64", "INDEXER_CONFIRMATION_DEPTH"),
     replayBlocks: 64,
   };
   const daoIds = enabled();
@@ -98,6 +107,7 @@ function buildRuntime(db) {
     sources,
     batchSize: integer(process.env.INDEXER_BLOCK_BATCH_SIZE || "20000", "INDEXER_BLOCK_BATCH_SIZE", 1),
     concurrency: integer(process.env.INDEXER_RPC_CONCURRENCY || "4", "INDEXER_RPC_CONCURRENCY", 1),
+    fullScanIntervalMs: integer(process.env.INDEXER_FULL_SCAN_INTERVAL_SECONDS || "21600", "INDEXER_FULL_SCAN_INTERVAL_SECONDS", 60) * 1000,
     logger: log,
   });
   return { worker, provider, sources };
@@ -172,6 +182,8 @@ async function main() {
       "from-block": { type: "string" },
       "to-block": { type: "string" },
       port: { type: "string" },
+      role: { type: "string" },
+      full: { type: "boolean" },
       "interval-ms": { type: "string" },
     },
   });
@@ -180,6 +192,12 @@ async function main() {
   try {
     if (command === "migrate") return output(await db.migrate());
     if (command === "status") return output(await db.status());
+    if (command === "verify-permissions") {
+      const result = await db.verifyPermissions(values.role || "gavel_api");
+      output(result);
+      if (!result.ok) process.exitCode = 2;
+      return;
+    }
     if (command === "health") {
       const result = healthStatus(await db.status());
       output(result);
@@ -198,6 +216,7 @@ async function main() {
       const options = {};
       if (values["from-block"]) options.fromBlock = integer(values["from-block"], "from-block", 1);
       if (values["to-block"]) options.toBlock = integer(values["to-block"], "to-block", 1);
+      if (command === "backfill" || values.full) options.fullProposalScan = true;
       if (values.all) {
         if (command !== "sync") throw new Error("--all is only valid with sync");
         return output({ ok: true, results: await worker.syncAll(options) });
