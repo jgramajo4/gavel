@@ -143,8 +143,9 @@ Two distinct passes:
 (default 21600, six hours). This is the only pass that may conclude a proposal
 has disappeared, so it is the only pass permitted to delete indexed rows.
 For ENS it walks `ProposalCreated` from block 13699665 in
-`INDEXER_BLOCK_BATCH_SIZE` steps: roughly 470 `eth_getLogs` calls at current
-mainnet height.
+`ENS_PROPOSAL_BLOCK_BATCH_SIZE` steps, falling back to `INDEXER_BLOCK_BATCH_SIZE`
+and then to 5000: roughly 1870 `eth_getLogs` calls at current mainnet height with
+the 5000-block default, or 470 if the provider is confirmed to allow 20000.
 
 **Incremental sync** — the steady state, every `--interval-ms` (default 60s).
 Discovery is scoped to the checkpoint range plus the 64-block trailing replay,
@@ -164,6 +165,61 @@ for it.
 Budget accordingly: the sustained cost is the incremental figure; the full
 enumeration spike happens on backfill and every six hours.
 
+### Block ranges and RPC provider limits
+
+Hosted RPC providers cap the span a single `eth_getLogs` may cover. 10,000 blocks
+is the common free-tier ceiling and the repository-default `https://eth.drpc.org`
+enforces it, so no scan in the indexer carries a hard-coded range any more.
+
+| Scan | Setting | Default |
+|---|---|---|
+| ENS `VoteCast` + `ProposalCreated` range replay | `INDEXER_BLOCK_BATCH_SIZE` | 5000 |
+| Railgun `VoteCast` range replay | `INDEXER_BLOCK_BATCH_SIZE` | 5000 |
+| ENS `ProposalCreated` discovery and backfill | `ENS_PROPOSAL_BLOCK_BATCH_SIZE`, else `INDEXER_BLOCK_BATCH_SIZE` | 5000 |
+| Nouns | none — subgraph pagination, not `eth_getLogs` | `pageSize` 500 |
+
+Effective precedence for ENS proposal discovery:
+
+```
+ENS_PROPOSAL_BLOCK_BATCH_SIZE  ->  INDEXER_BLOCK_BATCH_SIZE  ->  5000
+```
+
+Rules that apply to both variables:
+
+- an unset or empty value falls through to the next source
+- a value that is set but is not a positive decimal integer aborts startup with
+  the offending variable named; it never falls through
+- the resolved values are emitted once per process as the `rpc_block_ranges`
+  structured log line, so the deployed configuration is observable
+
+Example ENS backfill request ranges at the 5000-block default, from the safe
+lower bound 13699665:
+
+```
+eth_getLogs fromBlock=13699665 toBlock=13704664
+eth_getLogs fromBlock=13704665 toBlock=13709664
+eth_getLogs fromBlock=13709665 toBlock=13714664
+...
+eth_getLogs fromBlock=<finalized head - remainder> toBlock=<finalized head>
+```
+
+Every span is 5000 blocks except the final partial one, which is clamped to the
+finalized head. Railgun requires no setting of its own: its only log query is the
+shared range replay above, and its proposal enumeration reads `proposalsLength`
+and per-proposal views, which carry no block range. Nouns uses the subgraph and is
+unaffected by RPC log limits.
+
+`packages/nouns-adapter/src/freshness.js` performs the one remaining log scan
+outside the indexer, during `prepareVote`. Its window spans proposal creation to
+the checked-at block, which exceeds 10,000 blocks for a normal Nouns voting
+period, so it is walked in the same `INDEXER_BLOCK_BATCH_SIZE` spans (default
+5000). Splitting the window cannot change its result: the events are re-sorted by
+block and log index before the canonical version is derived.
+
+Raise `INDEXER_BLOCK_BATCH_SIZE` only against a provider whose documented limit
+you have confirmed. Lowering it costs proportionally more requests and nothing
+else; checkpointing, idempotency and reorg replay are independent of it.
+
 ## 7. Deployment
 
 ### Required configuration
@@ -177,7 +233,10 @@ GAVEL_API_DB_PASSWORD=<different-strong-random-secret>
 ETHEREUM_RPC_URL=<credential-bearing-mainnet-rpc-url>
 INDEXER_ENABLED_DAOS=nouns,ens
 INDEXER_CONFIRMATION_DEPTH=64
-INDEXER_BLOCK_BATCH_SIZE=20000
+INDEXER_BLOCK_BATCH_SIZE=5000
+# Optional. Narrows ENS ProposalCreated discovery only; leave unset to inherit
+# INDEXER_BLOCK_BATCH_SIZE.
+# ENS_PROPOSAL_BLOCK_BATCH_SIZE=
 INDEXER_RPC_CONCURRENCY=4
 INDEXER_DB_POOL_SIZE=10
 INDEXER_FULL_SCAN_INTERVAL_SECONDS=21600
@@ -456,7 +515,7 @@ Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot
 ## 11. Engineering Decisions Made
 
 - **Tally:** reserved but unused; canonical ENS logs are the durable source.
-- **ENS backfill:** bounded log-range scan from the safe Governor-era lower bound, persistent `ProposalCreated` index, decimal proposal IDs, hash verification.
+- **ENS backfill:** bounded log-range scan from the safe Governor-era lower bound in `ENS_PROPOSAL_BLOCK_BATCH_SIZE`/`INDEXER_BLOCK_BATCH_SIZE` spans (default 5000), persistent `ProposalCreated` index, decimal proposal IDs, hash verification.
 - **Reorgs:** ingest only through `head - confirmationDepth`, replay 64 trailing blocks, compare canonical material, remove orphaned records transactionally, never advance a failed checkpoint.
 - **Railgun votes:** preserve every `VoteCast`; no voter/proposal deduplication; reason always `null`; bool maps to FOR/AGAINST.
 - **Nouns migration:** retain the Nouns subgraph source, ingest raw source-keyed votes/proposals, independently enumerate all proposals at a pinned snapshot, refresh mutable normalized status/tallies.
@@ -498,6 +557,7 @@ Three gates, in order. None of them may be assumed:
 - [ ] health monitoring and Pushover alert configured (`indexer health` exits 2 on a stalled checkpoint)
 - [ ] first incremental Nouns cycle succeeds (`indexer sync --dao nouns` after a backfill, exit 0, checkpoint advanced)
 - [ ] steady-state RPC volume observed for one hour and matches the incremental figure in section 6
+- [ ] `rpc_block_ranges` startup log shows block spans within the configured provider's documented `eth_getLogs` limit
 - [ ] rollback rehearsed once from the pre-update dump
 - [ ] backup scheduled and restore tested
 - [ ] host reboot preserves volume and restarts healthy services

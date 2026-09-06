@@ -1,6 +1,7 @@
 const { Contract, Interface, AbiCoder, getAddress, keccak256, toUtf8Bytes } = require("ethers");
 const { DAO_CONFIGS } = require("./config");
 const { proposalContentHash } = require("./hash");
+const { blockRanges, resolveLogBlockBatchSize } = require("../../core/src/rpc/block-range");
 
 const ENS_ABI = [
   "event ProposalCreated(uint256 proposalId,address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,uint256 startBlock,uint256 endBlock,string description)",
@@ -26,10 +27,12 @@ function raw(config, log, head, kind, endpoint) { return { daoId: config.id, sou
 class BlockRangeSource {
   constructor(config, options = {}) { this.config = config; this.id = config.source.id; this.rpcUrl = options.rpcUrl; this.provider = options.provider; this.fromBlock = Number(options.fromBlock ?? config.fromBlock); this.finalityDepth = Number(options.finalityDepth ?? 12); this.replayBlocks = Number(options.replayBlocks ?? 64); if (!this.rpcUrl || !/^https?:\/\//.test(this.rpcUrl)) throw new TypeError("rpcUrl must be an HTTP(S) URL for accurate provenance"); this.publicEndpoint = options.sourcePublicEndpoint || process.env.PUBLIC_SOURCE_ENDPOINT || new URL(this.rpcUrl).origin; if (!/^https?:\/\//.test(this.publicEndpoint)) throw new TypeError("sourcePublicEndpoint must be an HTTP(S) URL"); if (!this.provider) throw new TypeError("provider is required"); if (!Number.isSafeInteger(this.fromBlock) || this.fromBlock <= 0) throw new RangeError(`${config.id} requires an explicit positive fromBlock`); }
   async head() { return Number(await this.provider.getBlockNumber()) - this.finalityDepth; }
+  // The caller owns the span: the sync worker never asks for more than its
+  // configured block batch size, so this stays a single provider request.
   async fetchRange(fromBlock, toBlock) { if (toBlock < fromBlock) return []; return this.provider.getLogs({ address: this.config.contractAddress, fromBlock, toBlock, topics: [this.topics] }); }
 }
 class EnsGovernorSource extends BlockRangeSource {
-  constructor(options = {}) { super(DAO_CONFIGS.ens, { rpcUrl: options.rpcUrl || process.env.ETHEREUM_RPC_URL, ...options }); this.topics = [ENS_IFACE.getEvent("ProposalCreated").topicHash, ENS_IFACE.getEvent("VoteCast").topicHash]; this.governor = options.governor || new Contract(this.config.contractAddress, ENS_ABI, this.provider); this.proposalBatchSize = Number(options.proposalBatchSize ?? 20_000); if (!Number.isSafeInteger(this.proposalBatchSize) || this.proposalBatchSize < 1) throw new RangeError("proposalBatchSize must be a positive integer"); }
+  constructor(options = {}) { super(DAO_CONFIGS.ens, { rpcUrl: options.rpcUrl || process.env.ETHEREUM_RPC_URL, ...options }); this.topics = [ENS_IFACE.getEvent("ProposalCreated").topicHash, ENS_IFACE.getEvent("VoteCast").topicHash]; this.governor = options.governor || new Contract(this.config.contractAddress, ENS_ABI, this.provider); this.proposalBatchSize = resolveLogBlockBatchSize({ explicit: options.proposalBatchSize, explicitName: "proposalBatchSize", names: ["ENS_PROPOSAL_BLOCK_BATCH_SIZE", "INDEXER_BLOCK_BATCH_SIZE"], env: options.env }); }
   async refreshProposal(record, head) {
     const id = record.proposal.proposalId;
     const overrides = { blockTag: head };
@@ -57,15 +60,15 @@ class EnsGovernorSource extends BlockRangeSource {
   // Discovery is scoped to the requested range unless a full enumeration was
   // asked for. Mutable state for proposals created earlier is refreshed from
   // the indexed rows the worker supplies, so a steady-state sync never rescans
-  // Governor history.
+  // Governor history. Either way the window is walked in `proposalBatchSize`
+  // spans so no single `eth_getLogs` exceeds what the provider allows.
   async fetchProposals(fromBlock, toBlock, head, context = {}) {
     const proposalTopic = ENS_IFACE.getEvent("ProposalCreated").topicHash;
     const scanFrom = context.full ? this.fromBlock : Math.max(this.fromBlock, Number(fromBlock));
     const scanTo = Math.min(Number(head), context.full ? Number(head) : Number(toBlock));
     const logs = [];
-    for (let from = scanFrom; from <= scanTo; from += this.proposalBatchSize) {
-      const to = Math.min(scanTo, from + this.proposalBatchSize - 1);
-      logs.push(...await this.provider.getLogs({ address: this.config.contractAddress, fromBlock: from, toBlock: to, topics: [proposalTopic] }));
+    for (const range of blockRanges(scanFrom, scanTo, this.proposalBatchSize)) {
+      logs.push(...await this.provider.getLogs({ address: this.config.contractAddress, fromBlock: range.fromBlock, toBlock: range.toBlock, topics: [proposalTopic] }));
     }
     const records = [];
     const discovered = new Set();
@@ -100,6 +103,10 @@ class EnsGovernorSource extends BlockRangeSource {
     return { raw: rawRecord, vote: { daoId: "ens", chainId: 1, contractAddress: this.config.contractAddress, proposalId, voter: getAddress(a.voter), support: SUPPORT[code], reason: a.reason === "" ? null : String(a.reason), voteWeight: a.weight.toString(), blockNumber: String(log.blockNumber), timestamp: timestamp(block), transactionHash: log.transactionHash, logIndex: Number(log.index ?? log.logIndex), sourceKind: this.config.source.kind, sourceEndpoint: this.rpcUrl, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(head) } };
   }
 }
+// Railgun needs no batch setting of its own. Its only log query is the inherited
+// `fetchRange`, which the sync worker already bounds by INDEXER_BLOCK_BATCH_SIZE,
+// and proposal enumeration walks `proposalsLength` through contract view calls
+// rather than logs, so it carries no block range at all.
 class RailgunVotingSource extends BlockRangeSource {
   constructor(options = {}) { super(DAO_CONFIGS["railgun-eth"], { rpcUrl: options.rpcUrl || process.env.ETHEREUM_RPC_URL, ...options }); this.topics = RAILGUN_IFACE.getEvent("VoteCast").topicHash; this.proposalLoader = options.proposalLoader; this.proposalCountLoader = options.proposalCountLoader; }
   async loadProposal(id, head) { if (!this.proposalLoader) return null; const normalized = await this.proposalLoader(String(id), head); return { daoId: "railgun-eth", proposalId: String(id), contentHash: normalized.contentHash, normalized, actions: normalized.actions }; }

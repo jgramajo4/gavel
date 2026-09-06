@@ -13,6 +13,7 @@ const {
   createReadOnlyApi,
 } = require("../src");
 const { redactErrorMessage } = require("../src/redaction");
+const { resolveLogBlockBatchSize } = require("../../core/src/rpc/block-range");
 
 const level = process.env.LOG_LEVEL || "info";
 const rank = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -41,7 +42,8 @@ function usage() {
     "  verify-permissions [--role gavel_api] [--expect read-only|read-write] [--allow-catalog-fallback]\n" +
     "  serve\n" +
     "  run\n\n" +
-    "A positional DAO is also accepted. RAILGUN_FROM_BLOCK optionally overrides the verified default.\n";
+    "A positional DAO is also accepted. RAILGUN_FROM_BLOCK optionally overrides the verified default.\n" +
+    "INDEXER_BLOCK_BATCH_SIZE bounds every eth_getLogs span; ENS_PROPOSAL_BLOCK_BATCH_SIZE overrides it for ENS proposal discovery.\n";
 }
 function store() {
   return new PostgresGovernanceStore({
@@ -77,6 +79,11 @@ function healthStatus(status, daoIds = enabled(), options = {}) {
 function buildRuntime(db) {
   const rpcUrl = process.env.ETHEREUM_RPC_URL;
   const sources = {};
+  // Every `eth_getLogs` span in the indexer comes from here so a single setting
+  // keeps the deployment inside whatever ceiling the configured provider
+  // enforces. ENS proposal discovery may narrow it further via
+  // ENS_PROPOSAL_BLOCK_BATCH_SIZE; see EnsGovernorSource.
+  const blockBatchSize = resolveLogBlockBatchSize({ names: ["INDEXER_BLOCK_BATCH_SIZE"] });
   let provider;
   const common = {
     finalityDepth: integer(process.env.INDEXER_CONFIRMATION_DEPTH || "64", "INDEXER_CONFIRMATION_DEPTH"),
@@ -103,10 +110,11 @@ function buildRuntime(db) {
       proposalCountLoader: (blockTag) => adapter.voting.proposalsLength({ blockTag }),
     });
   }
+  log.info({ event: "rpc_block_ranges", blockBatchSize, ensProposalBatchSize: sources.ens ? sources.ens.proposalBatchSize : null });
   const worker = new GovernanceSyncWorker({
     store: db,
     sources,
-    batchSize: integer(process.env.INDEXER_BLOCK_BATCH_SIZE || "20000", "INDEXER_BLOCK_BATCH_SIZE", 1),
+    batchSize: blockBatchSize,
     concurrency: integer(process.env.INDEXER_RPC_CONCURRENCY || "4", "INDEXER_RPC_CONCURRENCY", 1),
     fullScanIntervalMs: integer(process.env.INDEXER_FULL_SCAN_INTERVAL_SECONDS || "21600", "INDEXER_FULL_SCAN_INTERVAL_SECONDS", 60) * 1000,
     logger: log,
