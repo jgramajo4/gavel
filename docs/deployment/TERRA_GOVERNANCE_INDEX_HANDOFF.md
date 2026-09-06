@@ -410,7 +410,9 @@ Latest coding-host results:
   overprivileged `gavel_api`, refusal to pass on catalog-only evidence, and a
   wire-level proof that `gavel_api` receives `permission denied` on
   INSERT/UPDATE/DELETE/TRUNCATE/CREATE/ALTER/DROP while SELECT succeeds
-- skipped without that variable set, so CI without a database does not silently pass
+- skipped without that variable set, so a run without a database does not
+  silently pass; GitHub Actions now starts a `postgres:16-alpine` service and
+  sets `GAVEL_TEST_DATABASE_URL`, so these tests run on every pull request
 - `npm audit`: zero vulnerabilities
 - clean production dependency tree after `npm ci --omit=dev`
 - API smoke: `/health` returned `200`; mutation request returned `405`
