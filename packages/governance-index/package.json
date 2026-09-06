@@ -1,0 +1,20 @@
+{
+  "name": "@gavel/governance-index",
+  "version": "0.2.0",
+  "private": true,
+  "main": "src/index.js",
+  "bin": { "gavel-indexer": "bin/gavel-indexer.js" },
+  "license": "GPL-3.0-only",
+  "dependencies": {
+    "@gavel/core": "0.2.0",
+    "@gavel/ens-adapter": "0.2.0",
+    "@gavel/nouns-adapter": "0.2.0",
+    "@gavel/railgun-adapter": "0.2.0",
+    "ethers": "^6.15.0",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "scripts": {
+    "test": "node --test ../../test/governance-index*.test.js"
+  }
+}

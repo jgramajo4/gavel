@@ -15,6 +15,7 @@ const {
 } = require("../../nouns-adapter");
 const { EnsDaoAdapter } = require("../../ens-adapter");
 const { RailgunDaoAdapter } = require("../../railgun-adapter");
+const { IndexApiClient } = require("../../governance-index");
 const {
   ExecutionMode,
   Support,
@@ -49,12 +50,12 @@ function usage() {
   return `Gavel governance copilot
 
 Usage:
-  gavel history <address> [--output <path>] [--stdout]
+  gavel history <address> [--dao <nouns|ens|railgun-eth>] [--output <path>] [--stdout]
                          [--endpoint <url>] [--page-size <1-1000>]
   gavel onboard <address> --answers <json> [--output <path>] [--stdout]
                            [--recorded-at <timestamp>]
   gavel onboard <address> --questions
-  gavel proposal <id> [--dao <nouns|railgun-eth>] [--output <path>] [--stdout]
+  gavel proposal <id> [--dao <nouns|ens|railgun-eth>] [--output <path>] [--stdout]
                       [--endpoint <url>] [--rpc <url>]
   gavel profile <history.json> [--output <path>] [--stdout]
                                [--as-of <timestamp>] [--half-life-days <days>]
@@ -85,9 +86,9 @@ Usage:
                            [--rpc <url>] [--output <path>] [--stdout]
 
 Commands:
-  history   Fetch and normalize a Nouns voter's historical votes.
+  history   Fetch indexed governance history (Nouns defaults to its subgraph when no index is configured).
   onboard   Record low-history questionnaire answers as stated preferences.
-  proposal  Fetch one current Nouns or Railgun proposal as normalized private input.
+  proposal  Fetch one indexed proposal; ENS is live-verified against its Governor.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
@@ -127,6 +128,7 @@ async function historyCommand(argv) {
       stdout: { type: "boolean", default: false },
       endpoint: { type: "string", default: process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT },
       "page-size": { type: "string", default: "100" },
+      dao: { type: "string", default: "nouns" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -138,9 +140,13 @@ async function historyCommand(argv) {
   if (positionals.length !== 1) throw new Error("history requires exactly one voter address");
 
   const voter = getAddress(positionals[0]);
+  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   const pageSize = Number(values["page-size"]);
-  const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint, pageSize });
-  const document = await adapter.fetchHistory(voter);
+  const adapter = process.env.GAVEL_INDEX_API_URL
+    ? new IndexApiClient({ baseUrl: process.env.GAVEL_INDEX_API_URL, pageSize })
+    : values.dao === "nouns" ? new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint, pageSize }) : null;
+  if (!adapter) throw new Error(`${values.dao} history requires GAVEL_INDEX_API_URL`);
+  const document = process.env.GAVEL_INDEX_API_URL ? await adapter.fetchHistory(values.dao, voter) : await adapter.fetchHistory(voter);
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
@@ -148,7 +154,7 @@ async function historyCommand(argv) {
   }
 
   const destination =
-    values.output || defaultPrivatePath("nouns", `${voter.toLowerCase()}.json`);
+    values.output || defaultPrivatePath(values.dao, `${voter.toLowerCase()}.json`);
   const absolutePath = await writePrivateJson(destination, document);
   process.stdout.write(
     `${JSON.stringify({
@@ -394,15 +400,19 @@ async function proposalCommand(argv) {
   }
   if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   let proposal;
-  if (values.dao === "nouns") {
+  if (process.env.GAVEL_INDEX_API_URL) {
+    const client = new IndexApiClient({ baseUrl: process.env.GAVEL_INDEX_API_URL });
+    if (values.dao === "ens") {
+      const provider = createEthereumProvider({ rpcUrl: values.rpc });
+      proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
+    } else proposal = await client.fetchProposal(values.dao, positionals[0]);
+  } else if (values.dao === "nouns") {
     const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
     proposal = await adapter.fetchProposal(positionals[0]);
   } else if (values.dao === "railgun-eth") {
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await createDaoAdapter(values.dao, provider).fetchProposal(positionals[0]);
-  } else {
-    throw new Error("ENS proposal ingestion requires Governor event metadata; import a normalized ENS proposal before prediction or vote preparation.");
-  }
+  } else throw new Error("ENS proposal lookup requires GAVEL_INDEX_API_URL so indexed ProposalCreated metadata can be live-verified");
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
     return;

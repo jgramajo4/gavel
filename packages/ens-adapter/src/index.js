@@ -1,3 +1,4 @@
+const { createHash } = require("node:crypto");
 const { Contract, Interface, getAddress, id, keccak256, toUtf8Bytes } = require("ethers");
 
 const { Support } = require("../../core/src/schema/governance");
@@ -68,6 +69,17 @@ function proposalIdentityInput(proposal) {
   };
 }
 
+function indexedProposalContentHash(proposal) {
+  const material = {
+    description: proposal.description,
+    targets: proposal.actions.map((action) => action.target),
+    values: proposal.actions.map((action) => action.valueWei),
+    signatures: proposal.actions.map((action) => action.signature),
+    calldatas: proposal.actions.map((action) => action.calldata),
+  };
+  return createHash("sha256").update(JSON.stringify(material)).digest("hex");
+}
+
 function basePredictionChecks(prediction, proposal, selectedSupport, input, blockers) {
   const block = (code, message) => blockers.push({ code, message });
   if (prediction.dao !== "ens" || prediction.chainId !== CHAIN_ID) {
@@ -123,6 +135,7 @@ class EnsDaoAdapter {
     this.provider = options.provider;
     this.governor = options.governor || new Contract(ENS_GOVERNOR_ADDRESS, ENS_GOVERNOR_ABI, options.provider);
     this.token = options.token || new Contract(ENS_TOKEN_ADDRESS, ENS_TOKEN_ABI, options.provider);
+    this.proposalLoader = options.proposalLoader;
     this.now = options.now || (() => new Date());
   }
 
@@ -175,6 +188,42 @@ class EnsDaoAdapter {
       blockers,
       transaction,
     };
+  }
+
+  async fetchProposal(proposalId) {
+    const requestedId = decimal(proposalId, "proposal id");
+    if (typeof this.proposalLoader !== "function") {
+      throw new Error("ENS proposal metadata requires GAVEL_INDEX_API_URL or an indexed proposal loader");
+    }
+    const indexed = normalizedProposalSchema.parse(await this.proposalLoader(requestedId));
+    if (indexed.id !== requestedId || indexed.dao !== "ens" || indexed.chainId !== CHAIN_ID) {
+      throw new Error("Indexed ENS proposal identity does not match the request");
+    }
+    if (indexedProposalContentHash(indexed) !== indexed.contentHash) {
+      throw new Error("Indexed ENS proposal content hash does not match canonical proposal material");
+    }
+    const identity = proposalIdentityInput(indexed);
+    const [stateRaw, snapshotRaw, deadlineRaw, votesRaw, canonicalIdRaw] = await Promise.all([
+      this.governor.state(requestedId),
+      this.governor.proposalSnapshot(requestedId),
+      this.governor.proposalDeadline(requestedId),
+      this.governor.proposalVotes(requestedId),
+      this.governor.hashProposal(identity.targets, identity.values, identity.calldatas, identity.descriptionHash),
+    ]);
+    if (decimal(canonicalIdRaw, "canonical proposal id") !== requestedId) {
+      throw new Error("Canonical ENS proposal hash differs from indexed metadata");
+    }
+    const snapshot = decimal(snapshotRaw, "proposal snapshot block");
+    const deadline = decimal(deadlineRaw, "proposal deadline block");
+    if (snapshot !== indexed.startBlock || deadline !== indexed.endBlock) {
+      throw new Error("Canonical ENS voting window differs from indexed metadata");
+    }
+    const state = STATE_LABELS[Number(stateRaw)] || `UNKNOWN_${Number(stateRaw)}`;
+    const against = decimal(votesRaw.againstVotes ?? votesRaw[0], "against votes");
+    const forVotes = decimal(votesRaw.forVotes ?? votesRaw[1], "for votes");
+    const abstain = decimal(votesRaw.abstainVotes ?? votesRaw[2], "abstain votes");
+    const quorum = decimal(await this.governor.quorum(snapshot), "quorum votes");
+    return normalizedProposalSchema.parse({ ...indexed, state, outcome: state, startBlock: snapshot, endBlock: deadline, quorumVotes: quorum, againstVotes: against, forVotes, abstainVotes: abstain });
   }
 
   async prepareVote(input) {

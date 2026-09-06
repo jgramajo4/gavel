@@ -55,6 +55,28 @@ npm install
 npm test
 ```
 
+## Self-hosted governance index
+
+`packages/governance-index` provides the PostgreSQL backfill/sync worker and read-only API. See its [deployment and operations guide](packages/governance-index/README.md). A local indexed deployment can serve every DAO to the regular CLI:
+
+```bash
+cp .env.example .env
+set -a; . ./.env; set +a
+npm run indexer -- migrate
+npm run indexer -- backfill --dao nouns
+npm run indexer -- sync --all
+```
+
+In another shell, export the same file before starting the API or using the regular CLI:
+
+```bash
+set -a; . ./.env; set +a
+npm run indexer -- serve
+GAVEL_INDEX_API_URL=http://localhost:8080 gavel history 0x0000000000000000000000000000000000000001 --dao ens
+```
+
+Docker Compose loads `.env` automatically, publishes only the API, and keeps PostgreSQL private. Railgun indexing starts at the verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Tally and delegation ingestion are not implemented.
+
 ## Choose how to run Gavel
 
 The runtime changes how people interact with Gavel, but not how governance is
@@ -278,11 +300,12 @@ stable JSON CLI.
 
 ### Headless on Railway
 
-The supported Railway shape today is a one-shot or scheduled CLI worker. Gavel
-does not yet ship `gavel serve`, an HTTP API, a listening `PORT`, or a health
-endpoint: [`packages/server`](packages/server/) is an intentionally empty
-boundary. Do not deploy the TUI to Railway because it requires an interactive
-TTY.
+For the private copilot workflow, use a one-shot or scheduled CLI worker; do
+not deploy the TUI because it requires an interactive TTY. The separate
+self-hosted governance index does ship `gavel-indexer serve`, a read-only HTTP
+API, and liveness/operational health checks as documented above. The
+[`packages/server`](packages/server/) boundary remains intentionally empty and
+is unrelated to that index API.
 
 To deploy a headless job:
 
