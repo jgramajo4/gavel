@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@gavel/core": "0.2.0",
+    "@gavel/ens-adapter": "0.2.0",
     "@gavel/nouns-adapter": "0.2.0",
+    "@gavel/railgun-adapter": "0.2.0",
     "ethers": "^6.15.0"
   }
 }

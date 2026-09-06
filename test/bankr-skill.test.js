@@ -16,6 +16,7 @@ const requiredReferences = [
   "legacy-nouns-tools.md",
   "interaction-and-formatting.md",
   "profile-storage.md",
+  "supported-daos.md",
 ];
 
 test("declares Gavel as a discoverable personalized governance copilot", () => {
@@ -122,9 +123,18 @@ test("discovers durable profiles before onboarding in every Bankr client", () =>
   const storage = fs.readFileSync(path.join(root, "nouns-dao", "references", "profile-storage.md"), "utf8");
   assert.match(skill, /Before asking for a voter address[\s\S]*always search persistent Files/i);
   assert.match(skill, /including Telegram and the website/i);
-  assert.match(storage, /list_files[\s\S]*\/gavel\/data\/private\/nouns/);
+  assert.match(storage, /list_files[\s\S]*\/gavel\/data\/private\/<dao>/);
   assert.match(storage, /exactly one address directory[\s\S]*filesFromUserFs/i);
   assert.match(storage, /account\s+or wallet-linkage mismatch/i);
+});
+
+test("routes ENS and Railgun without flattening their governance semantics", () => {
+  const supported = fs.readFileSync(path.join(root, "nouns-dao", "references", "supported-daos.md"), "utf8");
+  for (const dao of ["nouns", "ens", "railgun-eth"]) assert.match(supported, new RegExp(`\\b${dao}\\b`));
+  assert.match(supported, /Copeland[\s\S]*FOR\/AGAINST\/ABSTAIN/i);
+  assert.match(supported, /There is no abstain choice/i);
+  assert.match(supported, /sponsorship is not a vote/i);
+  assert.match(supported, /per stake ID/i);
 });
 
 test("does not ship reward administration scripts or ABIs", () => {

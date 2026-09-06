@@ -1,6 +1,6 @@
 # Bankr integration
 
-Bankr is a host for Gavel, not a dependency of the governance engine. Its
+Bankr is a host for Gavel's Nouns, ENS, and Railgun adapters, not a dependency of the governance engine. Its
 `execute_cli` containers and arbitrary sandbox paths, including `/cli`, are
 ephemeral. Clone Gavel inside the current invocation, stage durable inputs from
 private user files with `filesFromUserFs`, and export each intended result with
@@ -17,6 +17,11 @@ a dedicated provider override.
 The installable compatibility skill remains at [`../../nouns-dao/`](../../nouns-dao/)
 until existing Bankr installs have migrated. It calls `gavel`/`bin/gavel.js`,
 which is a compatibility shim for `packages/cli/bin/gavel.js`.
+
+Use `--dao nouns`, `--dao ens`, or `--dao railgun-eth` where a command accepts a
+DAO. Keep private state under a DAO-specific directory. ENS preparation is for
+the executable Governor venue; Railgun preparation is binary and computes its
+staking snapshot hint before producing unsigned calldata.
 
 Do not call legacy direct-signing scripts from new workflows. They remain only
 for backward compatibility and require `AGENT_PRIVATE_KEY`; canonical Gavel

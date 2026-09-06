@@ -13,8 +13,11 @@ const {
   createEthereumProvider,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
+const { EnsDaoAdapter } = require("../../ens-adapter");
+const { RailgunDaoAdapter } = require("../../railgun-adapter");
 const {
   ExecutionMode,
+  Support,
   ONBOARDING_QUESTIONS,
   applyBacktestEvaluationToPrediction,
   applyCalibrationToPrediction,
@@ -29,6 +32,14 @@ const {
 } = require("../../core");
 
 const DATA_DIR = resolveDataDir();
+const SUPPORTED_DAOS = Object.freeze(["nouns", "ens", "railgun-eth"]);
+
+function createDaoAdapter(dao, provider) {
+  if (dao === "nouns") return new NounsDaoAdapter({ provider });
+  if (dao === "ens") return new EnsDaoAdapter({ provider });
+  if (dao === "railgun-eth") return new RailgunDaoAdapter({ provider });
+  throw new Error(`Unsupported DAO: ${dao}. Choose ${SUPPORTED_DAOS.join(", ")}.`);
+}
 
 function defaultPrivatePath(...segments) {
   return privatePath(DATA_DIR, ...segments);
@@ -43,7 +54,8 @@ Usage:
   gavel onboard <address> --answers <json> [--output <path>] [--stdout]
                            [--recorded-at <timestamp>]
   gavel onboard <address> --questions
-  gavel proposal <id> [--output <path>] [--stdout] [--endpoint <url>]
+  gavel proposal <id> [--dao <nouns|railgun-eth>] [--output <path>] [--stdout]
+                      [--endpoint <url>] [--rpc <url>]
   gavel profile <history.json> [--output <path>] [--stdout]
                                [--as-of <timestamp>] [--half-life-days <days>]
                                [--preferences <json>] [--rules <json>]
@@ -64,24 +76,25 @@ Usage:
                      [--acknowledge-prediction-review]
                      [--acknowledge-security-review]
                      [--rpc <url>] [--output <path>] [--stdout]
-  gavel execution-status --dao nouns --mode <mode> --model-address <address>
+                     [--amount <wei>] [--hint <index>]
+  gavel execution-status --dao <nouns|ens|railgun-eth> --mode <mode> --model-address <address>
                          [--asset-owner-address <address>]
                          [--execution-address <address>] [--rpc <url>]
-  gavel prepare-delegation --dao nouns --asset-owner-address <address>
+  gavel prepare-delegation --dao <nouns|ens> --asset-owner-address <address>
                            (--to <address> | --executor <safe|waap>)
                            [--rpc <url>] [--output <path>] [--stdout]
 
 Commands:
   history   Fetch and normalize a Nouns voter's historical votes.
   onboard   Record low-history questionnaire answers as stated preferences.
-  proposal  Fetch one current Nouns proposal as normalized private input.
+  proposal  Fetch one current Nouns or Railgun proposal as normalized private input.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
   inspect   Decode and security-check structured Nouns proposal actions.
   prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
   execution-status  Fail-closed readiness for unsigned, Safe, or WaaP execution.
-  prepare-delegation  Prepare, but never submit, Nouns delegation calldata.
+  prepare-delegation  Prepare, but never submit, Nouns or ENS delegation calldata.
 
 Network:
   Chain-backed commands use ${DEFAULT_ETHEREUM_RPC_URL} by default.
@@ -311,7 +324,8 @@ async function predictCommand(argv) {
     asOf: values["as-of"],
     relevantSimilarityThreshold: Number(values.threshold),
     maxPrecedents: Number(values["max-precedents"]),
-    proposalInspector: profile.dao === "nouns" ? inspectNounsProposal : undefined,
+    proposalInspector: SUPPORTED_DAOS.includes(profile.dao) ? inspectNounsProposal : undefined,
+    allowedSupports: profile.dao === "railgun-eth" ? [Support.FOR, Support.AGAINST] : undefined,
   });
   if (values.calibration) {
     const calibrationInput = await readJson(values.calibration);
@@ -363,9 +377,11 @@ async function proposalCommand(argv) {
     args: argv,
     allowPositionals: true,
     options: {
+      dao: { type: "string", default: "nouns" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
       endpoint: { type: "string", default: process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT },
+      rpc: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -374,15 +390,24 @@ async function proposalCommand(argv) {
     return;
   }
   if (positionals.length !== 1 || !/^\d+$/.test(positionals[0])) {
-    throw new Error("proposal requires exactly one unsigned Nouns proposal ID");
+    throw new Error("proposal requires exactly one unsigned proposal ID");
   }
-  const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
-  const proposal = await adapter.fetchProposal(positionals[0]);
+  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
+  let proposal;
+  if (values.dao === "nouns") {
+    const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
+    proposal = await adapter.fetchProposal(positionals[0]);
+  } else if (values.dao === "railgun-eth") {
+    const provider = createEthereumProvider({ rpcUrl: values.rpc });
+    proposal = await createDaoAdapter(values.dao, provider).fetchProposal(positionals[0]);
+  } else {
+    throw new Error("ENS proposal ingestion requires Governor event metadata; import a normalized ENS proposal before prediction or vote preparation.");
+  }
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
     return;
   }
-  const destination = values.output || defaultPrivatePath("proposals", "nouns", `${proposal.id}.json`);
+  const destination = values.output || defaultPrivatePath("proposals", values.dao, `${proposal.id}.json`);
   const absolutePath = await writePrivateJson(destination, proposal);
   process.stdout.write(`${JSON.stringify({ ok: true, proposalId: proposal.id, contentHash: proposal.contentHash, state: proposal.state, actionCount: proposal.actions.length, output: absolutePath }, null, 2)}\n`);
 }
@@ -489,7 +514,7 @@ async function inspectCommand(argv) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return;
   }
-  const destination = values.output || defaultPrivatePath("inspections", "nouns", `${report.proposalId}.json`);
+  const destination = values.output || defaultPrivatePath("inspections", proposalInput.dao || "nouns", `${report.proposalId}.json`);
   const absolutePath = await writePrivateJson(destination, report);
   process.stdout.write(`${JSON.stringify({ ...report.summary, flags: report.flags, mismatches: report.mismatches, output: absolutePath }, null, 2)}\n`);
 }
@@ -504,6 +529,8 @@ async function prepareVoteCommand(argv) {
       "asset-owner": { type: "string" },
       "execution-address": { type: "string" },
       reason: { type: "string" },
+      amount: { type: "string" },
+      hint: { type: "string" },
       "acknowledge-security-review": { type: "boolean", default: false },
       "acknowledge-prediction-review": { type: "boolean", default: false },
       rpc: { type: "string" },
@@ -527,7 +554,7 @@ async function prepareVoteCommand(argv) {
     readJson(positionals[1]),
   ]);
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
-  const adapter = new NounsDaoAdapter({ provider });
+  const adapter = createDaoAdapter(prediction.dao, provider);
   const preparation = await adapter.prepareVote({
     prediction,
     proposal: proposalInput.proposal || proposalInput,
@@ -536,6 +563,8 @@ async function prepareVoteCommand(argv) {
     executionAddress: values["execution-address"] || values.from,
     assetOwnerAddress: values["asset-owner"],
     reason: values.reason,
+    amount: values.amount,
+    hint: values.hint,
     acknowledgeSecurityReview: values["acknowledge-security-review"],
     acknowledgePredictionReview: values["acknowledge-prediction-review"],
   });
@@ -564,7 +593,7 @@ async function prepareVoteCommand(argv) {
           confidencePercent: preparation.confidencePercent,
           proposalState: preparation.verification.proposalState.label,
           votingPower: preparation.verification.votingPower.votes,
-          delegation: preparation.verification.delegation,
+          delegation: preparation.verification.delegation || preparation.verification.votingKey,
           simulation: preparation.verification.simulation,
           blockers: preparation.blockers,
           flags: preparation.flags,
@@ -619,13 +648,13 @@ async function executionStatusCommand(argv) {
     return;
   }
   if (positionals.length !== 0) throw new Error("execution-status accepts no positional arguments");
-  if (values.dao !== "nouns") throw new Error(`Unsupported DAO: ${values.dao}`);
+  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   if (!values["model-address"]) throw new Error("execution-status requires --model-address or GAVEL_MODEL_ADDRESS");
   const mode = normalizeMode(values.mode);
   const executionAddress = configuredExecutionAddress(mode, values, values["model-address"]);
   if (!executionAddress) throw new Error(`No execution address configured for ${mode}`);
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
-  const adapter = new NounsDaoAdapter({ provider });
+  const adapter = createDaoAdapter(values.dao, provider);
   const status = await resolveExecutionReadiness({
     adapter,
     mode,
@@ -660,7 +689,10 @@ async function prepareDelegationCommand(argv) {
     return;
   }
   if (positionals.length !== 0) throw new Error("prepare-delegation accepts no positional arguments");
-  if (values.dao !== "nouns") throw new Error(`Unsupported DAO: ${values.dao}`);
+  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
+  if (values.dao === "railgun-eth") {
+    throw new Error("Railgun delegation is per stake ID and is not available through prepare-delegation; configure staking delegation separately.");
+  }
   const assetOwnerAddress = values["asset-owner-address"] || values["model-address"];
   if (!assetOwnerAddress) {
     throw new Error("prepare-delegation requires --asset-owner-address (or an explicit model-address fallback)");
@@ -674,7 +706,7 @@ async function prepareDelegationCommand(argv) {
     throw new Error("prepare-delegation requires --to or --executor with a configured Safe/WaaP address");
   }
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
-  const adapter = new NounsDaoAdapter({ provider });
+  const adapter = createDaoAdapter(values.dao, provider);
   const preparation = await adapter.prepareDelegation({ assetOwnerAddress, requiredDelegateAddress });
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(preparation, null, 2)}\n`);

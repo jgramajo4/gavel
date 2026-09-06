@@ -37,6 +37,14 @@ const normalizedProposalSchema = z.object({
   againstVotes: decimalStringSchema,
   abstainVotes: decimalStringSchema,
   actions: z.array(proposalActionSchema),
+  dao: daoIdSchema.optional(),
+  chainId: z.number().int().positive().optional(),
+  venue: z.string().min(1).optional(),
+  timing: z.enum(["block", "timestamp"]).optional(),
+  startTime: z.string().datetime().nullable().optional(),
+  endTime: z.string().datetime().nullable().optional(),
+  metadataUrl: z.string().optional(),
+  choices: z.array(supportSchema).min(2).optional(),
 });
 
 const sourceProvenanceSchema = z.object({

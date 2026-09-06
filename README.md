@@ -5,15 +5,15 @@ actually governed, finds relevant precedents in their own record, recommends
 `FOR`, `AGAINST`, or `ABSTAIN` on new proposals, explains the recommendation,
 and can prepare a vote transaction for review.
 
-Gavel is one monorepo and one canonical governance engine. Nouns is the first
-DAO adapter; Bankr and Hermes are thin runtime integrations. Any compatible
+Gavel is one monorepo and one canonical governance engine. Nouns, ENS, and
+Railgun Ethereum are DAO adapters; Bankr and Hermes are thin runtime integrations. Any compatible
 agent or shell can use the same machine-readable `gavel` CLI.
 
 ```text
-Nouns API / chain
+DAO API / Ethereum chain
        |
        v
- packages/nouns-adapter -----> normalized private history
+ packages/*-adapter ---------> normalized private history
                               |
                               v
  observed behavior + stated preferences + hard rules
@@ -31,8 +31,9 @@ Nouns API / chain
 
 ## Status
 
-The canonical packages are `packages/core`, `packages/nouns-adapter`, and
-`packages/cli`. The root `bin/gavel.js` and `nouns-dao/` Bankr skill remain as
+The canonical packages are `packages/core`, `packages/nouns-adapter`,
+`packages/ens-adapter`, `packages/railgun-adapter`, and `packages/cli`. The root
+`bin/gavel.js` and `nouns-dao/` Bankr skill remain as
 verified compatibility entry points. `packages/server` remains a reserved boundary. `packages/tui` now contains the
 first read-only migration slice from the former standalone TUI.
 
@@ -47,7 +48,7 @@ The static Gavel landing page lives in [`website/`](website/). See its
 ## Requirements
 
 - Node.js 20 or newer
-- Network access to the Nouns governance subgraph
+- Network access to Ethereum JSON-RPC; Nouns history also uses its governance subgraph
 
 ```bash
 npm install
@@ -71,6 +72,19 @@ keep private state in a runtime-owned `GAVEL_DATA_DIR`.
 Whichever method you choose, start with read-only history, profile, proposal,
 prediction, and inspection commands. Preparing a transaction does not authorize
 its submission.
+
+### Supported DAOs
+
+| DAO | CLI ID | Support |
+| --- | --- | --- |
+| Nouns DAO | `nouns` | History, proposal reads, prediction, vote preparation, delegation |
+| ENS DAO | `ens` | Imported Governor history/proposals, prediction, vote preparation, delegation |
+| Railgun Governance (Ethereum) | `railgun-eth` | Live proposal reads, imported history, binary vote preparation with staking snapshot hints |
+
+ENS Governor and Snapshot records remain separate; Gavel prepares executable ENS
+Governor votes only. Railgun supports FOR/Yay and AGAINST/Nay, has no abstain or
+reason field, and treats sponsorship as distinct from voting. Polygon and BSC
+Railgun governance are not included in `railgun-eth`.
 
 ### Shared configuration
 
@@ -116,6 +130,8 @@ People can then use natural-language requests such as:
 
 - “Onboard me with voter address `0x…`.”
 - “Sync my Nouns voting history and explain what you learned.”
+- “Analyze this normalized ENS Governor proposal using my ENS profile.”
+- “Fetch Railgun proposal 27 and prepare my remaining Yay voting power.”
 - “Analyze proposal 123 using my profile.”
 - “Prepare a FOR vote for review; do not submit it.”
 - “Check whether my Safe is ready to vote.”

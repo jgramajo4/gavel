@@ -1,0 +1,11 @@
+{
+  "name": "@gavel/ens-adapter",
+  "version": "0.2.0",
+  "private": true,
+  "main": "src/index.js",
+  "license": "GPL-3.0-only",
+  "dependencies": {
+    "@gavel/core": "0.2.0",
+    "ethers": "^6.15.0"
+  }
+}
