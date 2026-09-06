@@ -16,6 +16,22 @@ jobs:
     strategy:
       matrix:
         node-version: [20, 22]
+    # The governance-index role and permission tests need a real server: they
+    # assert on effective PostgreSQL privileges, which no stub can model. Without
+    # this service they skip, and the deployment gates go unverified in CI.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: gavel-ci-only
+          POSTGRES_DB: gavel_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,5 +40,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+        env:
+          GAVEL_TEST_DATABASE_URL: postgres://postgres:gavel-ci-only@127.0.0.1:5432/gavel_ci
       - run: npm run tui:typecheck
 

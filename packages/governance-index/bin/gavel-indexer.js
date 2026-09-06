@@ -37,7 +37,8 @@ function usage() {
     "  status\n" +
     "  health\n" +
     "  reconcile --dao ens\n" +
-    "  verify-permissions [--role gavel_api]\n" +
+    "  ensure-roles\n" +
+    "  verify-permissions [--role gavel_api] [--expect read-only|read-write] [--allow-catalog-fallback]\n" +
     "  serve\n" +
     "  run\n\n" +
     "A positional DAO is also accepted. RAILGUN_FROM_BLOCK optionally overrides the verified default.\n";
@@ -183,6 +184,10 @@ async function main() {
       "to-block": { type: "string" },
       port: { type: "string" },
       role: { type: "string" },
+      expect: { type: "string" },
+      "allow-missing-roles": { type: "boolean" },
+      "allow-catalog-fallback": { type: "boolean" },
+      "skip-role-setup": { type: "boolean" },
       full: { type: "boolean" },
       "interval-ms": { type: "string" },
     },
@@ -190,10 +195,27 @@ async function main() {
   const db = store();
   let close = true;
   try {
-    if (command === "migrate") return output(await db.migrate());
+    if (command === "migrate") {
+      const result = await db.migrate({ ensureRoles: !values["skip-role-setup"] });
+      output(result);
+      // The deployment gate: a schema that applied while the least-privilege
+      // roles are missing or wrong must not read as success.
+      if (!result.ok || (result.roles !== "granted" && !values["allow-missing-roles"])) process.exitCode = 2;
+      return;
+    }
+    if (command === "ensure-roles") {
+      const result = await db.ensureRoles();
+      const roles = await db.rolesStatus();
+      output({ ok: result.state !== "skipped", ...result, roles });
+      if (result.state === "skipped") process.exitCode = 2;
+      return;
+    }
     if (command === "status") return output(await db.status());
     if (command === "verify-permissions") {
-      const result = await db.verifyPermissions(values.role || "gavel_api");
+      const result = await db.verifyPermissions(values.role || "gavel_api", {
+        expect: values.expect || "read-only",
+        allowCatalogFallback: values["allow-catalog-fallback"] === true,
+      });
       output(result);
       if (!result.ok) process.exitCode = 2;
       return;

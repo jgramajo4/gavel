@@ -32,7 +32,7 @@ Terra may adapt environment values and external ingress/backup configuration. Do
 - paginated read-only HTTP API
 - index API client used by Gavel CLI
 - structured logging and credential redaction
-- operational CLI: `migrate`, `backfill`, `sync`, `status`, `health`, `reconcile`, `serve`, `run`
+- operational CLI: `migrate`, `ensure-roles`, `verify-permissions`, `backfill`, `sync`, `status`, `health`, `reconcile`, `serve`, `run`
 
 ### Modified packages
 
@@ -41,6 +41,10 @@ Terra may adapt environment values and external ingress/backup configuration. Do
 - root workspace: package/bin wiring and PostgreSQL dependency lock
 
 ### Database migration
+
+`migrate` applies `001_initial.sql`, reconciles the application roles, applies
+`002_roles.sql`, and then verifies the resulting privileges before reporting
+`"roles": "granted"`. See *Role lifecycle* in section 7.
 
 `001_initial.sql` creates:
 
@@ -52,6 +56,11 @@ Terra may adapt environment values and external ingress/backup configuration. Do
 - `vote_events`
 - `delegation_events`
 - `sync_checkpoints`
+
+`002_roles.sql` applies the least-privilege grants: write access for
+`gavel_indexer`, `SELECT` and nothing else for `gavel_api`, and no `CREATE` on
+schema `public` for either. It is rerunnable and revokes before it grants, so a
+stale write grant cannot survive a redeploy.
 
 ### New services
 
@@ -187,13 +196,61 @@ RAILGUN_FROM_BLOCK=15505853
 INDEXER_ENABLED_DAOS=nouns,ens,railgun-eth
 ```
 
-### Exact fresh-host sequence
+### Role lifecycle
 
-`docker/init-db.sh` runs **only when the PostgreSQL data volume is first
-created**. On a fresh host that is automatic. If you are reusing an existing
-`postgres-data` volume, the `gavel_indexer` and `gavel_api` roles will not be
-created and `migrate` will report `"roles": "skipped"` — create them by hand
-before continuing (see *Update procedure* below).
+Two roles carry the least-privilege contract: `gavel_indexer` writes, `gavel_api`
+only reads. They are created by two different mechanisms, and both converge on
+the same state.
+
+`docker/init-db.sh` runs **only when the PostgreSQL data directory is first
+created**. It is the fresh-volume path and nothing else.
+
+Every other deployment — a redeploy, an upgrade, a restore, a reused
+`postgres-data` volume — reaches the roles through `migrate`, which:
+
+1. applies the schema,
+2. creates any missing application role from `GAVEL_INDEXER_DB_PASSWORD` and
+   `GAVEL_API_DB_PASSWORD` (both are passed to the `migrate` service), which is
+   why a reused volume no longer has to be wiped or hand-patched,
+3. applies `002_roles.sql`,
+4. verifies the resulting privileges and only then reports `"roles": "granted"`.
+
+`migrate` never changes the password of a role that already exists, and it never
+drops or reassigns one. It is safe to run repeatedly.
+
+The role state is always one of three explicit values:
+
+| `roles` | Meaning | `migrate` exit code |
+|---|---|---|
+| `granted` | Both roles exist and the verified privileges match the contract | 0 |
+| `skipped` | A role is missing and could not be created here; `reason` says why | 2 |
+| `invalid` | The grants ran but the resulting privileges are wrong; `violations` lists them | 2 |
+
+`migrate` exits 2 for anything other than `granted`, so a deployment cannot
+proceed on a database whose least-privilege roles are not actually configured.
+`--allow-missing-roles` suppresses only the exit code, never the reported state.
+
+Verification is performed by acting as the role: inside a transaction that is
+always rolled back, `SET LOCAL ROLE` is followed by real `SELECT`, `INSERT`,
+`UPDATE`, `DELETE`, and `CREATE TABLE` statements. Only PostgreSQL error
+`42501` counts as a refusal; a constraint violation means the privilege was
+held. Catalog privileges (`TRUNCATE`, `REFERENCES`, `TRIGGER`, table ownership,
+role attributes) are checked alongside, and both have to be clean. Output
+reports `"method": "effective"` when the statements were executed as the role,
+and `"method": "catalog"` when the connection was not permitted to `SET ROLE`.
+A catalog-only result **fails** `verify-permissions` unless
+`--allow-catalog-fallback` is passed, because an unproven claim is not a pass.
+The compose `migrate` service connects as the bootstrap superuser, so the
+normal deployment path always produces `"method": "effective"`.
+
+If a role has to be created out of band, `gavel-indexer ensure-roles` does
+exactly the creation step and nothing else:
+
+```bash
+docker compose run --rm migrate ensure-roles   # exits 2 if it could not create them
+```
+
+### Exact fresh-host sequence
 
 ```bash
 git clone https://github.com/jgramajo4/gavel.git /srv/docker/gavel-index
@@ -204,10 +261,16 @@ chmod 600 .env
 # provision values above using Terra's normal secret workflow
 
 docker compose up -d --build postgres
-docker compose run --rm migrate            # must print "roles": "granted"
+# Applies the schema, reconciles the roles, verifies the grants.
+# Must print "roles":"granted"; exits 2 otherwise.
+docker compose run --rm migrate
 
-# Prove the API role is read-only before anything is served.
+# Prove the API role is read-only before anything is served. Exits 0 only if
+# gavel_api could not write when the check actually tried to.
 docker compose run --rm migrate verify-permissions --role gavel_api
+
+# Optional: confirm the writer role kept the grants it needs.
+docker compose run --rm migrate verify-permissions --role gavel_indexer --expect read-write
 
 # INDEXER_ENABLED_DAOS gates which backfills are possible. With the default
 # (nouns,ens) the railgun line below will fail; set the variable first if you
@@ -232,13 +295,18 @@ cd /srv/docker/gavel-index
 docker compose exec -T postgres pg_dump -U gavel -Fc gavel > pre-update-$(date +%F).dump
 git fetch origin && git checkout <new-commit-sha>
 docker compose build
-docker compose run --rm migrate
+docker compose run --rm migrate            # creates missing roles, then verifies
 docker compose run --rm migrate verify-permissions --role gavel_api
 docker compose up -d api indexer
 docker compose run --rm indexer health
 ```
 
-Creating the roles by hand on a reused volume:
+This is also the reused-volume path. A `postgres-data` volume created before the
+roles existed does **not** need to be deleted: `migrate` creates them from the
+passwords already in `.env` and reports `"rolesCreated"`, leaving indexed data
+untouched. The only case needing a manual step is a database whose migration
+connection is not a superuser and lacks `CREATEROLE`; `migrate` then reports
+`"roles": "skipped"` with the reason, and the roles are created once by hand:
 
 ```bash
 docker compose exec -T postgres psql -U gavel -d gavel -c \
@@ -246,6 +314,14 @@ docker compose exec -T postgres psql -U gavel -d gavel -c \
   "CREATE ROLE gavel_api LOGIN PASSWORD '<api-secret>';" -c \
   "GRANT CONNECT ON DATABASE gavel TO gavel_indexer, gavel_api;"
 docker compose run --rm migrate
+```
+
+If the roles exist but their passwords no longer match `.env`, reset them
+explicitly — `migrate` will not silently rewrite a credential:
+
+```bash
+docker compose exec -T postgres psql -U gavel -d gavel -c \
+  "ALTER ROLE gavel_api PASSWORD '<api-secret>';"
 ```
 
 ### Rollback procedure
@@ -311,7 +387,8 @@ Confirmed in code/review:
 - app containers run as non-root `node`
 - credential-bearing RPC/subgraph transport URLs stay in process environment only; PostgreSQL, backups, logs, checkpoints, and the public API retain only explicit or origin-only public provenance
 - upstream errors are redacted before structured logs/checkpoints and masked in public status responses
-- the API role's read-only property is proven, not assumed: `gavel-indexer verify-permissions` fails the deploy if `gavel_api` holds any INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER grant or CREATE on the public schema
+- the API role's read-only property is proven by exercise, not assumed: `gavel-indexer verify-permissions` executes SELECT/INSERT/UPDATE/DELETE/CREATE as `gavel_api` inside a rolled-back transaction and exits 2 if any write or DDL statement is not refused, if the catalog shows an INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER grant, if the role owns a public table or holds a privileged role attribute, or if the check could not act as the role at all
+- `migrate` reports the role state it verified (`granted`, `skipped`, or `invalid`) and exits 2 unless the least-privilege roles are genuinely in place
 - the CLI refuses to build a history document from an index that has no checkpoint, is reporting a sync error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`
 
 Terra must put API ingress behind Cloudflare Tunnel or the normal reverse proxy. Admin operations should remain Tailscale/SSH-only.
@@ -320,32 +397,42 @@ Terra must put API ingress behind Cloudflare Tunnel or the normal reverse proxy.
 
 Latest coding-host results:
 
-- full repository suite: **161 passed, 10 skipped, 0 failed**
-- PostgreSQL integration suite: **9 passed** against a real PostgreSQL 16 server
+- full repository suite with a real PostgreSQL 16 server: **179 passed, 1 skipped, 0 failed** (180 total)
+- same suite without a database: **163 passed, 17 skipped, 0 failed** — the
+  PostgreSQL tests skip loudly rather than passing vacuously
+- PostgreSQL integration suite: **16 passed** against a real PostgreSQL 16 server
   (`GAVEL_TEST_DATABASE_URL=... node --test test/governance-index-postgres.test.js`),
   covering migration execution, canonical uniqueness, ingest idempotency,
   checkpoint atomicity under a failed batch, reorg replay deletion, credential
-  redaction, and a wire-level proof that `gavel_api` receives `permission denied`
-  on INSERT/DELETE/CREATE while SELECT succeeds
-- skipped without that variable set, so CI without a database does not silently pass
+  redaction, role provisioning on a fresh database, role recovery on an existing
+  database with indexed rows preserved, honest reporting when roles cannot be
+  created, the `verify-permissions` exit codes for a correct and for an
+  overprivileged `gavel_api`, refusal to pass on catalog-only evidence, and a
+  wire-level proof that `gavel_api` receives `permission denied` on
+  INSERT/UPDATE/DELETE/TRUNCATE/CREATE/ALTER/DROP while SELECT succeeds
+- skipped without that variable set, so a run without a database does not
+  silently pass; GitHub Actions now starts a `postgres:16-alpine` service and
+  sets `GAVEL_TEST_DATABASE_URL`, so these tests run on every pull request
 - `npm audit`: zero vulnerabilities
 - clean production dependency tree after `npm ci --omit=dev`
 - API smoke: `/health` returned `200`; mutation request returned `405`
 - Compose static checks: private Postgres, internal DB network, external indexer egress, consistent credentials, health checks
 - `git diff --check`: passed
 
-Skipped without external infrastructure: the live mainnet-fork test, and the nine PostgreSQL integration tests when `GAVEL_TEST_DATABASE_URL` is unset.
+Skipped without external infrastructure: the live mainnet-fork test, and the sixteen PostgreSQL integration tests when `GAVEL_TEST_DATABASE_URL` is unset.
 
-Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot, backup/restore, and network-isolation tests. Docker and PostgreSQL were unavailable on the coding Pi.
+Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot, backup/restore, and network-isolation tests.
 
 ## 10. Known Limitations
 
 - Terra runtime deployment is not yet validated.
 - The incremental Nouns discovery query uses the subgraph filters
-  `createdBlock_gte` and `id_in`. These could not be exercised against the live
-  subgraph from the coding host (egress blocked), only against fixtures. The
-  full enumeration path is unchanged and known good, and a rejected filter fails
-  the sync loudly rather than returning partial data — but confirm the first
+  `createdBlock_gte` and `id_in`. These still could not be exercised against the
+  live subgraph from the coding host — egress to `www.nouns.camp` is refused by
+  the network policy there — so they remain fixture-tested only. The query is
+  unchanged by this patch. The full enumeration path is unchanged and known
+  good, and a rejected filter fails the sync loudly rather than returning
+  partial data — but this remains a real deployment gate: confirm the first
   incremental Nouns cycle succeeds on Terra before leaving it unattended.
 - `INDEXER_CONFIRMATION_DEPTH` defaults to 64. A reorg deeper than the
   confirmation depth plus the 64-block replay window would leave orphaned rows
@@ -375,6 +462,21 @@ Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot
 - **Nouns migration:** retain the Nouns subgraph source, ingest raw source-keyed votes/proposals, independently enumerate all proposals at a pinned snapshot, refresh mutable normalized status/tallies.
 - **Compose ownership:** canonical template stays in the repository; Terra owns environment values, ingress, filesystem permissions, monitoring, and backups.
 
+## 11a. Deployment gates
+
+Three gates, in order. None of them may be assumed:
+
+1. **Roles.** `docker compose run --rm migrate` reports `"roles": "granted"` and
+   exits 0. Any other role state exits 2 and names the reason.
+2. **Least privilege.** `docker compose run --rm migrate verify-permissions
+   --role gavel_api` exits 0 with `"method": "effective"`, `"write": false`,
+   `"ddl": false`. Exit 2 means `gavel_api` could write, could run DDL, or could
+   not be verified by acting as it.
+3. **Live incremental Nouns cycle.** After a Nouns backfill,
+   `docker compose run --rm indexer sync --dao nouns` exits 0 against the
+   production subgraph and the checkpoint advances. This one cannot be proven
+   off Terra and has not been.
+
 ## 12. Recommended Next Task
 
 **Deploy the merged commit on Terra and complete a recorded operational acceptance test covering real PostgreSQL migration, all three backfills, incremental sync, API queries, reboot persistence, network isolation, and backup restore.**
@@ -387,8 +489,8 @@ Terra must still execute real Docker/PostgreSQL migration, backfill, API, reboot
 - [ ] Postgres volume persists and has no host port
 - [ ] API ingress uses Cloudflare Tunnel/reverse proxy; no router forwarding
 - [ ] admin path is SSH/Tailscale only
-- [ ] migrations complete against real PostgreSQL and report `"roles": "granted"`
-- [ ] `verify-permissions --role gavel_api` exits 0
+- [ ] migrations complete against real PostgreSQL and report `"roles": "granted"` (exit 0)
+- [ ] `verify-permissions --role gavel_api` exits 0 and reports `"method": "effective"`, `"write": false`, `"ddl": false`
 - [ ] Nouns, ENS, Railgun backfills complete
 - [ ] `sync --all` resumes cleanly and remains idempotent
 - [ ] API queries return indexed records
