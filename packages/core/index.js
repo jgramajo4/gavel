@@ -14,4 +14,5 @@ module.exports = {
   ...require("./src/execution/executors/waap"),
   ...require("./src/dao/registry"),
   ...require("./src/storage/private-state"),
+  ...require("./src/rpc/block-range"),
 };

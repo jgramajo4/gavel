@@ -1,8 +1,9 @@
 const { DAO_CONFIGS } = require("./config");
 const { redactErrorMessage } = require("./redaction");
+const { DEFAULT_LOG_BLOCK_BATCH_SIZE, blockRanges, parseBlockBatchSize } = require("../../core/src/rpc/block-range");
 
 class GovernanceSyncWorker {
-  constructor({ store, sources, batchSize = 20_000, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, logger = null }) { this.store = store; this.sources = sources; this.batchSize = batchSize; this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); }
+  constructor({ store, sources, batchSize = DEFAULT_LOG_BLOCK_BATCH_SIZE, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, logger = null }) { this.store = store; this.sources = sources; this.batchSize = parseBlockBatchSize(batchSize, "batchSize"); this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); }
   async syncDao(daoId, options = {}) {
     const source = this.sources[daoId]; if (!source) throw new Error(`No source configured for ${daoId}`);
     const run = () => this._syncDao(daoId, source, options);
@@ -47,8 +48,8 @@ class GovernanceSyncWorker {
     }
     const proposalRecords = fetchedProposals.filter((row) => row?.raw);
     const materializedProposals = fetchedProposals.filter((row) => !row?.raw);
-    for (let from = start; from <= finalHead; from += this.batchSize) {
-      const to = Math.min(finalHead, from + this.batchSize - 1);
+    for (const range of blockRanges(start, finalHead, this.batchSize)) {
+      const { fromBlock: from, toBlock: to } = range;
       try {
         let logs; let attempt = 0;
         while (true) { try { logs = await source.fetchRange(from, to, finalHead); break; } catch (error) { if (++attempt >= this.retries) throw error; this.logger.warn({ event: "sync_retry", dao: daoId, source: source.id, fromBlock: from, toBlock: to, attempt, error: redactErrorMessage(error) }); await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1))); } }

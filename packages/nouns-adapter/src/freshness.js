@@ -1,4 +1,5 @@
 const { Interface, id, toBeHex, zeroPadValue } = require("ethers");
+const { blockRanges, resolveLogBlockBatchSize } = require("../../core/src/rpc/block-range");
 
 const PROPOSAL_EVENT_ABI = [
   "event ProposalCreated(uint256 id,address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,uint256 startBlock,uint256 endBlock,string description)",
@@ -23,7 +24,7 @@ function actionArrays(args) {
   };
 }
 
-async function canonicalProposalVersion(provider, governanceAddress, proposalId, createdBlock, checkedAtBlock) {
+async function canonicalProposalVersion(provider, governanceAddress, proposalId, createdBlock, checkedAtBlock, options = {}) {
   const creationLogs = await provider.getLogs({
     address: governanceAddress,
     fromBlock: Number(createdBlock),
@@ -35,12 +36,21 @@ async function canonicalProposalVersion(provider, governanceAddress, proposalId,
   if (!created) throw new Error(`Canonical ProposalCreated event not found for proposal ${proposalId}`);
 
   const proposalTopic = zeroPadValue(toBeHex(proposalId), 32);
-  const updateLogs = await provider.getLogs({
-    address: governanceAddress,
-    fromBlock: Number(createdBlock),
-    toBlock: Number(checkedAtBlock),
-    topics: [UPDATE_EVENTS.map((name) => proposalEvents.getEvent(name).topicHash), proposalTopic],
-  });
+  // The update window spans the whole life of the proposal, which for a Nouns
+  // voting period already outgrows the ~10,000-block `eth_getLogs` ceiling common
+  // to hosted RPC plans. It is walked in the same bounded spans as the indexer so
+  // vote preparation stays portable across providers; the events are re-sorted
+  // below, so splitting the window cannot change the result.
+  const batchSize = resolveLogBlockBatchSize({ explicit: options.blockBatchSize, names: ["INDEXER_BLOCK_BATCH_SIZE"], env: options.env });
+  const updateLogs = [];
+  for (const range of blockRanges(Number(createdBlock), Number(checkedAtBlock), batchSize)) {
+    updateLogs.push(...await provider.getLogs({
+      address: governanceAddress,
+      fromBlock: range.fromBlock,
+      toBlock: range.toBlock,
+      topics: [UPDATE_EVENTS.map((name) => proposalEvents.getEvent(name).topicHash), proposalTopic],
+    }));
+  }
   const events = [created, ...updateLogs.map((log) => ({ log, parsed: proposalEvents.parseLog(log) }))]
     .sort((left, right) => logOrder(left.log, right.log));
   let description = String(created.parsed.args.description);

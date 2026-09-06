@@ -4,7 +4,27 @@ A self-hosted, read-only PostgreSQL index for Nouns, ENS and Railgun Ethereum go
 
 ## Configure
 
-Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH` (default 64), `INDEXER_BLOCK_BATCH_SIZE`, `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `INDEXER_FULL_SCAN_INTERVAL_SECONDS` (default 21600), `INDEXER_MAX_CHECKPOINT_AGE_SECONDS` (default 900), `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default 3600), `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
+Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH` (default 64), `INDEXER_BLOCK_BATCH_SIZE` (default 5000), `ENS_PROPOSAL_BLOCK_BATCH_SIZE` (optional ENS-only override), `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `INDEXER_FULL_SCAN_INTERVAL_SECONDS` (default 21600), `INDEXER_MAX_CHECKPOINT_AGE_SECONDS` (default 900), `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default 3600), `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
+
+### Block ranges and RPC portability
+
+Hosted RPC providers cap the span a single `eth_getLogs` may cover; 10,000 blocks
+is the common free-tier ceiling, and the repository-default `https://eth.drpc.org`
+enforces it. Every log scan therefore derives its span from one setting:
+
+| Scan | Setting | Default |
+|---|---|---|
+| ENS `VoteCast` + `ProposalCreated` replay, Railgun `VoteCast` replay | `INDEXER_BLOCK_BATCH_SIZE` | 5000 |
+| ENS `ProposalCreated` discovery/backfill | `ENS_PROPOSAL_BLOCK_BATCH_SIZE`, else `INDEXER_BLOCK_BATCH_SIZE` | 5000 |
+
+Precedence for ENS proposal discovery is `ENS_PROPOSAL_BLOCK_BATCH_SIZE` →
+`INDEXER_BLOCK_BATCH_SIZE` → 5000. A variable that is set but is not a positive
+integer fails at startup rather than falling through to the next source. An empty
+value counts as unset. Railgun keeps no separate setting: its only log query is the
+shared range replay, and its proposal enumeration uses contract view calls.
+
+Raise `INDEXER_BLOCK_BATCH_SIZE` only against a provider whose limit you have
+confirmed; the effective values are logged once at startup as `rpc_block_ranges`.
 
 Node does not load `.env` implicitly. Export it before using the npm CLI:
 
