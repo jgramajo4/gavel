@@ -112,6 +112,15 @@ engine. Install or expose [`nouns-dao/`](nouns-dao/) as the Gavel skill. Bankr
 `execute_cli` containers are ephemeral, so each workflow clones the repository
 inside its current sandbox rather than relying on `/cli/gavel` to survive:
 
+```text
+Install or update the Gavel skill from:
+https://github.com/jgramajo4/gavel/tree/main/nouns-dao
+```
+
+Paste the same instruction into Bankr to update an existing installation; Bankr
+replaces the skill with the same name. Start a new conversation afterward.
+Updating the skill does not overwrite Gavel Private Files.
+
 ```bash
 git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
 cd gavel
@@ -159,6 +168,16 @@ Hermes users install one skill and then start a Gavel conversation:
 ```bash
 hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --yes
 ```
+
+Existing installations can check and apply Gavel skill updates with:
+
+```bash
+hermes skills check
+hermes skills update
+```
+
+Start a new Hermes session or use `/reset` after updating. The refreshed skill
+installs its new immutable Gavel runtime without overwriting private voter data.
 
 ```text
 /gavel-governance Initialize my persistent Gavel profile for Nouns voter 0x...

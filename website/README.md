@@ -41,11 +41,12 @@ a single evidence-to-recommendation entrance, disabled under reduced motion.
 ## Product-copy evidence
 
 Reviewed against repository commit
-`7b90ad363e80dcfd5dfc13b4d8bd63883bf40cb8` and the maintainer's clarification.
+`108c7b3a0408ae8a7e86c53ebdad5fdaf3b7d91f` and the maintainer's clarification.
 
 | Claim / command | Source |
 | --- | --- |
-| Product identity, Nouns first, runtime choices, CLI setup | [`../README.md`](../README.md) |
+| Product identity, supported DAOs, runtime choices, CLI setup | [`../README.md`](../README.md) |
+| Nouns, ENS Governor, and Railgun Ethereum capabilities and exclusions | [`supported-daos.md`](../nouns-dao/references/supported-daos.md) |
 | Layered authority, 365-day recency default | [`PROFILE_MODEL.md`](../docs/PROFILE_MODEL.md) |
 | Personal precedents, deterministic similarity, heuristic score, draft limits | [`PREDICTION_ENGINE.md`](../docs/PREDICTION_ENGINE.md) |
 | Quarantined prose, structural inspection limits | [`PROPOSAL_SECURITY.md`](../docs/PROPOSAL_SECURITY.md) |
@@ -78,7 +79,9 @@ Deliberately bounded claims:
 - WaaP is a scoped executor scaffold with no bundled live broadcaster.
 - The TUI uses the canonical engine, per the maintainer’s completion update.
   Review and wallet approval remain separate boundaries.
-- Headless CLI jobs exist; an HTTP service and additional DAO adapters do not.
+- Nouns, ENS Governor, and Railgun Ethereum adapters are implemented.
+- ENS Snapshot is a separate venue and Railgun Polygon/BNB are not included.
+- Headless CLI jobs exist; an HTTP service does not.
 - Private storage is host-controlled; no claim of built-in encryption or
   automatic cross-runtime profile sync.
 
@@ -100,13 +103,14 @@ were visually reviewed, including the install panel and the layered model.
 - All internal anchors, unique IDs, local assets, and linked repository paths
   checked; no browser JavaScript errors.
 - `node --check website/script.js` passes.
-- `npm test`: 94 pass, 0 fail, 1 opt-in mainnet-fork test skipped.
+- `npm test`: 101 pass, 0 fail, 1 opt-in mainnet-fork test skipped.
 
-The Hermes runtime pin is `7b90ad363e80dcfd5dfc13b4d8bd63883bf40cb8` on
-`main`. That commit is advertised by GitHub, so CI can `git fetch --depth 1`
-it without the previous `not our ref` failure from the pre-squash pin.
+The Hermes runtime pin is `108c7b3a0408ae8a7e86c53ebdad5fdaf3b7d91f`.
+That immutable commit contains the Nouns, ENS Governor, and Railgun Ethereum
+adapters. Updating the Hermes skill installs the versioned runtime without
+overwriting private Gavel data.
 
-No core, integration, or package dependency change was needed for the website.
+No core or package dependency change was needed for this website refresh.
 
 ## Deployment
 
@@ -132,8 +136,9 @@ SVG favicon are already present. No social-preview raster image is required.
 
 Publish only the four public assets; this README is implementation documentation.
 
-## Product roadmap additions
+## Product status update
 
-At the maintainer’s request, the architecture section lists ENS, Railgun, and
-lobbying agents beneath Gavel Core and the Nouns adapter. All three are labeled
-as planned extensions, without inventing implementation details or dates.
+The architecture section lists Nouns, ENS Governor, and Railgun Ethereum as
+supported adapters. It keeps ENS Snapshot, Railgun Polygon/BNB, portable
+profiles, the HTTP service, and lobbying agents explicitly outside the current
+scope.

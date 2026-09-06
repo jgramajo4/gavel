@@ -18,6 +18,17 @@ The installable compatibility skill remains at [`../../nouns-dao/`](../../nouns-
 until existing Bankr installs have migrated. It calls `gavel`/`bin/gavel.js`,
 which is a compatibility shim for `packages/cli/bin/gavel.js`.
 
+Install or update it by sending Bankr:
+
+```text
+Install or update the Gavel skill from:
+https://github.com/jgramajo4/gavel/tree/main/nouns-dao
+```
+
+Bankr replaces an existing skill with the same name. Start a new conversation
+afterward so the refreshed instructions are loaded. Skill replacement and
+runtime cloning never authorize changes to private Gavel files.
+
 Use `--dao nouns`, `--dao ens`, or `--dao railgun-eth` where a command accepts a
 DAO. Keep private state under a DAO-specific directory. ENS preparation is for
 the executable Governor venue; Railgun preparation is binary and computes its
