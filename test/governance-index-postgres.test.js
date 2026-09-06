@@ -57,6 +57,14 @@ async function withApplicationRoles(store) {
   }
 }
 
+// The probe role holds a schema grant, and PostgreSQL refuses to drop a role
+// anything still depends on. Revoke what it owns first, or the role survives the
+// run and the next one skips this test instead of running it.
+async function dropProbeRole(store, role) {
+  await store.pool.query(`DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname='${role}') THEN EXECUTE 'DROP OWNED BY ${role}'; END IF; END $$;`);
+  await store.pool.query(`DROP ROLE IF EXISTS ${role}`);
+}
+
 function roleUrl(role, password) {
   const url = new URL(ADMIN_URL);
   url.username = role;
@@ -445,7 +453,7 @@ test("role state is reported honestly when the connection cannot create roles or
     await withApplicationRoles(store);
     await store.migrate();
     try {
-      await store.pool.query(`DROP ROLE IF EXISTS ${limited}`);
+      await dropProbeRole(store, limited);
       const statement = (await store.pool.query(
         "SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEROLE PASSWORD %L', $1::text, $2::text) AS stmt",
         [limited, password],
@@ -481,7 +489,7 @@ test("role state is reported honestly when the connection cannot create roles or
     assert.match(acknowledged.degraded, /set role/i);
   } finally {
     if (unprivileged) await unprivileged.close();
-    await store.pool.query(`DROP ROLE IF EXISTS ${limited}`).catch(() => {});
+    await dropProbeRole(store, limited).catch(() => {});
     await store.close();
   }
 });
