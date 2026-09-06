@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gavel
+      POSTGRES_USER: gavel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      GAVEL_INDEXER_DB_PASSWORD: ${GAVEL_INDEXER_DB_PASSWORD:?set GAVEL_INDEXER_DB_PASSWORD}
+      GAVEL_API_DB_PASSWORD: ${GAVEL_API_DB_PASSWORD:?set GAVEL_API_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./packages/governance-index/docker/init-db.sh:/docker-entrypoint-initdb.d/10-gavel-roles.sh:ro
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gavel -d gavel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: gavel
+      PGUSER: gavel
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["serve"]
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: gavel
+      PGUSER: gavel_api
+      PGPASSWORD: ${GAVEL_API_DB_PASSWORD:?set GAVEL_API_DB_PASSWORD}
+      API_HOST: 0.0.0.0
+      API_PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    networks: [database, public]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  indexer:
+    build: .
+    command: ["run"]
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: gavel
+      PGUSER: gavel_indexer
+      PGPASSWORD: ${GAVEL_INDEXER_DB_PASSWORD:?set GAVEL_INDEXER_DB_PASSWORD}
+      ETHEREUM_RPC_URL: ${ETHEREUM_RPC_URL:-}
+      INDEXER_ENABLED_DAOS: ${INDEXER_ENABLED_DAOS:-nouns,ens}
+      INDEXER_CONFIRMATION_DEPTH: ${INDEXER_CONFIRMATION_DEPTH:-64}
+      INDEXER_FULL_SCAN_INTERVAL_SECONDS: ${INDEXER_FULL_SCAN_INTERVAL_SECONDS:-21600}
+      INDEXER_MAX_CHECKPOINT_AGE_SECONDS: ${INDEXER_MAX_CHECKPOINT_AGE_SECONDS:-900}
+      INDEXER_BLOCK_BATCH_SIZE: ${INDEXER_BLOCK_BATCH_SIZE:-20000}
+      INDEXER_RPC_CONCURRENCY: ${INDEXER_RPC_CONCURRENCY:-4}
+      INDEXER_DB_POOL_SIZE: ${INDEXER_DB_POOL_SIZE:-10}
+      RAILGUN_FROM_BLOCK: ${RAILGUN_FROM_BLOCK:-15505853}
+      NOUNS_SUBGRAPH_URL: ${NOUNS_SUBGRAPH_URL:-https://www.nouns.camp/subgraphs/nouns}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks: [database, public]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "packages/governance-index/bin/gavel-indexer.js", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres-data:
+
+networks:
+  database:
+    internal: true
+  public:

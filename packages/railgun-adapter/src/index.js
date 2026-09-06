@@ -162,12 +162,13 @@ class RailgunDaoAdapter {
     return BigInt(await this.voting.getVotes(proposalId, address)) > 0n;
   }
 
-  async fetchProposal(proposalId) {
+  async fetchProposal(proposalId, blockTag = "latest") {
     const id = decimal(proposalId, "proposal id");
+    const overrides = { blockTag };
     const [proposalResult, actionResult, latestBlock] = await Promise.all([
-      this.voting.proposals(id),
-      this.voting.getActions(id),
-      this.provider.getBlock("latest"),
+      this.voting.proposals(id, overrides),
+      this.voting.getActions(id, overrides),
+      this.provider.getBlock(blockTag),
     ]);
     const actions = canonicalActions(actionResult);
     const publishTime = Number(field(proposalResult, "publishTime", 3));

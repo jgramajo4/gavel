@@ -12,10 +12,12 @@
     "node": ">=20"
   },
   "bin": {
-    "gavel": "packages/cli/bin/gavel.js"
+    "gavel": "packages/cli/bin/gavel.js",
+    "gavel-indexer": "packages/governance-index/bin/gavel-indexer.js"
   },
   "scripts": {
     "gavel": "node packages/cli/bin/gavel.js",
+    "indexer": "node packages/governance-index/bin/gavel-indexer.js",
     "test": "node --test",
     "test:history": "node --test test/history*.test.js",
     "test:profile": "node --test test/profile.test.js",
@@ -31,6 +33,9 @@
   "dependencies": {
     "ethers": "^6.15.0",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@noble/curves": "^1.9.1",
+    "@noble/hashes": "^1.8.0"
   }
 }
-
