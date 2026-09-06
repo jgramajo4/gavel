@@ -11,5 +11,7 @@
 @media(max-width:370px){.hero h1{font-size:2.4375rem}.hero .actions{gap:12px}.hero .button{padding-inline:14px}.hero .text-button{padding-inline:0;font-size:0.8125rem}.mini-trail,.proposal-heading{padding-inline:19px}.artifact-top,.recommendation,.review-gate,.artifact-bottom{padding-inline:19px}.mini-row{font-size:0.6875rem;gap:7px}.artifact-bottom{font-size:0.5625rem}.final-cta h2{font-size:2.1875rem}.tab-hint{display:none}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{animation:none!important;transition:none!important}}
 
-/* Planned product extensions beneath the core and adapter. */
+/* Product scope beneath the core and adapters. */
 .roadmap-extensions{display:grid;grid-template-columns:190px 1fr;gap:24px;align-items:center;margin-top:32px;padding:23px 0;border-block:1px dashed var(--line)}.roadmap-extensions p{font-size:.75rem;margin-top:5px}.roadmap-extensions ul{list-style:none;display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:0;padding:0}.roadmap-extensions li{font-size:.9375rem;color:var(--bone);display:flex;align-items:center;gap:12px}.roadmap-extensions li:before{content:"";width:6px;height:6px;border:1px solid var(--brass);flex-shrink:0}@media(max-width:760px){.roadmap-extensions{grid-template-columns:1fr;gap:19px;margin-top:25px;padding-block:21px}.roadmap-extensions ul{grid-template-columns:1fr 1fr;gap:17px}.roadmap-extensions li:last-child{grid-column:1/-1}.roadmap-extensions li{font-size:.875rem}}
+
+.update-heading{margin-top:25px}

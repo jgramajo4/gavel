@@ -27,6 +27,22 @@ hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/int
 Then invoke `/gavel-governance` with a natural-language request. The skill runs
 its bootstrap automatically; users do not clone Gavel or install it globally.
 
+## Update an existing installation
+
+Hermes remembers the direct skill URL. Check for upstream changes and refresh
+installed skills with:
+
+```bash
+hermes skills check
+hermes skills update
+```
+
+Start a new session or use `/reset` after updating so Hermes reloads the skill.
+`hermes update` updates Hermes itself; it does not replace
+`hermes skills update`. A refreshed Gavel skill points its runner at a new
+immutable runtime directory. Bootstrap never overwrites `GAVEL_DATA_DIR`, so
+updating code and preserving private voter state remain separate operations.
+
 Common non-secret/runtime settings are `NOUNS_SUBGRAPH_URL`,
 `GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`, `GAVEL_SAFE_ADDRESS`, and
 `GAVEL_WAAP_ADDRESS`. Chain-backed commands default to `https://eth.drpc.org`.
