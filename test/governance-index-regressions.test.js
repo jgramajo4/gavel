@@ -597,3 +597,33 @@ test("Compose separates bootstrap, indexer, and SELECT-only API database roles",
   assert.match(init, /CREATE ROLE gavel_api LOGIN/);
   assert.match(init, /CREATE ROLE gavel_indexer LOGIN/);
 });
+
+// docker-entrypoint init scripts only run against an empty data directory, so a
+// deployment onto an existing volume has to be able to create the roles from
+// the migration step instead. Without these variables it cannot.
+test("the migrate service can provision application roles on a reused volume", () => {
+  const compose = fs.readFileSync(path.join(__dirname, "../docker-compose.yml"), "utf8");
+  const migrate = compose.match(/\n  migrate:[\s\S]*?(?=\n  api:)/)[0];
+  assert.match(migrate, /GAVEL_INDEXER_DB_PASSWORD: \$\{GAVEL_INDEXER_DB_PASSWORD/);
+  assert.match(migrate, /GAVEL_API_DB_PASSWORD: \$\{GAVEL_API_DB_PASSWORD/);
+  // The migrate service is the only one that may hold both role passwords.
+  const api = compose.match(/\n  api:[\s\S]*?(?=\n  indexer:)/)[0];
+  assert.doesNotMatch(api, /GAVEL_INDEXER_DB_PASSWORD/);
+});
+
+test("the CLI advertises the deployment gate commands the handoff documents", () => {
+  const cli = fs.readFileSync(path.join(__dirname, "../packages/governance-index/bin/gavel-indexer.js"), "utf8");
+  const handoff = fs.readFileSync(path.join(__dirname, "../docs/deployment/TERRA_GOVERNANCE_INDEX_HANDOFF.md"), "utf8");
+  for (const command of ["migrate", "ensure-roles", "verify-permissions"]) {
+    assert.match(cli, new RegExp(`command === "${command}"`), `${command} must be implemented`);
+    assert.ok(cli.includes(`  ${command}`), `${command} must appear in the usage text`);
+    assert.ok(handoff.includes(command), `${command} must appear in the Terra handoff`);
+  }
+  // Documented flags have to exist, or the handoff is describing a CLI that is not this one.
+  const options = cli.match(/options: \{[\s\S]*?\n    \}/)[0];
+  for (const flag of ["--role", "--expect", "--allow-catalog-fallback", "--allow-missing-roles"]) {
+    const name = flag.slice(2);
+    assert.match(options, new RegExp(`(^|\\s)"?${name}"?:`, "m"), `${flag} must be a parsed option`);
+    assert.ok(handoff.includes(flag), `${flag} must appear in the Terra handoff`);
+  }
+});

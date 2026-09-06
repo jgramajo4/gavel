@@ -10,6 +10,7 @@ const {
   encodeProposalCursor,
 } = require("./memory-store");
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
+const { APPLICATION_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
 
 const TERMINAL_PROPOSAL_STATES = ["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"];
 const { redactErrorMessage } = require("./redaction");
@@ -334,49 +335,86 @@ class PostgresGovernanceStore {
 
   async close() { await this.pool.end(); }
 
-  async migrate() {
+  // Applies the schema, reconciles the application roles, and reports the
+  // role/grant state it actually observed. `roles: "granted"` is only ever
+  // returned after the grants have been verified against the live database.
+  async migrate(options = {}) {
     const dir = path.join(__dirname, "..", "migrations");
     await this.pool.query(await fs.readFile(path.join(dir, "001_initial.sql"), "utf8"));
-    const roles = (await this.pool.query(
-      "SELECT rolname FROM pg_roles WHERE rolname IN ('gavel_indexer','gavel_api')",
-    )).rows.map((row) => row.rolname);
-    if (roles.length === 2) {
-      await this.pool.query(await fs.readFile(path.join(dir, "002_roles.sql"), "utf8"));
-      return { ok: true, versions: ["001_initial", "002_roles"], roles: "granted" };
+    const versions = ["001_initial"];
+
+    // Role creation is idempotent and privilege-aware: on a fresh volume the
+    // entrypoint script has already made the roles, on a reused volume this is
+    // what creates them without destroying data.
+    const ensured = options.ensureRoles === false
+      ? { state: "present", created: [], missing: [] }
+      : await ensureRoles(this.pool, options);
+    const roles = await presentRoles(this.pool);
+    const missingRoles = APPLICATION_ROLES.filter((role) => !roles.includes(role));
+
+    if (missingRoles.length) {
+      // Never fail silently: an ungranted API role is a deployment fault, not a
+      // detail. `verify-permissions` is the gate that must pass before serving.
+      return {
+        ok: true,
+        version: versions.at(-1),
+        versions,
+        roles: "skipped",
+        rolesCreated: ensured.created,
+        missingRoles,
+        reason: ensured.reason || "the roles do not exist",
+        warning: `Role grants were skipped because ${missingRoles.join(" and ")} do not exist. Create them (\`gavel-indexer ensure-roles\`, or docker/init-db.sh on a fresh volume) and re-run migrate, then run \`gavel-indexer verify-permissions --role gavel_api\`.`,
+      };
     }
-    // Never fail silently: an ungranted API role is a deployment fault, not a
-    // detail. `verify-permissions` is the gate that must pass before serving.
+
+    await this.pool.query(await fs.readFile(path.join(dir, "002_roles.sql"), "utf8"));
+    versions.push("002_roles");
+
+    // The grants ran without error, which is not the same as the roles now
+    // being correct. Prove it by exercising them.
+    const audit = await auditRoles(this.pool);
+    if (!audit.ok) {
+      return {
+        ok: false,
+        version: versions.at(-1),
+        versions,
+        roles: "invalid",
+        rolesCreated: ensured.created,
+        verified: audit.summary,
+        violations: audit.violations,
+        warning: "Role grants were applied but the resulting privileges are wrong. Do not serve traffic until `gavel-indexer verify-permissions --role gavel_api` passes.",
+      };
+    }
+    const unproven = Object.entries(audit.summary).filter(([, row]) => row.method !== "effective").map(([role]) => role);
     return {
       ok: true,
-      versions: ["001_initial"],
-      roles: "skipped",
-      missingRoles: ["gavel_indexer", "gavel_api"].filter((role) => !roles.includes(role)),
-      warning: "Role grants were skipped because the roles do not exist. Create them (docker/init-db.sh) and re-run migrate, then run `gavel-indexer verify-permissions`.",
+      version: versions.at(-1),
+      versions,
+      roles: "granted",
+      rolesCreated: ensured.created,
+      verified: audit.summary,
+      ...(unproven.length ? {
+        warning: `Grants for ${unproven.join(" and ")} were confirmed from the privilege catalog only, because this connection may not SET ROLE. Run \`gavel-indexer verify-permissions --role gavel_api\` from a connection that can, before serving traffic.`,
+      } : {}),
     };
   }
 
-  // Proves the API role cannot write, rather than trusting the role's name.
-  async verifyPermissions(role = "gavel_api") {
-    const tables = (await this.pool.query(
-      "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
-    )).rows.map((row) => row.tablename);
-    if (!tables.length) throw new Error("no public tables found; run migrate first");
-    const exists = (await this.pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [role])).rowCount;
-    if (!exists) throw new Error(`role ${role} does not exist`);
-    const writable = [];
-    for (const table of tables) {
-      for (const privilege of ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]) {
-        const granted = (await this.pool.query(
-          "SELECT has_table_privilege($1,$2,$3) AS granted", [role, `public.${table}`, privilege],
-        )).rows[0].granted;
-        if (granted) writable.push(`${table}:${privilege}`);
-      }
-    }
-    const canCreate = (await this.pool.query(
-      "SELECT has_schema_privilege($1,'public','CREATE') AS granted", [role],
-    )).rows[0].granted;
-    if (canCreate) writable.push("schema public:CREATE");
-    return { ok: writable.length === 0, role, tables: tables.length, writable };
+  // Creates any missing application role without touching indexed data, so a
+  // redeploy onto an existing PostgreSQL volume does not require wiping it.
+  async ensureRoles(options = {}) {
+    return ensureRoles(this.pool, options);
+  }
+
+  // Which application roles the database currently has.
+  async rolesStatus() {
+    const present = await presentRoles(this.pool);
+    return { present, missing: APPLICATION_ROLES.filter((role) => !present.includes(role)) };
+  }
+
+  // Proves what the role can and cannot do by acting as it, rather than by
+  // trusting the role's name or reading its GRANT statements back.
+  async verifyPermissions(role = "gavel_api", options = {}) {
+    return verifyPermissions(this.pool, role, options);
   }
 
   async transaction(callback) {

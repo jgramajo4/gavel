@@ -19,7 +19,9 @@ Docker Compose loads `.env` automatically and supplies its own container databas
 ```bash
 npm ci
 npm run indexer -- migrate
+npm run indexer -- ensure-roles
 npm run indexer -- verify-permissions --role gavel_api
+npm run indexer -- verify-permissions --role gavel_indexer --expect read-write
 npm run indexer -- backfill --dao nouns
 npm run indexer -- backfill --dao ens
 npm run indexer -- backfill --dao railgun-eth
@@ -56,7 +58,13 @@ curl --fail http://localhost:${API_PORT:-8080}/health
 docker compose run --rm indexer status
 ```
 
-`docker/init-db.sh` creates the `gavel_indexer` and `gavel_api` roles, and only runs when the PostgreSQL volume is first created. On a reused volume the roles are absent and `migrate` reports `"roles": "skipped"` with the roles it needs; create them and re-run. `verify-permissions` proves `gavel_api` holds no write privilege and exits 2 if it does — run it before serving. The one-shot `migrate` service must finish successfully before API/indexer startup. Re-running backfill or sync is safe; source locking, unique event identities, and transactional checkpoints make ingestion restart-safe.
+### Database roles
+
+`docker/init-db.sh` creates `gavel_indexer` and `gavel_api`, and only runs when the PostgreSQL data directory is first created. Every other deployment reaches the roles through `migrate`, which creates any missing role from `GAVEL_INDEXER_DB_PASSWORD` and `GAVEL_API_DB_PASSWORD`, applies `002_roles.sql`, and then verifies the resulting privileges. A reused volume therefore converges without being wiped, and indexed data is never touched. `migrate` reports `"roles"` as `granted`, `skipped` (with the reason it could not act), or `invalid` (with the violations), and exits 2 for anything but `granted` unless `--allow-missing-roles` is passed. `ensure-roles` performs only the role-creation step.
+
+`verify-permissions` proves the constraint rather than reading it back: inside a transaction that is always rolled back it runs `SET LOCAL ROLE` and then real SELECT/INSERT/UPDATE/DELETE/CREATE statements, treating only SQLSTATE `42501` as a refusal, and checks catalog privileges, table ownership, and role attributes alongside. It exits 2 if the role can write or run DDL, and also if it could not act as the role at all — a catalog-only reading reports `"method": "catalog"` and fails unless `--allow-catalog-fallback` is passed. Run it before serving.
+
+The one-shot `migrate` service must finish successfully before API/indexer startup. Re-running backfill or sync is safe; source locking, unique event identities, and transactional checkpoints make ingestion restart-safe.
 
 ## API
 

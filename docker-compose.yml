@@ -28,6 +28,12 @@ services:
       PGDATABASE: gavel
       PGUSER: gavel
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      # The entrypoint script in docker/init-db.sh only runs when the postgres
+      # data directory is first created. Passing the application role passwords
+      # here lets `migrate` create the roles on a reused volume too, so a
+      # redeploy converges on the same least-privilege state without wiping data.
+      GAVEL_INDEXER_DB_PASSWORD: ${GAVEL_INDEXER_DB_PASSWORD:?set GAVEL_INDEXER_DB_PASSWORD}
+      GAVEL_API_DB_PASSWORD: ${GAVEL_API_DB_PASSWORD:?set GAVEL_API_DB_PASSWORD}
     networks: [database]
     depends_on:
       postgres:
