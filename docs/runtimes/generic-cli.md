@@ -10,6 +10,18 @@ No Bankr, Hermes, wallet, private key, or always-on agent environment is
 required. A shell workflow may run history, profile, proposal, predict, inspect,
 prepare-vote, execution-status, and prepare-delegation directly.
 
+DAO-aware commands use `nouns`, `ens`, or `railgun-eth`. Nouns has direct
+subgraph history and proposal ingestion. Railgun has direct Ethereum proposal
+reads; normalized vote history can be imported. ENS normalized Governor history
+and proposals can be imported from a trusted event indexer, after which analysis,
+vote preparation, execution readiness, and delegation are available. ENS
+Snapshot data is a separate venue and is not accepted as Governor transaction
+metadata.
+
+Railgun vote preparation refuses `ABSTAIN` and reason text, computes the staking
+snapshot hint, and uses all remaining voting power unless `--amount` is supplied.
+The generic delegation command does not handle Railgun's per-stake delegation.
+
 Chain-backed commands default to the public Ethereum endpoint
 `https://eth.drpc.org`. `ETHEREUM_RPC_URL` or `--rpc` is an optional advanced
 override for higher limits, privacy requirements, or a self-hosted node. Public

@@ -13,15 +13,20 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
 
 ### Existing voter
 
-1. Ask only for the Nouns voter address if it is not already known. Explain that
+1. Ask for the DAO first when it is not already known, then ask only for the
+   voter address. Explain that
    Gavel reads public voting history and never needs a private key.
-2. Fetch normalized history:
+2. For Nouns, fetch normalized history:
 
    ```bash
    cd gavel && node bin/gavel.js history 0xVoterAddress --output ../gavel-publish/history.json
    ```
 
-3. Report the address, vote count, reason coverage if available after profile
+   For ENS or Railgun, stage a normalized history document exported by a trusted
+   indexer. Keep ENS Governor and Snapshot histories separate, and exclude
+   Railgun sponsorship events. Do not route these DAOs through the Nouns
+   subgraph command.
+3. Report the address, DAO, vote count, reason coverage if available after profile
    creation, and private output location. Do not dump historical reasons.
 4. Build the private profile, including any existing policy files:
 
@@ -75,12 +80,17 @@ override old behavior without erasing the historical record.
 
 ## Analyze a proposal
 
-1. Fetch a fresh normalized proposal by ID:
+1. Fetch a fresh normalized proposal by ID. Nouns and Railgun Ethereum can use
+   the CLI directly:
 
    ```bash
-   cd gavel && node bin/gavel.js proposal 123 --output ../gavel-publish/proposal-123.json
+   cd gavel && node bin/gavel.js proposal 123 --dao <nouns|railgun-eth> --output ../gavel-publish/proposal-123.json
    ```
 
+   ENS currently requires a normalized Governor proposal imported from a trusted
+   event indexer because the complete immutable description and action arrays
+   are emitted in `ProposalCreated`. Do not substitute Snapshot metadata for an
+   executable proposal.
 2. Security-inspect it independently:
 
    ```bash

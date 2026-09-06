@@ -21,12 +21,16 @@ function addDistribution(scores, distribution, strength) {
   for (const support of SUPPORT_ORDER) scores[support] += (distribution[support] / total) * strength;
 }
 
-function normalizeScores(scores) {
-  const total = Object.values(scores).reduce((sum, value) => sum + value, 0);
-  return Object.fromEntries(SUPPORT_ORDER.map((support) => [support, rounded(scores[support] / total)]));
+function normalizeScores(scores, allowedSupports = SUPPORT_ORDER) {
+  const allowed = new Set(allowedSupports);
+  const total = SUPPORT_ORDER.reduce((sum, support) => sum + (allowed.has(support) ? scores[support] : 0), 0);
+  if (total <= 0) throw new Error("allowed support scores must have positive weight");
+  return Object.fromEntries(
+    SUPPORT_ORDER.map((support) => [support, allowed.has(support) ? rounded(scores[support] / total) : 0]),
+  );
 }
 
-function observedScores(profile, targetFacts, precedents) {
+function observedScores(profile, targetFacts, precedents, allowedSupports = SUPPORT_ORDER) {
   // A small non-abstain-biased prior breaks an evidence-free tie without using
   // ABSTAIN as a synonym for uncertainty.
   const scores = { FOR: 0.34, AGAINST: 0.33, ABSTAIN: 0.2 };
@@ -52,11 +56,11 @@ function observedScores(profile, targetFacts, precedents) {
     matchingCategories.some((behavior) => behavior.dominantSupport === Support.ABSTAIN);
   if (!explicitAbstainPattern) scores.ABSTAIN *= 0.65;
 
-  return normalizeScores(scores);
+  return normalizeScores(scores, allowedSupports);
 }
 
-function selectRecommendation(scores) {
-  return [...SUPPORT_ORDER].sort((a, b) => scores[b] - scores[a] || SUPPORT_ORDER.indexOf(a) - SUPPORT_ORDER.indexOf(b))[0];
+function selectRecommendation(scores, allowedSupports = SUPPORT_ORDER) {
+  return [...allowedSupports].sort((a, b) => scores[b] - scores[a] || SUPPORT_ORDER.indexOf(a) - SUPPORT_ORDER.indexOf(b))[0];
 }
 
 function buildReasoning({ profile, recommendation, policy, precedents, scores }) {
@@ -147,6 +151,12 @@ function predictVote(profileInput, proposalInput, options = {}) {
   const asOf = asOfDate.toISOString();
   const threshold = options.relevantSimilarityThreshold ?? DEFAULT_THRESHOLD;
   const maxPrecedents = options.maxPrecedents ?? DEFAULT_MAX_PRECEDENTS;
+  const allowedSupports = options.allowedSupports || SUPPORT_ORDER;
+  if (!Array.isArray(allowedSupports) || allowedSupports.length < 2 ||
+      allowedSupports.some((support) => !SUPPORT_ORDER.includes(support)) ||
+      new Set(allowedSupports).size !== allowedSupports.length) {
+    throw new TypeError("allowedSupports must contain at least two unique governance support choices");
+  }
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     throw new RangeError("relevantSimilarityThreshold must be between 0 and 1");
   }
@@ -162,9 +172,17 @@ function predictVote(profileInput, proposalInput, options = {}) {
     threshold,
     limit: maxPrecedents,
   });
-  const supportScores = observedScores(profile, targetFacts, precedents);
-  const observedRecommendation = selectRecommendation(supportScores);
-  const policy = resolveLayeredPolicy({ profile, proposal, observedRecommendation });
+  const supportScores = observedScores(profile, targetFacts, precedents, allowedSupports);
+  const observedRecommendation = selectRecommendation(supportScores, allowedSupports);
+  const resolvedPolicy = resolveLayeredPolicy({ profile, proposal, observedRecommendation });
+  const policy = allowedSupports.includes(resolvedPolicy.recommendation) ? resolvedPolicy : {
+    ...resolvedPolicy,
+    recommendation: observedRecommendation,
+    source: "OBSERVED_BEHAVIOR",
+    sourceId: null,
+    flags: [...resolvedPolicy.flags, `${resolvedPolicy.recommendation} is not available for this governance venue; the policy override was not applied.`],
+    blockAutonomy: true,
+  };
   const recommendation = policy.recommendation;
   const confidenceResult = heuristicConfidence({
     supportScores,

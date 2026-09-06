@@ -1,12 +1,12 @@
 ---
 name: gavel-governance
-description: Analyze Nouns governance using private voter profiles.
+description: Analyze Nouns, ENS, and Railgun governance using private voter profiles and prepare review-first transactions where each DAO supports them.
 ---
 
 # Gavel governance in Hermes
 
 Use the bundled [Gavel runner](scripts/gavel.js) as the only compatibility
-boundary. Do not reimplement profile, prediction, proposal, persistence, Nouns,
+boundary. Do not reimplement profile, prediction, proposal, persistence, DAO,
 calldata, delegation, or executor logic in Hermes.
 
 On the first Gavel request, run the runner with `--bootstrap-only`. It installs a
@@ -22,20 +22,29 @@ environment-variable values or bypass the runner with a different checkout.
 
 For an on-demand governance workflow:
 
-1. Fetch history and build/load the private profile.
-2. Fetch the canonical proposal, then predict and inspect it. Call an
+1. Select one of `nouns`, `ens`, or `railgun-eth`; keep each DAO's history and
+   profile separate. ENS Snapshot and Governor votes are separate venues.
+2. Fetch or import history and build/load the private profile.
+3. Fetch the canonical proposal, then predict and inspect it. Call an
    uncalibrated value a `heuristic score`, never an accuracy probability. If
    `predictionReview.requiresHumanReview` is true, explain why and keep the
    recommendation advisory.
-3. Run `prepare-vote` only after the user explicitly reviews the recommendation
+4. Run `prepare-vote` only after the user explicitly reviews the recommendation
    and confirms its support. Pass `--acknowledge-prediction-review` only for
    that confirmed request; treat `BLOCKED` and any nonzero exit as a hard stop.
-4. Leave the transaction unsigned unless the user has configured a supported
+5. Leave the transaction unsigned unless the user has configured a supported
    executor and authorized the specific execution step.
-5. In Safe mode, propose only; a human Safe owner authorizes execution.
-6. In WaaP mode, require adapter autonomy approval, policy success, matching
+6. In Safe mode, propose only; a human Safe owner authorizes execution.
+7. In WaaP mode, require adapter autonomy approval, policy success, matching
    execution address, voting power, and delegation. Never submit arbitrary
    target/calldata.
+
+Railgun is binary: refuse `ABSTAIN` and onchain reasons. Let the adapter compute
+the staking snapshot hint and default to full remaining voting power unless the
+user explicitly chooses `--amount`. Railgun sponsorship is not a vote, and its
+per-stake delegation is outside the generic delegation command. ENS vote
+preparation targets only the executable Governor venue; do not treat a Snapshot
+signature as an ENS Governor transaction.
 
 Describe `security.summary.riskLevel` as the result of structural calldata
 inspection. `CLEAR` means no issue was detected by that limited inspection; it

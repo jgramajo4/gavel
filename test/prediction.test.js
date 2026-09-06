@@ -173,6 +173,17 @@ test("allows ABSTAIN when matching history establishes an explicit abstention pa
   assert.equal(predict(model).recommendation, "ABSTAIN");
 });
 
+test("constrains recommendations to the governance venue's available choices", () => {
+  const model = profile([
+    vote(1, "ABSTAIN", "2025-12-01T00:00:00.000Z"),
+    vote(2, "ABSTAIN", "2025-12-02T00:00:00.000Z"),
+  ]);
+  model.dao = "railgun-eth";
+  const result = predict(model, proposal(99), { allowedSupports: ["FOR", "AGAINST"] });
+  assert.notEqual(result.recommendation, "ABSTAIN");
+  assert.equal(result.evidence.supportScores.ABSTAIN, 0);
+});
+
 test("hard rules override inferred recommendations with deterministic confidence", () => {
   const model = profile([vote(1, "FOR", "2025-12-01T00:00:00.000Z")], {
     hardRules: [

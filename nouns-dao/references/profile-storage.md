@@ -17,7 +17,7 @@ Use this lifecycle for every stateful workflow:
    file into `gavel-publish/`.
 3. **Publish:** In that same `execute_cli` invocation, map each result file with
    `publishArtifacts` to an explicit filename beneath
-   `/gavel/data/private/nouns/<lowercase-address>/`.
+   `/gavel/data/private/<dao>/<lowercase-address>/`.
 4. **Verify:** Require all commands to exit zero. Then require one successful
    `artifacts` entry per expected file with the exact destination, a nonempty
    `fileId`, a positive byte size, and no artifact error.
@@ -30,7 +30,8 @@ For requests such as "do you see my profile?", "load my profile", proposal
 analysis, or any fresh-chat Gavel interaction, inspect persistent Files before
 asking for an address or starting onboarding:
 
-1. Call `list_files` with `folder: "/gavel/data/private/nouns"`.
+1. Call `list_files` with `folder: "/gavel/data/private/<dao>"`. If the DAO is
+   not known, ask which supported DAO to use before opening private files.
 2. If exactly one address directory contains `profile.json`, treat that as the
    returning voter and stage its directory with `filesFromUserFs`. Do not ask
    for the address again and do not re-fetch voting history.
@@ -54,8 +55,9 @@ is last-write-wins.
 
 ## `execute_cli` mapping example
 
-Replace the address before use. This example refreshes public vote history and
-derives a profile. Add existing `preferences.json` and `rules.json` arguments
+Replace the address before use. This Nouns example refreshes public vote history
+and derives a profile. ENS and Railgun use the same storage shape after importing
+normalized history; do not run the Nouns history command for them. Add existing `preferences.json` and `rules.json` arguments
 only when those files were staged and actually exist.
 
 ```json

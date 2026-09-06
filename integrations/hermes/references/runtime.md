@@ -46,10 +46,14 @@ Check readiness before preparing execution:
 ```bash
 gavel execution-status --dao nouns --mode safe-supervised --model-address 0xMODEL
 gavel execution-status --dao nouns --mode waap-autonomous --model-address 0xMODEL
+gavel execution-status --dao ens --mode safe-supervised --model-address 0xMODEL
+gavel execution-status --dao railgun-eth --mode unsigned --model-address 0xMODEL
 ```
 
 If the result reports `redelegationRequired`, disclose both addresses and use
-`gavel prepare-delegation`; that command never submits the change.
+`gavel prepare-delegation` for Nouns or ENS; that command never submits the
+change. Railgun delegation is per stake and is intentionally not handled by the
+generic command.
 
 Safe clients integrate with the proposer-only `SafeSupervisedExecutor` API.
 Gavel does not create a Safe or choose its address; operators configure an
