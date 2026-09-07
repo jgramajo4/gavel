@@ -193,7 +193,7 @@ class EnsDaoAdapter {
   async fetchProposal(proposalId) {
     const requestedId = decimal(proposalId, "proposal id");
     if (typeof this.proposalLoader !== "function") {
-      throw new Error("ENS proposal metadata requires GAVEL_INDEX_API_URL or an indexed proposal loader");
+      throw new Error("ENS proposal metadata requires an indexed proposal loader");
     }
     const indexed = normalizedProposalSchema.parse(await this.proposalLoader(requestedId));
     if (indexed.id !== requestedId || indexed.dao !== "ens" || indexed.chainId !== CHAIN_ID) {

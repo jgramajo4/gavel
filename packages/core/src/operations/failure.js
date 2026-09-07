@@ -1,3 +1,6 @@
+// Raised by the governance index client; matched here without importing it.
+const INDEX_STALE_CODE = "GAVEL_INDEX_STALE";
+
 const STAGES = Object.freeze({
   history: "HISTORY_INGESTION",
   onboard: "PROFILE_CONSTRUCTION",
@@ -22,7 +25,12 @@ function classifyOperationalFailure(command, error) {
   const lowered = message.toLowerCase();
   let category = "SOFTWARE_DEFECT";
   let retryable = false;
-  if (/timeout|http 5\d\d|rpc|network|fetch|socket|econn|rate limit|canonical version could not be verified/.test(lowered)) {
+  // A governance index that is stalled, failing, or missing a checkpoint is an
+  // operational data problem for the caller, not a defect in Gavel. Match the
+  // error code so the wording of each refusal stays free to change.
+  if (error?.code === INDEX_STALE_CODE) {
+    category = "STALE_DATA";
+  } else if (/timeout|http 5\d\d|rpc|network|fetch|socket|econn|rate limit|canonical version could not be verified/.test(lowered)) {
     category = "RETRYABLE_INFRASTRUCTURE";
     retryable = true;
   } else if (/stale|mismatch|already present|earlier than|older than/.test(lowered)) {

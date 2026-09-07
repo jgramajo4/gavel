@@ -85,6 +85,27 @@ evidence.
 ## Network configuration
 
 - Public history/proposal ingestion needs outbound HTTPS.
+- Governance history and proposal metadata come from a Gavel governance index.
+  This needs no setup in Bankr: with nothing configured the CLI reads the public
+  index at `https://index.0773h.com` over ordinary outbound HTTPS. No Env Var,
+  no shared secret, no tunnel, and no private network are involved. This applies
+  to every DAO including Nouns, whose voter history would otherwise cost
+  hundreds of paginated subgraph queries per sandbox run.
+- Chain-backed live checks still use RPC: voting power, delegation, proposal
+  state, and the canonical proposal verification `prepare-vote` performs are
+  never taken from the index.
+- `GAVEL_INDEX_API_URL` is an optional override for an operator who runs their
+  own index, and `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`) tightens
+  the freshness limit. An override must be reachable from a Bankr sandbox, which
+  runs outside any operator network: a loopback- or LAN-bound index is not.
+  Never put credentials in the URL; the client sends no authentication and has
+  no mechanism for it.
+- The index serves public governance data read-only. It is not private voter
+  state and never belongs in `/gavel/data/private/`.
+- Indexed reads gate on checkpoint freshness: a missing checkpoint, a reported
+  sync error, or a stale index fails the command. Report the failing
+  prerequisite and stop; an empty or refused history is not a voter with no
+  votes.
 - Chain-backed commands default to the public `https://eth.drpc.org` endpoint;
   Bankr does not need to provide its own raw RPC URL for the basic workflow.
 - `ETHEREUM_RPC_URL` in Bankr's secure Env Vars settings is an optional advanced

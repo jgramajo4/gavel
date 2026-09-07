@@ -48,7 +48,7 @@ The static Gavel landing page lives in [`website/`](website/). See its
 ## Requirements
 
 - Node.js 20 or newer
-- Network access to Ethereum JSON-RPC; Nouns history also uses its governance subgraph
+- Network access to Ethereum JSON-RPC for live chain reads, and outbound HTTPS to a governance index for history and proposal metadata
 
 ```bash
 npm install
@@ -56,6 +56,8 @@ npm test
 ```
 
 ## Self-hosted governance index
+
+Running an index is optional. Clients read the public index at `https://index.0773h.com` unless `GAVEL_INDEX_API_URL` overrides it, so this section is for operators who want their own.
 
 `packages/governance-index` provides the PostgreSQL backfill/sync worker and read-only API. See its [deployment and operations guide](packages/governance-index/README.md). A local indexed deployment can serve every DAO to the regular CLI:
 
@@ -100,8 +102,8 @@ its submission.
 | DAO | CLI ID | Support |
 | --- | --- | --- |
 | Nouns DAO | `nouns` | History, proposal reads, prediction, vote preparation, delegation |
-| ENS DAO | `ens` | Imported Governor history/proposals, prediction, vote preparation, delegation |
-| Railgun Governance (Ethereum) | `railgun-eth` | Live proposal reads, imported history, binary vote preparation with staking snapshot hints |
+| ENS DAO | `ens` | Indexed Governor history and RPC-verified proposals, prediction, vote preparation, delegation |
+| Railgun Governance (Ethereum) | `railgun-eth` | Live proposal reads, indexed history, binary vote preparation with staking snapshot hints |
 
 ENS Governor and Snapshot records remain separate; Gavel prepares executable ENS
 Governor votes only. Railgun supports FOR/Yay and AGAINST/Nay, has no abstain or
@@ -116,7 +118,9 @@ do not commit a populated `.env` file.
 | Variable | Required when | Meaning |
 | --- | --- | --- |
 | `GAVEL_DATA_DIR` | Recommended for every persistent runtime | Private histories, profiles, policies, proposals, predictions, and prepared transactions |
-| `NOUNS_SUBGRAPH_URL` | Optional | Override the default Nouns governance subgraph |
+| `NOUNS_SUBGRAPH_URL` | Optional | Subgraph used when `--endpoint` opts a Nouns read out of the index, and by the TUI delegate view |
+| `GAVEL_INDEX_API_URL` | Optional override | Private or self-hosted governance index; defaults to the public `https://index.0773h.com`, which every DAO reads. No credentials in this URL |
+| `GAVEL_INDEX_MAX_STALENESS_SECONDS` | Optional | Reject an indexed read once its newest checkpoint is older than this; defaults to `3600` |
 | `ETHEREUM_RPC_URL` | Optional advanced override | Ethereum mainnet JSON-RPC endpoint; defaults to `https://eth.drpc.org` |
 | `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
 | `GAVEL_ASSET_OWNER_ADDRESS` | Delegated voting | Address that owns the Noun or voting power |
@@ -212,6 +216,11 @@ command. Later requests reuse that runtime and data. Users do not clone this
 repository, run `npm ci`, set `GAVEL_DATA_DIR`, or globally link `gavel` for a
 normal installation.
 
+ENS and Railgun workflows need no index configuration: they read the public
+index by default. An operator running their own index exports
+`GAVEL_INDEX_API_URL` in the environment that launches Hermes, and the runner
+passes it through to the pinned runtime.
+
 Container operators still need to persist `HERMES_HOME` or `GAVEL_DATA_DIR` on
 a private volume. Bankr Files, Hermes storage, and Railway volumes are currently
 independent; profile migration requires an explicit private file transfer until
@@ -239,6 +248,39 @@ npm run gavel -- predict "$GAVEL_DATA_DIR/profile.json" "$GAVEL_DATA_DIR/proposa
 npm run gavel -- inspect "$GAVEL_DATA_DIR/proposal-123.json" --stdout
 npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --acknowledge-prediction-review --stdout
 ```
+
+Those history and proposal reads go to the public governance index at
+`https://index.0773h.com` with no configuration, no shared secret, and no
+network setup. Every DAO uses it, Nouns included: a single voter's Nouns history
+is hundreds of paginated subgraph queries, which the index answers in a few
+requests.
+
+```bash
+npm run gavel -- history "$VOTER" --dao ens --output "$GAVEL_DATA_DIR/history.json"
+npm run gavel -- proposal 123 --dao ens --output "$GAVEL_DATA_DIR/proposal-123.json"
+```
+
+Live chain state is never taken from the index. Voting power, delegation,
+proposal state and the canonical proposal verification inside `prepare-vote` are
+read over RPC against the Governor, whatever source produced the document.
+Railgun proposal reads also stay on RPC, being a single live call.
+
+`GAVEL_INDEX_API_URL` selects a private or self-hosted index instead. Put no
+credentials in that URL: the client sends no authentication and has no header or
+token mechanism, so a private index must sit behind a network boundary that
+authenticates for it. `--endpoint` opts a Nouns read back onto a subgraph if the
+index is unavailable.
+
+```bash
+export GAVEL_INDEX_API_URL="http://127.0.0.1:18080"
+npm run gavel -- history "$VOTER" --dao nouns --endpoint https://www.nouns.camp/subgraphs/nouns
+```
+
+Every indexed read gates on checkpoint freshness first: an index with no
+checkpoint, a reported sync error, or a newest checkpoint older than
+`GAVEL_INDEX_MAX_STALENESS_SECONDS` fails the command instead of returning a
+partial history. Treat that failure as a hard stop; an empty indexed history is
+not evidence that a voter has never voted.
 
 The public `https://eth.drpc.org` endpoint is used automatically for the
 chain-backed commands. Set `ETHEREUM_RPC_URL` or pass `--rpc` only when the host
@@ -291,6 +333,13 @@ npm ci
 npm run tui:typecheck
 npm run tui
 ```
+
+The proposal list reads the public governance index, applying the same
+checkpoint-freshness gate as the CLI: a stalled index is reported rather than
+shown as a short list. `GAVEL_INDEX_API_URL` selects a different index, and
+setting it to an empty value opts back to the subgraph. The delegate view always
+reads the subgraph, because delegation ingestion is not implemented in the
+index, and live tallies come from RPC.
 
 The TUI still contains transitional PASS/FAIL prediction, subgraph, ABI, and
 proposal-state modules. They are migration inputs, not canonical Gavel domain

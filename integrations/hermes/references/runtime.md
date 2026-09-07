@@ -44,11 +44,63 @@ immutable runtime directory. Bootstrap never overwrites `GAVEL_DATA_DIR`, so
 updating code and preserving private voter state remain separate operations.
 
 Common non-secret/runtime settings are `NOUNS_SUBGRAPH_URL`,
+`GAVEL_INDEX_API_URL`, `GAVEL_INDEX_MAX_STALENESS_SECONDS`,
 `GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`, `GAVEL_SAFE_ADDRESS`, and
 `GAVEL_WAAP_ADDRESS`. Chain-backed commands default to `https://eth.drpc.org`.
 `ETHEREUM_RPC_URL` or `--rpc` is an optional advanced override; store any RPC
 credentials through Hermes secret facilities and do not persist or echo raw
 private keys.
+
+## Governance index
+
+Governance history comes from a Gavel governance index. No configuration is
+required: clients read the public index at `https://index.0773h.com` by default,
+which needs no endpoint value, no shared secret, and no special network setup.
+Reading an indexed history costs one request per page instead of the hundreds of
+subgraph queries a single Nouns voter's history used to take.
+
+> **Open item:** the public endpoint is being stood up separately from this
+> client change. Until it is serving, ENS and Railgun reads need
+> `GAVEL_INDEX_API_URL` pointing at an operator's index.
+
+Default behavior, with nothing configured:
+
+- `gavel history` reads the public index for every DAO, Nouns included.
+- `gavel proposal --dao nouns` and `--dao ens` read the public index. ENS
+  metadata is live-verified against the Governor over RPC, because only
+  `ProposalCreated` carries the complete description and actions.
+- `gavel proposal --dao railgun-eth` stays on direct contract reads: that is a
+  single live call, not a volume problem.
+- Chain state that must be current — voting power, delegation, proposal state at
+  preparation time, canonical proposal verification — is always read over RPC.
+  `prepare-vote` re-verifies the proposal against the live Governor whatever
+  source produced the document, so an indexed read never weakens it.
+
+`gavel history --dao nouns --endpoint <url>` opts back to a Nouns subgraph if
+the index is unavailable.
+
+`GAVEL_INDEX_API_URL` overrides that default with a private or self-hosted
+index, and then applies to every DAO including Nouns. The runner does not set
+it; export it in the environment that invokes `scripts/gavel.js`, which the
+runtime inherits. It is an endpoint, not voter state, so it belongs in operator
+configuration and never inside `GAVEL_DATA_DIR`.
+
+```bash
+export GAVEL_INDEX_API_URL=http://127.0.0.1:18080
+```
+
+Put no credentials in that URL. The client sends no authentication of any kind
+and has no header or token mechanism today, so a private index must sit behind a
+network boundary that authenticates for it. Adding a client credential requires
+adding that mechanism to `IndexApiClient` first, not encoding a secret in the
+endpoint.
+
+Every indexed read gates on checkpoint freshness first. The CLI refuses to
+build a history document from an index that has no checkpoint, reports a sync
+error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`).
+Report that refusal as a stale or failing index and stop; do not silently fall
+back to another source, and never present an empty indexed history as a voter
+with no votes.
 
 The address roles are independent:
 
