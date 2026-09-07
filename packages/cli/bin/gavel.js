@@ -52,6 +52,7 @@ function usage() {
 Usage:
   gavel history <address> [--dao <nouns|ens|railgun-eth>] [--output <path>] [--stdout]
                          [--endpoint <url>] [--page-size <1-1000>]
+                         (--endpoint reads Nouns from a subgraph instead of the index)
   gavel onboard <address> --answers <json> [--output <path>] [--stdout]
                            [--recorded-at <timestamp>]
   gavel onboard <address> --questions
@@ -119,6 +120,13 @@ async function writePrivateJson(filePath, document) {
   return absolutePath;
 }
 
+// `--endpoint` opts Nouns reads out of the index and back onto a subgraph. Its
+// value is optional: NOUNS_SUBGRAPH_URL, then the public subgraph, fill it in.
+function subgraphEndpoint(value) {
+  const endpoint = typeof value === "string" && value !== "" ? value : null;
+  return endpoint || process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT;
+}
+
 async function historyCommand(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -126,7 +134,7 @@ async function historyCommand(argv) {
     options: {
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
-      endpoint: { type: "string", default: process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT },
+      endpoint: { type: "string" },
       "page-size": { type: "string", default: "100" },
       dao: { type: "string", default: "nouns" },
       help: { type: "boolean", short: "h", default: false },
@@ -142,12 +150,12 @@ async function historyCommand(argv) {
   const voter = getAddress(positionals[0]);
   if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   const pageSize = Number(values["page-size"]);
-  // Nouns keeps its public subgraph unless an operator selects an index. Every
-  // other DAO has no public subgraph, so it reads an index: the operator's when
-  // GAVEL_INDEX_API_URL is set, the public one otherwise.
-  const document = process.env.GAVEL_INDEX_API_URL || values.dao !== "nouns"
-    ? await new IndexApiClient({ pageSize }).fetchHistory(values.dao, voter)
-    : await new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint, pageSize }).fetchHistory(voter);
+  // Every DAO reads the index by default. A Nouns voter's history is hundreds of
+  // paginated subgraph queries per user, which the index answers once; `--endpoint`
+  // is the explicit opt-out back to the subgraph.
+  const document = values.dao === "nouns" && values.endpoint
+    ? await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint), pageSize }).fetchHistory(voter)
+    : await new IndexApiClient({ pageSize }).fetchHistory(values.dao, voter);
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
@@ -387,7 +395,7 @@ async function proposalCommand(argv) {
       dao: { type: "string", default: "nouns" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
-      endpoint: { type: "string", default: process.env.NOUNS_SUBGRAPH_URL || DEFAULT_ENDPOINT },
+      endpoint: { type: "string" },
       rpc: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -403,16 +411,17 @@ async function proposalCommand(argv) {
   let proposal;
   if (values.dao === "ens") {
     // Only `ProposalCreated` carries the complete description and actions, so
-    // ENS always reads an index and live-verifies what it returns over RPC.
+    // ENS reads the index and live-verifies what it returns over RPC.
     const client = new IndexApiClient();
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
-  } else if (process.env.GAVEL_INDEX_API_URL) {
+  } else if (values.dao === "nouns" && values.endpoint) {
+    proposal = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint) }).fetchProposal(positionals[0]);
+  } else if (values.dao === "nouns" || process.env.GAVEL_INDEX_API_URL) {
     proposal = await new IndexApiClient().fetchProposal(values.dao, positionals[0]);
-  } else if (values.dao === "nouns") {
-    const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
-    proposal = await adapter.fetchProposal(positionals[0]);
   } else {
+    // Railgun proposal state is a single live contract read, so it stays on RPC
+    // unless an operator points the CLI at an index.
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await createDaoAdapter(values.dao, provider).fetchProposal(positionals[0]);
   }

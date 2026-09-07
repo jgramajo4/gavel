@@ -12,7 +12,7 @@ prepare-vote, execution-status, and prepare-delegation directly.
 
 DAO-aware commands use `nouns`, `ens`, or `railgun-eth`. Nouns has direct
 subgraph history and proposal ingestion. Railgun has direct Ethereum proposal
-reads. ENS and Railgun vote history, and ENS Governor proposal metadata, come
+reads. Vote history for every DAO, and Nouns and ENS proposal metadata, come
 from a governance index; the CLI live-verifies indexed ENS `ProposalCreated`
 metadata against the Governor before using it. Once history is available,
 analysis, vote preparation, execution readiness, and delegation are the same for
@@ -21,13 +21,17 @@ transaction metadata.
 
 No index configuration is required. Clients read the public index at
 `https://index.0773h.com` by default, so a harness needs no endpoint value, no
-shared secret, and no network setup. (**Open item:** that endpoint is being
-stood up separately from this client contract; until it serves, the reads that
-depend on it need the override below.) `GAVEL_INDEX_API_URL` selects a private
-or self-hosted index instead and then applies to Nouns as well, replacing its
-subgraph reads. Credentials must not be embedded in that URL: the client sends
-no authentication and exposes no header or token mechanism, so a private index
-must sit behind a network boundary that authenticates for it.
+shared secret, and no network setup. `GAVEL_INDEX_API_URL` selects a private or
+self-hosted index instead. Credentials must not be embedded in that URL: the
+client sends no authentication and exposes no header or token mechanism, so a
+private index must sit behind a network boundary that authenticates for it.
+
+The index carries indexed history and proposal metadata only. Anything that must
+be current is read over RPC: voting power, delegation, proposal state, Railgun
+proposal reads, and the canonical proposal verification `prepare-vote` performs
+against the live Governor before producing calldata. An orchestrator therefore
+still needs an Ethereum endpoint. `history --dao nouns --endpoint <url>` opts a
+Nouns read back onto a subgraph when the index is unavailable.
 
 Indexed reads gate on checkpoint freshness before returning anything: an index
 with no checkpoint, a source reporting a sync error, or a newest checkpoint

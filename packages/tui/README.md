@@ -18,8 +18,8 @@ npm run tui
 
 | Variable | Effect |
 | --- | --- |
-| `GAVEL_INDEX_API_URL` | Read the proposal list from a private or self-hosted governance index instead of the public Nouns subgraph |
-| `SUBGRAPH_URL` | Override the Nouns subgraph used when no index is configured, and always used by the delegate view |
+| `GAVEL_INDEX_API_URL` | Governance index for the proposal list. Defaults to the public index; set it empty to opt back to the subgraph |
+| `SUBGRAPH_URL` | Subgraph used by the delegate view, and by the proposal list when the index is opted out |
 | `RPC_URL` | Ethereum endpoint for live tallies and contract reads |
 
 Indexed reads fail closed: an index with no checkpoint, a source reporting a
@@ -27,9 +27,10 @@ sync error, or a checkpoint older than one hour surfaces as an error instead of
 a silently short proposal list. Delegation is not ingested by the index, so the
 delegate view stays on the subgraph.
 
-This package is Nouns-only, and Nouns has a public subgraph, so the TUI has no
-default index endpoint: unset means subgraph. The CLI's public default applies
-to the DAOs that have no public subgraph.
+The proposal list is the batchable, indexed read; live tallies and transaction
+construction stay on RPC. The delegate view stays on the subgraph because the
+index does not ingest delegation. `DEFAULTS.INDEX_API_URL` must match
+`DEFAULT_INDEX_API_URL` in `packages/governance-index`; a test enforces that.
 
 The root `gavel` executable remains the canonical CLI. This package exposes
 `gavel-tui` when built, avoiding a binary-name collision.

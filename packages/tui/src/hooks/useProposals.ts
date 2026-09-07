@@ -1,6 +1,7 @@
 /**
- * Proposal-list state. Reads the self-hosted governance index when one is
- * configured and the public subgraph otherwise, plus a 2-min background refresh
+ * Proposal-list state. Reads the governance index — the public one unless
+ * GAVEL_INDEX_API_URL selects another — falling back to the subgraph only when
+ * that variable is explicitly empty. Refreshes in the background every 2 min
  * (paused when not focused or idle). Sorts active proposals first, then by most
  * recent.
  */
@@ -35,8 +36,8 @@ export function useProposals(focused: boolean, idle: boolean) {
 
   const load = useCallback(async () => {
     try {
-      // A configured index is authoritative: it fails closed on a stalled sync
-      // rather than silently falling back to a different view of the chain.
+      // The index is authoritative: it fails closed on a stalled sync rather
+      // than silently falling back to a different view of the chain.
       const list = config.indexApiUrl
         ? await fetchIndexedProposals(config)
         : await fetchProposals(config);

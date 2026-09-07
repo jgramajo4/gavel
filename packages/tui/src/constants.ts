@@ -56,10 +56,9 @@ export const DEFAULTS = {
   EAS_GRAPHQL_URL: 'https://easscan.org/graphql',
   // gramajo/nouns_proposal_check Gradio Space (DistilBERT outcome model).
   PREDICTION_URL: 'https://gramajo-nouns-proposal-check.hf.space',
-  // Empty means "no operator index selected", which keeps the Nouns proposal
-  // list on the subgraph. The TUI is Nouns-only, so it never falls back to the
-  // public index the CLI uses for DAOs that have no public subgraph.
-  INDEX_API_URL: '',
+  // The public governance index, which answers a proposal list in one request.
+  // Must match DEFAULT_INDEX_API_URL in packages/governance-index.
+  INDEX_API_URL: 'https://index.0773h.com',
 } as const;
 
 /** Matches the CLI's `GAVEL_INDEX_MAX_STALENESS_SECONDS` default. */

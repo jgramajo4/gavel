@@ -53,10 +53,11 @@ private keys.
 
 ## Governance index
 
-Governance history for DAOs without a public subgraph comes from a Gavel
-governance index. No configuration is required: clients read the public index at
-`https://index.0773h.com` by default, which needs no endpoint value, no shared
-secret, and no special network setup.
+Governance history comes from a Gavel governance index. No configuration is
+required: clients read the public index at `https://index.0773h.com` by default,
+which needs no endpoint value, no shared secret, and no special network setup.
+Reading an indexed history costs one request per page instead of the hundreds of
+subgraph queries a single Nouns voter's history used to take.
 
 > **Open item:** the public endpoint is being stood up separately from this
 > client change. Until it is serving, ENS and Railgun reads need
@@ -64,13 +65,19 @@ secret, and no special network setup.
 
 Default behavior, with nothing configured:
 
-- `gavel history --dao ens` and `--dao railgun-eth` read the public index. No
-  public subgraph serves these DAOs, so this is their only source.
-- `gavel proposal --dao ens` resolves `ProposalCreated` metadata from the public
-  index and live-verifies it against the Governor over RPC.
-- `gavel history --dao nouns` and `gavel proposal --dao nouns` keep using the
-  Nouns subgraph; `gavel proposal --dao railgun-eth` keeps using direct contract
-  reads.
+- `gavel history` reads the public index for every DAO, Nouns included.
+- `gavel proposal --dao nouns` and `--dao ens` read the public index. ENS
+  metadata is live-verified against the Governor over RPC, because only
+  `ProposalCreated` carries the complete description and actions.
+- `gavel proposal --dao railgun-eth` stays on direct contract reads: that is a
+  single live call, not a volume problem.
+- Chain state that must be current — voting power, delegation, proposal state at
+  preparation time, canonical proposal verification — is always read over RPC.
+  `prepare-vote` re-verifies the proposal against the live Governor whatever
+  source produced the document, so an indexed read never weakens it.
+
+`gavel history --dao nouns --endpoint <url>` opts back to a Nouns subgraph if
+the index is unavailable.
 
 `GAVEL_INDEX_API_URL` overrides that default with a private or self-hosted
 index, and then applies to every DAO including Nouns. The runner does not set

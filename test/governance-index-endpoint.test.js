@@ -103,6 +103,39 @@ test("a transport failure names the endpoint and how to change it", async () => 
   }
 });
 
+test("Nouns reads the index by default and --endpoint is the subgraph opt-out", async (t) => {
+  const { server, url } = await startStubIndex();
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-nouns-source-"));
+  t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
+  const env = { ...process.env, GAVEL_INDEX_API_URL: url, GAVEL_DATA_DIR: path.join(temporary, "state") };
+
+  // A Nouns history is hundreds of paginated subgraph queries per user; the
+  // index answers it once, so it is the default source.
+  const { stdout } = await execFileAsync(process.execPath, [cli, "history", VOTER, "--dao", "nouns", "--stdout"], {
+    cwd: temporary, encoding: "utf8", env,
+  });
+  const document = JSON.parse(stdout);
+  assert.equal(document.source.kind, "gavel-governance-index");
+  assert.equal(document.source.endpoint, url);
+
+  // `--endpoint` sends the same command back to a subgraph. Pointing it at the
+  // stub proves the opt-out changes transport, without reaching the network.
+  await assert.rejects(
+    execFileAsync(process.execPath, [cli, "history", VOTER, "--dao", "nouns", "--endpoint", `${url}/subgraph`, "--stdout"], {
+      cwd: temporary, encoding: "utf8", env,
+    }),
+    (error) => !/gavel-governance-index/.test(error.stdout || ""),
+    "--endpoint must not fall through to the index",
+  );
+});
+
+test("the TUI default index endpoint matches the client's", () => {
+  const constants = fs.readFileSync(path.join(root, "packages", "tui", "src", "constants.ts"), "utf8");
+  const declared = constants.match(/INDEX_API_URL:\s*'([^']*)'/);
+  assert.ok(declared, "the TUI must declare a default index endpoint");
+  assert.equal(declared[1], DEFAULT_INDEX_API_URL, "TUI and CLI must not drift apart");
+});
+
 test("the ENS adapter reports a missing loader without naming an endpoint variable", async () => {
   const { EnsDaoAdapter } = require("../packages/ens-adapter");
   await assert.rejects(
