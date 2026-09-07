@@ -87,7 +87,7 @@ evidence.
 - Public history/proposal ingestion needs outbound HTTPS.
 - ENS and Railgun history, and ENS Governor proposal metadata, come from a Gavel
   governance index. This needs no setup in Bankr: with nothing configured the
-  CLI reads the public index at `https://index.gavel.vote` over ordinary
+  CLI reads the public index at `https://index.0773h.com` over ordinary
   outbound HTTPS. No Env Var, no shared secret, no tunnel, and no private
   network are involved. Nouns continues to use its public subgraph.
   **Open item:** the public endpoint is being stood up separately, so treat

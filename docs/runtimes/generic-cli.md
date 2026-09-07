@@ -20,7 +20,7 @@ every DAO. ENS Snapshot data is a separate venue and is not accepted as Governor
 transaction metadata.
 
 No index configuration is required. Clients read the public index at
-`https://index.gavel.vote` by default, so a harness needs no endpoint value, no
+`https://index.0773h.com` by default, so a harness needs no endpoint value, no
 shared secret, and no network setup. (**Open item:** that endpoint is being
 stood up separately from this client contract; until it serves, the reads that
 depend on it need the override below.) `GAVEL_INDEX_API_URL` selects a private

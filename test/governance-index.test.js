@@ -318,7 +318,7 @@ test("history fails closed when the index is empty, failing or stale", async () 
 
 test("index client defaults to the public endpoint and treats GAVEL_INDEX_API_URL as an override", async () => {
   const { IndexApiClient, DEFAULT_INDEX_API_URL } = require("../packages/governance-index");
-  assert.equal(DEFAULT_INDEX_API_URL, "https://index.gavel.vote");
+  assert.equal(DEFAULT_INDEX_API_URL, "https://index.0773h.com");
 
   const requested = [];
   const fetch = async (url) => {

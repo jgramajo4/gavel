@@ -450,7 +450,7 @@ Confirmed in code/review:
 - `migrate` reports the role state it verified (`granted`, `skipped`, or `invalid`) and exits 2 unless the least-privilege roles are genuinely in place
 - the CLI refuses to build a history document from an index that has no checkpoint, is reporting a sync error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`
 
-These are self-hosting choices for this deployment, not requirements for using Gavel. Ordinary clients — Bankr, Hermes, BYOH harnesses — read the public index at `https://index.gavel.vote` over plain outbound HTTPS, with no Tailscale, no tunnel, no shared secret, and no network configuration of any kind. Nothing in this section applies to them.
+These are self-hosting choices for this deployment, not requirements for using Gavel. Ordinary clients — Bankr, Hermes, BYOH harnesses — read the public index at `https://index.0773h.com` over plain outbound HTTPS, with no Tailscale, no tunnel, no shared secret, and no network configuration of any kind. Nothing in this section applies to them.
 
 For Terra specifically: expose API ingress through Cloudflare Tunnel or the normal reverse proxy rather than a forwarded router port, and keep admin operations (SSH, `gavel-indexer` commands, database access) on Tailscale/SSH only. Clients that should read this deployment instead of the public index set `GAVEL_INDEX_API_URL` to its base URL. That URL carries no credentials: the client sends no authentication and has no header or token mechanism, so any authentication has to be enforced by the ingress boundary itself.
 

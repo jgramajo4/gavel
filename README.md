@@ -57,7 +57,7 @@ npm test
 
 ## Self-hosted governance index
 
-Running an index is optional. Clients read the public index at `https://index.gavel.vote` unless `GAVEL_INDEX_API_URL` overrides it, so this section is for operators who want their own.
+Running an index is optional. Clients read the public index at `https://index.0773h.com` unless `GAVEL_INDEX_API_URL` overrides it, so this section is for operators who want their own.
 
 `packages/governance-index` provides the PostgreSQL backfill/sync worker and read-only API. See its [deployment and operations guide](packages/governance-index/README.md). A local indexed deployment can serve every DAO to the regular CLI:
 
@@ -119,7 +119,7 @@ do not commit a populated `.env` file.
 | --- | --- | --- |
 | `GAVEL_DATA_DIR` | Recommended for every persistent runtime | Private histories, profiles, policies, proposals, predictions, and prepared transactions |
 | `NOUNS_SUBGRAPH_URL` | Optional | Override the default Nouns governance subgraph |
-| `GAVEL_INDEX_API_URL` | Optional override | Private or self-hosted governance index; defaults to the public `https://index.gavel.vote`, and when set applies to Nouns too. No credentials in this URL |
+| `GAVEL_INDEX_API_URL` | Optional override | Private or self-hosted governance index; defaults to the public `https://index.0773h.com`, and when set applies to Nouns too. No credentials in this URL |
 | `GAVEL_INDEX_MAX_STALENESS_SECONDS` | Optional | Reject an indexed read once its newest checkpoint is older than this; defaults to `3600` |
 | `ETHEREUM_RPC_URL` | Optional advanced override | Ethereum mainnet JSON-RPC endpoint; defaults to `https://eth.drpc.org` |
 | `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
@@ -258,7 +258,7 @@ npm run gavel -- history "$VOTER" --dao ens --output "$GAVEL_DATA_DIR/history.js
 npm run gavel -- proposal 123 --dao ens --output "$GAVEL_DATA_DIR/proposal-123.json"
 ```
 
-> **Open item:** the public endpoint at `https://index.gavel.vote` is being
+> **Open item:** the public endpoint at `https://index.0773h.com` is being
 > stood up separately from the client change. Until it is serving, these
 > zero-config reads are unavailable and need the override below.
 

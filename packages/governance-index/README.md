@@ -103,7 +103,7 @@ Lists use `limit` (1–100) and opaque `cursor` values. The history endpoint is 
 
 ## Client endpoint selection
 
-`IndexApiClient` reads the public index at `https://index.gavel.vote` unless `GAVEL_INDEX_API_URL` is set, so an ordinary user needs no configuration. Point clients at this deployment with `GAVEL_INDEX_API_URL=http://localhost:8080`; that override is the only supported way to select a private or self-hosted index.
+`IndexApiClient` reads the public index at `https://index.0773h.com` unless `GAVEL_INDEX_API_URL` is set, so an ordinary user needs no configuration. Point clients at this deployment with `GAVEL_INDEX_API_URL=http://localhost:8080`; that override is the only supported way to select a private or self-hosted index.
 
 > **Open item:** the public endpoint is a deployment task tracked separately from the client change. Until it is serving, treat zero-config reads as unavailable and set `GAVEL_INDEX_API_URL` explicitly.
 

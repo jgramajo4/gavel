@@ -55,7 +55,7 @@ private keys.
 
 Governance history for DAOs without a public subgraph comes from a Gavel
 governance index. No configuration is required: clients read the public index at
-`https://index.gavel.vote` by default, which needs no endpoint value, no shared
+`https://index.0773h.com` by default, which needs no endpoint value, no shared
 secret, and no special network setup.
 
 > **Open item:** the public endpoint is being stood up separately from this
