@@ -44,11 +44,44 @@ immutable runtime directory. Bootstrap never overwrites `GAVEL_DATA_DIR`, so
 updating code and preserving private voter state remain separate operations.
 
 Common non-secret/runtime settings are `NOUNS_SUBGRAPH_URL`,
+`GAVEL_INDEX_API_URL`, `GAVEL_INDEX_MAX_STALENESS_SECONDS`,
 `GAVEL_MODEL_ADDRESS`, `GAVEL_ASSET_OWNER_ADDRESS`, `GAVEL_SAFE_ADDRESS`, and
 `GAVEL_WAAP_ADDRESS`. Chain-backed commands default to `https://eth.drpc.org`.
 `ETHEREUM_RPC_URL` or `--rpc` is an optional advanced override; store any RPC
 credentials through Hermes secret facilities and do not persist or echo raw
 private keys.
+
+## Governance index
+
+`GAVEL_INDEX_API_URL` points the pinned runtime at a self-hosted governance
+index (`packages/governance-index`). The runner does not set it; export it in
+the environment that invokes `scripts/gavel.js`, which the runtime inherits.
+It is an endpoint, not voter state, so it belongs in operator configuration and
+never inside `GAVEL_DATA_DIR`. Bind the index to loopback or a private network
+and treat any credential embedded in the URL as a secret; Gavel strips
+credentials from recorded provenance, but a shared endpoint value should still
+go through Hermes secret facilities.
+
+```bash
+export GAVEL_INDEX_API_URL=http://127.0.0.1:18080
+```
+
+With it set:
+
+- `gavel history --dao ens` and `--dao railgun-eth` work without a manually
+  staged export; without it they fail, because no public subgraph serves them.
+- `gavel history --dao nouns` reads the index instead of the Nouns subgraph.
+- `gavel proposal --dao ens` resolves indexed `ProposalCreated` metadata and
+  live-verifies it over RPC. Without the index that command fails by design.
+- `gavel proposal --dao nouns` and `--dao railgun-eth` read the index; they
+  still work unset, through the subgraph and direct contract reads.
+
+Every indexed read gates on checkpoint freshness first. The CLI refuses to
+build a history document from an index that has no checkpoint, reports a sync
+error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`).
+Report that refusal as a stale or failing index and stop; do not silently fall
+back to another source, and never present an empty indexed history as a voter
+with no votes.
 
 The address roles are independent:
 

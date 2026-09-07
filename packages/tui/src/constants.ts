@@ -56,7 +56,12 @@ export const DEFAULTS = {
   EAS_GRAPHQL_URL: 'https://easscan.org/graphql',
   // gramajo/nouns_proposal_check Gradio Space (DistilBERT outcome model).
   PREDICTION_URL: 'https://gramajo-nouns-proposal-check.hf.space',
+  // Operator-specific; a self-hosted governance index has no public default.
+  INDEX_API_URL: '',
 } as const;
+
+/** Matches the CLI's `GAVEL_INDEX_MAX_STALENESS_SECONDS` default. */
+export const INDEX_MAX_STALENESS_MS = 3_600_000;
 
 /** Polling cadences (ms), tiered by proposal state — see spec Open Q3. */
 export const POLL_INTERVALS = {

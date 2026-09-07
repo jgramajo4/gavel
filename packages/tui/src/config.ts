@@ -9,6 +9,8 @@ dotenv.config();
 export interface Config {
   rpcUrl: string;
   subgraphUrl: string;
+  /** Base URL of a self-hosted governance index; empty means subgraph reads. */
+  indexApiUrl: string;
   easGraphqlUrl: string;
   predictionUrl: string;
   /** Reserved for a future canonical wallet handoff; never loaded from environment here. */
@@ -19,6 +21,7 @@ export function loadConfig(): Config {
   return {
     rpcUrl: process.env.RPC_URL?.trim() || DEFAULTS.RPC_URL,
     subgraphUrl: process.env.SUBGRAPH_URL?.trim() || DEFAULTS.SUBGRAPH_URL,
+    indexApiUrl: process.env.GAVEL_INDEX_API_URL?.trim() || DEFAULTS.INDEX_API_URL,
     easGraphqlUrl: process.env.EAS_GRAPHQL_URL?.trim() || DEFAULTS.EAS_GRAPHQL_URL,
     predictionUrl: process.env.PREDICTION_URL?.trim() || DEFAULTS.PREDICTION_URL,
     privateKey: undefined,

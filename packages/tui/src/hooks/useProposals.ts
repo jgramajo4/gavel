@@ -1,9 +1,12 @@
 /**
- * Proposal-list state. Subgraph fetch + a 2-min background refresh (paused when
- * not focused or idle). Sorts active proposals first, then by most recent.
+ * Proposal-list state. Reads the self-hosted governance index when one is
+ * configured and the public subgraph otherwise, plus a 2-min background refresh
+ * (paused when not focused or idle). Sorts active proposals first, then by most
+ * recent.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { fetchProposals } from '../data/subgraph.js';
+import { fetchProposals as fetchIndexedProposals } from '../data/governanceIndex.js';
 import { usePolling } from './usePolling.js';
 import { POLL_INTERVALS } from '../constants.js';
 import type { Proposal } from '../types.js';
@@ -32,7 +35,11 @@ export function useProposals(focused: boolean, idle: boolean) {
 
   const load = useCallback(async () => {
     try {
-      const list = await fetchProposals(config);
+      // A configured index is authoritative: it fails closed on a stalled sync
+      // rather than silently falling back to a different view of the chain.
+      const list = config.indexApiUrl
+        ? await fetchIndexedProposals(config)
+        : await fetchProposals(config);
       setProposals(sortProposals(list));
       setLastUpdated(Date.now());
       setError(null);

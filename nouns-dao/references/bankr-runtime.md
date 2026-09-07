@@ -85,6 +85,22 @@ evidence.
 ## Network configuration
 
 - Public history/proposal ingestion needs outbound HTTPS.
+- ENS and Railgun history, and ENS Governor proposal metadata, come from a Gavel
+  governance index. Set `GAVEL_INDEX_API_URL` in Bankr's secure Env Vars to the
+  index base URL, and optionally `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default
+  `3600`). Refer to both by name and never echo their values. Nouns also reads
+  the index when the variable is set and otherwise uses its public subgraph.
+- A Bankr sandbox runs outside the operator's network, so a loopback-bound or
+  LAN-only index is unreachable from it. Reaching one requires the operator to
+  publish an authenticated HTTPS endpoint. Until that exists, say ENS and
+  Railgun workflows are unavailable in this runtime rather than substituting
+  another source.
+- The index serves public governance data read-only. It is not private voter
+  state and never belongs in `/gavel/data/private/`.
+- Indexed reads gate on checkpoint freshness: a missing checkpoint, a reported
+  sync error, or a stale index fails the command. Report the failing
+  prerequisite and stop; an empty or refused history is not a voter with no
+  votes.
 - Chain-backed commands default to the public `https://eth.drpc.org` endpoint;
   Bankr does not need to provide its own raw RPC URL for the basic workflow.
 - `ETHEREUM_RPC_URL` in Bankr's secure Env Vars settings is an optional advanced

@@ -16,16 +16,23 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
 1. Ask for the DAO first when it is not already known, then ask only for the
    voter address. Explain that
    Gavel reads public voting history and never needs a private key.
-2. For Nouns, fetch normalized history:
+2. Fetch normalized history for the selected DAO:
 
    ```bash
-   cd gavel && node bin/gavel.js history 0xVoterAddress --output ../gavel-publish/history.json
+   cd gavel && node bin/gavel.js history 0xVoterAddress --dao <nouns|ens|railgun-eth> \
+     --output ../gavel-publish/history.json
    ```
 
-   For ENS or Railgun, stage a normalized history document exported by a trusted
-   indexer. Keep ENS Governor and Snapshot histories separate, and exclude
-   Railgun sponsorship events. Do not route these DAOs through the Nouns
-   subgraph command.
+   ENS and Railgun require `GAVEL_INDEX_API_URL` in Bankr's Env Vars, pointing
+   at a Gavel governance index; see `bankr-runtime.md` → Network configuration.
+   Nouns reads that same index when the variable is set and falls back to its
+   public subgraph when it is not. Keep ENS Governor and Snapshot histories
+   separate, and exclude Railgun sponsorship events.
+
+   The command fails when the index is unset, has no checkpoint, reports a sync
+   error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`. Report that
+   prerequisite and stop. Do not substitute another source, and never present an
+   empty or refused indexed history as a voter with no votes.
 3. Report the address, DAO, vote count, reason coverage if available after profile
    creation, and private output location. Do not dump historical reasons.
 4. Build the private profile, including any existing policy files:
@@ -80,17 +87,18 @@ override old behavior without erasing the historical record.
 
 ## Analyze a proposal
 
-1. Fetch a fresh normalized proposal by ID. Nouns and Railgun Ethereum can use
-   the CLI directly:
+1. Fetch a fresh normalized proposal by ID:
 
    ```bash
-   cd gavel && node bin/gavel.js proposal 123 --dao <nouns|railgun-eth> --output ../gavel-publish/proposal-123.json
+   cd gavel && node bin/gavel.js proposal 123 --dao <nouns|ens|railgun-eth> --output ../gavel-publish/proposal-123.json
    ```
 
-   ENS currently requires a normalized Governor proposal imported from a trusted
-   event indexer because the complete immutable description and action arrays
-   are emitted in `ProposalCreated`. Do not substitute Snapshot metadata for an
-   executable proposal.
+   ENS requires `GAVEL_INDEX_API_URL`, because the complete immutable
+   description and action arrays are emitted only in `ProposalCreated`; the CLI
+   live-verifies that indexed metadata against the Governor before using it.
+   Nouns and Railgun Ethereum read the index when it is configured and fall back
+   to the Nouns subgraph and direct contract reads when it is not. Do not
+   substitute Snapshot metadata for an executable proposal.
 2. Security-inspect it independently:
 
    ```bash

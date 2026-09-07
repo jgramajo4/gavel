@@ -307,6 +307,13 @@ test("history fails closed when the index is empty, failing or stale", async () 
   const document = await build([{ sourceId: "s", finalizedHead: "12345", updatedAt: fresh, lastError: null }], now).fetchHistory("nouns", ADDRESS);
   assert.equal(document.voteCount, 0);
   assert.equal(document.source.subgraphBlock, "12345", "an empty history reports the verified checkpoint, never block 0");
+
+  // Runtimes that consume structured errors must read a refusal as an
+  // operational data problem, not as a defect in Gavel.
+  const { classifyOperationalFailure } = require("../packages/core/src/operations/failure");
+  const refusal = await build([], now).fetchHistory("nouns", ADDRESS).catch((error) => error);
+  assert.equal(refusal.code, "GAVEL_INDEX_STALE");
+  assert.equal(classifyOperationalFailure("history", refusal).category, "STALE_DATA");
 });
 
 test("index client rejects unknown DAOs and never leaks credentials into provenance", async () => {

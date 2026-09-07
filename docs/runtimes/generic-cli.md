@@ -12,11 +12,22 @@ prepare-vote, execution-status, and prepare-delegation directly.
 
 DAO-aware commands use `nouns`, `ens`, or `railgun-eth`. Nouns has direct
 subgraph history and proposal ingestion. Railgun has direct Ethereum proposal
-reads; normalized vote history can be imported. ENS normalized Governor history
-and proposals can be imported from a trusted event indexer, after which analysis,
-vote preparation, execution readiness, and delegation are available. ENS
-Snapshot data is a separate venue and is not accepted as Governor transaction
-metadata.
+reads. ENS and Railgun vote history, and ENS Governor proposal metadata, come
+from a governance index reached through `GAVEL_INDEX_API_URL`; the CLI
+live-verifies indexed ENS `ProposalCreated` metadata against the Governor before
+using it. Once history is available, analysis, vote preparation, execution
+readiness, and delegation are the same for every DAO. ENS Snapshot data is a
+separate venue and is not accepted as Governor transaction metadata.
+
+`GAVEL_INDEX_API_URL` is optional for Nouns and, when set, replaces subgraph
+reads for it. Indexed reads gate on checkpoint freshness before returning
+anything: an index with no checkpoint, a source reporting a sync error, or a
+newest checkpoint older than `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default
+`3600`) fails the command, and `GAVEL_STRUCTURED_ERRORS=1` reports it under
+category `STALE_DATA`. An orchestrator must treat that as a hard stop, never as
+a voter with no votes, and must not silently fall back to another source.
+`packages/governance-index` ships the worker, schema, and read-only API for
+operators who self-host one.
 
 Railgun vote preparation refuses `ABSTAIN` and reason text, computes the staking
 snapshot hint, and uses all remaining voting power unless `--amount` is supplied.

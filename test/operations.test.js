@@ -9,6 +9,21 @@ test("classifies retryable infrastructure separately from stale and user failure
   assert.deepEqual(classifyOperationalFailure("predict", new Error("profile requires exactly one path")).category, "USER_CORRECTION_REQUIRED");
 });
 
+test("classifies every governance index freshness refusal as stale data", () => {
+  for (const message of [
+    "Governance index has no sync checkpoint for ens.",
+    "Governance index sync for ens is failing (source ens-governor).",
+    "Governance index checkpoint for ens has no usable updatedAt.",
+  ]) {
+    // The client's own error carries this code; see the governance index suite.
+    const error = new Error(message);
+    error.code = "GAVEL_INDEX_STALE";
+    const failure = classifyOperationalFailure("history", error);
+    assert.equal(failure.category, "STALE_DATA", message);
+    assert.equal(failure.retryable, false);
+  }
+});
+
 test("redacts likely secrets and long transaction material from operational messages", () => {
   const message = safeOperationMessage(new Error(`RPC failed ?api_key=secret 0x${"a".repeat(128)}`));
   assert.doesNotMatch(message, /secret/);

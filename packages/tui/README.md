@@ -14,6 +14,19 @@ npm run tui:typecheck
 npm run tui
 ```
 
+## Data sources
+
+| Variable | Effect |
+| --- | --- |
+| `GAVEL_INDEX_API_URL` | Read the proposal list from a self-hosted governance index instead of the public Nouns subgraph |
+| `SUBGRAPH_URL` | Override the Nouns subgraph used when no index is configured, and always used by the delegate view |
+| `RPC_URL` | Ethereum endpoint for live tallies and contract reads |
+
+Indexed reads fail closed: an index with no checkpoint, a source reporting a
+sync error, or a checkpoint older than one hour surfaces as an error instead of
+a silently short proposal list. Delegation is not ingested by the index, so the
+delegate view stays on the subgraph.
+
 The root `gavel` executable remains the canonical CLI. This package exposes
 `gavel-tui` when built, avoiding a binary-name collision.
 

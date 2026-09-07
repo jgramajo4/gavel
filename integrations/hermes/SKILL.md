@@ -24,8 +24,13 @@ For an on-demand governance workflow:
 
 1. Select one of `nouns`, `ens`, or `railgun-eth`; keep each DAO's history and
    profile separate. ENS Snapshot and Governor votes are separate venues.
-2. Fetch or import history and build/load the private profile.
-3. Fetch the canonical proposal, then predict and inspect it. Call an
+2. Fetch history and build/load the private profile. ENS and Railgun history
+   require `GAVEL_INDEX_API_URL` to point at a governance index; Nouns uses it
+   too when it is set. Report an unset, stale, or failing index as a blocked
+   prerequisite and stop. Do not substitute another source, and do not read an
+   empty indexed history as a voter with no votes.
+3. Fetch the canonical proposal, then predict and inspect it. ENS Governor
+   proposals come from the index and are live-verified over RPC. Call an
    uncalibrated value a `heuristic score`, never an accuracy probability. If
    `predictionReview.requiresHumanReview` is true, explain why and keep the
    recommendation advisory.
@@ -53,5 +58,5 @@ Gavel never creates or selects a Safe. The user or operator must configure an
 existing Safe execution address.
 
 Read [references/runtime.md](references/runtime.md) when bootstrap fails,
-overriding state paths, moving a profile between runtimes, configuring address
-roles, or selecting an executor.
+overriding state paths, configuring the governance index, moving a profile
+between runtimes, configuring address roles, or selecting an executor.

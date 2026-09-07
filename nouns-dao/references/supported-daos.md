@@ -7,8 +7,8 @@ one governance system.
 | DAO | CLI ID | Voting model | Current Gavel scope |
 | --- | --- | --- | --- |
 | Nouns DAO | `nouns` | Nouns Governor | History, proposal analysis, vote preparation, delegation |
-| ENS DAO | `ens` | OpenZeppelin Governor on Ethereum | Imported normalized history/proposals, analysis, vote preparation, delegation |
-| Railgun Governance (Ethereum) | `railgun-eth` | Custom Voting + Staking | Live proposal reads, imported history, analysis, binary vote preparation |
+| ENS DAO | `ens` | OpenZeppelin Governor on Ethereum | Indexed history and RPC-verified proposals, analysis, vote preparation, delegation |
+| Railgun Governance (Ethereum) | `railgun-eth` | Custom Voting + Staking | Live proposal reads, indexed history, analysis, binary vote preparation |
 
 ## ENS
 
@@ -17,6 +17,9 @@ ENS has two venues. The executable venue is the Governor at
 contains social votes and elections. Keep their proposal IDs and vote histories
 separate. Gavel's transaction preparation supports the executable Governor
 venue. Do not coerce Snapshot Copeland elections into FOR/AGAINST/ABSTAIN.
+
+ENS Governor history and proposal metadata come from a Gavel governance index
+(`GAVEL_INDEX_API_URL`); there is no public ENS subgraph path in the CLI.
 
 ENS token balance is not voting power. The voting address needs checkpointed
 delegated ENS at the proposal snapshot block. `prepare-delegation --dao ens`
