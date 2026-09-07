@@ -3,6 +3,9 @@ const { historyDocumentSchema, normalizedVoteSchema } = require("../../core/src/
 const { sanitizeEndpoint } = require("./provenance");
 
 const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
+// Public read-only index. Used when no operator override is configured, so an
+// ordinary user needs no endpoint, no shared secret, and no network setup.
+const DEFAULT_INDEX_API_URL = "https://index.gavel.vote";
 const DEFAULT_MAX_STALENESS_MS = 60 * 60 * 1000;
 const MAX_HISTORY_PAGES = 1000;
 
@@ -12,7 +15,11 @@ class IndexStaleError extends Error {
 
 class IndexApiClient {
   constructor(options = {}) {
-    this.baseUrl = String(options.baseUrl || process.env.GAVEL_INDEX_API_URL || "").replace(/\/$/, "");
+    // An explicit base URL or GAVEL_INDEX_API_URL selects a private or
+    // self-hosted index; otherwise reads go to the public one.
+    const configured = String(options.baseUrl || process.env.GAVEL_INDEX_API_URL || "").trim();
+    this.isDefaultEndpoint = configured === "";
+    this.baseUrl = (configured || DEFAULT_INDEX_API_URL).replace(/\/$/, "");
     this.fetch = options.fetch || globalThis.fetch;
     const pageSize = Number(options.pageSize || 100);
     if (!Number.isSafeInteger(pageSize) || pageSize < 1) throw new RangeError("pageSize must be a positive integer");
@@ -25,7 +32,8 @@ class IndexApiClient {
     if (!Number.isFinite(staleness) || staleness <= 0) throw new RangeError("maxStalenessMs must be a positive number");
     this.maxStalenessMs = staleness;
     this.now = options.now || (() => new Date());
-    // Provenance must never carry a credential the operator put in the URL.
+    // Recorded provenance is origin-only: a private endpoint's path and query
+    // never reach a history document.
     this.publicBaseUrl = sanitizeEndpoint(this.baseUrl);
     this._freshness = new Map();
   }
@@ -37,8 +45,17 @@ class IndexApiClient {
   }
 
   async request(path) {
-    const response = await this.fetch(`${this.baseUrl}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`Governance index HTTP ${response.status}`);
+    let response;
+    try {
+      response = await this.fetch(`${this.baseUrl}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      // Name the endpoint that failed. The default one is chosen silently, so a
+      // bare transport error leaves the caller nothing to act on. The sanitized
+      // origin is used so the text can never echo a misconfigured secret.
+      const override = this.isDefaultEndpoint ? "; set GAVEL_INDEX_API_URL to read a different index" : "";
+      throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
+    }
+    if (!response.ok) throw new Error(`Governance index HTTP ${response.status} from ${this.publicBaseUrl}`);
     return response.json();
   }
 
@@ -141,4 +158,4 @@ class IndexApiClient {
   }
 }
 
-module.exports = { IndexApiClient, IndexStaleError };
+module.exports = { IndexApiClient, IndexStaleError, DEFAULT_INDEX_API_URL };

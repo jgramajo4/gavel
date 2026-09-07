@@ -142,11 +142,12 @@ async function historyCommand(argv) {
   const voter = getAddress(positionals[0]);
   if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   const pageSize = Number(values["page-size"]);
-  const adapter = process.env.GAVEL_INDEX_API_URL
-    ? new IndexApiClient({ baseUrl: process.env.GAVEL_INDEX_API_URL, pageSize })
-    : values.dao === "nouns" ? new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint, pageSize }) : null;
-  if (!adapter) throw new Error(`${values.dao} history requires GAVEL_INDEX_API_URL`);
-  const document = process.env.GAVEL_INDEX_API_URL ? await adapter.fetchHistory(values.dao, voter) : await adapter.fetchHistory(voter);
+  // Nouns keeps its public subgraph unless an operator selects an index. Every
+  // other DAO has no public subgraph, so it reads an index: the operator's when
+  // GAVEL_INDEX_API_URL is set, the public one otherwise.
+  const document = process.env.GAVEL_INDEX_API_URL || values.dao !== "nouns"
+    ? await new IndexApiClient({ pageSize }).fetchHistory(values.dao, voter)
+    : await new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint, pageSize }).fetchHistory(voter);
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
@@ -400,19 +401,21 @@ async function proposalCommand(argv) {
   }
   if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
   let proposal;
-  if (process.env.GAVEL_INDEX_API_URL) {
-    const client = new IndexApiClient({ baseUrl: process.env.GAVEL_INDEX_API_URL });
-    if (values.dao === "ens") {
-      const provider = createEthereumProvider({ rpcUrl: values.rpc });
-      proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
-    } else proposal = await client.fetchProposal(values.dao, positionals[0]);
+  if (values.dao === "ens") {
+    // Only `ProposalCreated` carries the complete description and actions, so
+    // ENS always reads an index and live-verifies what it returns over RPC.
+    const client = new IndexApiClient();
+    const provider = createEthereumProvider({ rpcUrl: values.rpc });
+    proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
+  } else if (process.env.GAVEL_INDEX_API_URL) {
+    proposal = await new IndexApiClient().fetchProposal(values.dao, positionals[0]);
   } else if (values.dao === "nouns") {
     const adapter = new NounsSubgraphHistoryAdapter({ endpoint: values.endpoint });
     proposal = await adapter.fetchProposal(positionals[0]);
-  } else if (values.dao === "railgun-eth") {
+  } else {
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await createDaoAdapter(values.dao, provider).fetchProposal(positionals[0]);
-  } else throw new Error("ENS proposal lookup requires GAVEL_INDEX_API_URL so indexed ProposalCreated metadata can be live-verified");
+  }
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
     return;

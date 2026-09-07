@@ -450,7 +450,9 @@ Confirmed in code/review:
 - `migrate` reports the role state it verified (`granted`, `skipped`, or `invalid`) and exits 2 unless the least-privilege roles are genuinely in place
 - the CLI refuses to build a history document from an index that has no checkpoint, is reporting a sync error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`
 
-Terra must put API ingress behind Cloudflare Tunnel or the normal reverse proxy. Admin operations should remain Tailscale/SSH-only.
+These are self-hosting choices for this deployment, not requirements for using Gavel. Ordinary clients — Bankr, Hermes, BYOH harnesses — read the public index at `https://index.gavel.vote` over plain outbound HTTPS, with no Tailscale, no tunnel, no shared secret, and no network configuration of any kind. Nothing in this section applies to them.
+
+For Terra specifically: expose API ingress through Cloudflare Tunnel or the normal reverse proxy rather than a forwarded router port, and keep admin operations (SSH, `gavel-indexer` commands, database access) on Tailscale/SSH only. Clients that should read this deployment instead of the public index set `GAVEL_INDEX_API_URL` to its base URL. That URL carries no credentials: the client sends no authentication and has no header or token mechanism, so any authentication has to be enforced by the ingress boundary itself.
 
 ## 9. Tests
 
@@ -547,7 +549,7 @@ Three gates, in order. None of them may be assumed:
 - [x] Railgun creation block independently verified and pinned to `15505853`
 - [ ] Postgres volume persists and has no host port
 - [ ] API ingress uses Cloudflare Tunnel/reverse proxy; no router forwarding
-- [ ] admin path is SSH/Tailscale only
+- [ ] operator admin path is SSH/Tailscale only (an operator choice; irrelevant to clients using the public index)
 - [ ] migrations complete against real PostgreSQL and report `"roles": "granted"` (exit 0)
 - [ ] `verify-permissions --role gavel_api` exits 0 and reports `"method": "effective"`, `"write": false`, `"ddl": false`
 - [ ] Nouns, ENS, Railgun backfills complete

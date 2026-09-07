@@ -57,6 +57,8 @@ npm test
 
 ## Self-hosted governance index
 
+Running an index is optional. Clients read the public index at `https://index.gavel.vote` unless `GAVEL_INDEX_API_URL` overrides it, so this section is for operators who want their own.
+
 `packages/governance-index` provides the PostgreSQL backfill/sync worker and read-only API. See its [deployment and operations guide](packages/governance-index/README.md). A local indexed deployment can serve every DAO to the regular CLI:
 
 ```bash
@@ -117,7 +119,7 @@ do not commit a populated `.env` file.
 | --- | --- | --- |
 | `GAVEL_DATA_DIR` | Recommended for every persistent runtime | Private histories, profiles, policies, proposals, predictions, and prepared transactions |
 | `NOUNS_SUBGRAPH_URL` | Optional | Override the default Nouns governance subgraph |
-| `GAVEL_INDEX_API_URL` | ENS and Railgun history, ENS Governor proposals | Base URL of a self-hosted governance index; when set, Nouns reads it too |
+| `GAVEL_INDEX_API_URL` | Optional override | Private or self-hosted governance index; defaults to the public `https://index.gavel.vote`, and when set applies to Nouns too. No credentials in this URL |
 | `GAVEL_INDEX_MAX_STALENESS_SECONDS` | Optional | Reject an indexed read once its newest checkpoint is older than this; defaults to `3600` |
 | `ETHEREUM_RPC_URL` | Optional advanced override | Ethereum mainnet JSON-RPC endpoint; defaults to `https://eth.drpc.org` |
 | `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
@@ -214,9 +216,10 @@ command. Later requests reuse that runtime and data. Users do not clone this
 repository, run `npm ci`, set `GAVEL_DATA_DIR`, or globally link `gavel` for a
 normal installation.
 
-Operators that run a governance index export `GAVEL_INDEX_API_URL` in the
-environment that launches Hermes; the runner passes it through to the pinned
-runtime, and ENS and Railgun workflows need it.
+ENS and Railgun workflows need no index configuration: they read the public
+index by default. An operator running their own index exports
+`GAVEL_INDEX_API_URL` in the environment that launches Hermes, and the runner
+passes it through to the pinned runtime.
 
 Container operators still need to persist `HERMES_HOME` or `GAVEL_DATA_DIR` on
 a private volume. Bankr Files, Hermes storage, and Railway volumes are currently
@@ -246,20 +249,31 @@ npm run gavel -- inspect "$GAVEL_DATA_DIR/proposal-123.json" --stdout
 npm run gavel -- prepare-vote "$GAVEL_DATA_DIR/prediction-123.json" "$GAVEL_DATA_DIR/proposal-123.json" --support FOR --reason "Confirmed reason" --acknowledge-prediction-review --stdout
 ```
 
-That example runs against Nouns with no index. ENS and Railgun history, and ENS
-Governor proposal metadata, require a governance index:
+That example runs against Nouns, which uses its public subgraph. ENS and Railgun
+have no public subgraph and read a governance index instead — by default the
+public one, with no configuration, no shared secret, and no network setup:
 
 ```bash
-export GAVEL_INDEX_API_URL="http://127.0.0.1:18080"
-
 npm run gavel -- history "$VOTER" --dao ens --output "$GAVEL_DATA_DIR/history.json"
 npm run gavel -- proposal 123 --dao ens --output "$GAVEL_DATA_DIR/proposal-123.json"
 ```
 
-Setting `GAVEL_INDEX_API_URL` also routes Nouns reads through the index instead
-of the public subgraph. Every indexed read gates on checkpoint freshness first:
-an index with no checkpoint, a reported sync error, or a newest checkpoint older
-than `GAVEL_INDEX_MAX_STALENESS_SECONDS` fails the command instead of returning a
+> **Open item:** the public endpoint at `https://index.gavel.vote` is being
+> stood up separately from the client change. Until it is serving, these
+> zero-config reads are unavailable and need the override below.
+
+`GAVEL_INDEX_API_URL` selects a private or self-hosted index instead, and then
+also routes Nouns reads through it. Put no credentials in that URL: the client
+sends no authentication and has no header or token mechanism, so a private index
+must sit behind a network boundary that authenticates for it.
+
+```bash
+export GAVEL_INDEX_API_URL="http://127.0.0.1:18080"
+```
+
+Every indexed read gates on checkpoint freshness first: an index with no
+checkpoint, a reported sync error, or a newest checkpoint older than
+`GAVEL_INDEX_MAX_STALENESS_SECONDS` fails the command instead of returning a
 partial history. Treat that failure as a hard stop; an empty indexed history is
 not evidence that a voter has never voted.
 
@@ -315,11 +329,11 @@ npm run tui:typecheck
 npm run tui
 ```
 
-Set `GAVEL_INDEX_API_URL` to read the proposal list from a self-hosted
-governance index instead of the public Nouns subgraph; the TUI then applies the
-same checkpoint-freshness gate as the CLI and reports a stalled index rather than
-showing a short list. The delegate view still reads the subgraph, because
-delegation ingestion is not implemented in the index.
+Set `GAVEL_INDEX_API_URL` to read the proposal list from a private or
+self-hosted governance index instead of the public Nouns subgraph; the TUI then
+applies the same checkpoint-freshness gate as the CLI and reports a stalled
+index rather than showing a short list. The delegate view still reads the
+subgraph, because delegation ingestion is not implemented in the index.
 
 The TUI still contains transitional PASS/FAIL prediction, subgraph, ABI, and
 proposal-state modules. They are migration inputs, not canonical Gavel domain

@@ -53,28 +53,40 @@ private keys.
 
 ## Governance index
 
-`GAVEL_INDEX_API_URL` points the pinned runtime at a self-hosted governance
-index (`packages/governance-index`). The runner does not set it; export it in
-the environment that invokes `scripts/gavel.js`, which the runtime inherits.
-It is an endpoint, not voter state, so it belongs in operator configuration and
-never inside `GAVEL_DATA_DIR`. Bind the index to loopback or a private network
-and treat any credential embedded in the URL as a secret; Gavel strips
-credentials from recorded provenance, but a shared endpoint value should still
-go through Hermes secret facilities.
+Governance history for DAOs without a public subgraph comes from a Gavel
+governance index. No configuration is required: clients read the public index at
+`https://index.gavel.vote` by default, which needs no endpoint value, no shared
+secret, and no special network setup.
+
+> **Open item:** the public endpoint is being stood up separately from this
+> client change. Until it is serving, ENS and Railgun reads need
+> `GAVEL_INDEX_API_URL` pointing at an operator's index.
+
+Default behavior, with nothing configured:
+
+- `gavel history --dao ens` and `--dao railgun-eth` read the public index. No
+  public subgraph serves these DAOs, so this is their only source.
+- `gavel proposal --dao ens` resolves `ProposalCreated` metadata from the public
+  index and live-verifies it against the Governor over RPC.
+- `gavel history --dao nouns` and `gavel proposal --dao nouns` keep using the
+  Nouns subgraph; `gavel proposal --dao railgun-eth` keeps using direct contract
+  reads.
+
+`GAVEL_INDEX_API_URL` overrides that default with a private or self-hosted
+index, and then applies to every DAO including Nouns. The runner does not set
+it; export it in the environment that invokes `scripts/gavel.js`, which the
+runtime inherits. It is an endpoint, not voter state, so it belongs in operator
+configuration and never inside `GAVEL_DATA_DIR`.
 
 ```bash
 export GAVEL_INDEX_API_URL=http://127.0.0.1:18080
 ```
 
-With it set:
-
-- `gavel history --dao ens` and `--dao railgun-eth` work without a manually
-  staged export; without it they fail, because no public subgraph serves them.
-- `gavel history --dao nouns` reads the index instead of the Nouns subgraph.
-- `gavel proposal --dao ens` resolves indexed `ProposalCreated` metadata and
-  live-verifies it over RPC. Without the index that command fails by design.
-- `gavel proposal --dao nouns` and `--dao railgun-eth` read the index; they
-  still work unset, through the subgraph and direct contract reads.
+Put no credentials in that URL. The client sends no authentication of any kind
+and has no header or token mechanism today, so a private index must sit behind a
+network boundary that authenticates for it. Adding a client credential requires
+adding that mechanism to `IndexApiClient` first, not encoding a secret in the
+endpoint.
 
 Every indexed read gates on checkpoint freshness first. The CLI refuses to
 build a history document from an index that has no checkpoint, reports a sync

@@ -18,8 +18,8 @@ contains social votes and elections. Keep their proposal IDs and vote histories
 separate. Gavel's transaction preparation supports the executable Governor
 venue. Do not coerce Snapshot Copeland elections into FOR/AGAINST/ABSTAIN.
 
-ENS Governor history and proposal metadata come from a Gavel governance index
-(`GAVEL_INDEX_API_URL`); there is no public ENS subgraph path in the CLI.
+ENS Governor history and proposal metadata come from a Gavel governance index,
+the public one by default; there is no public ENS subgraph path in the CLI.
 
 ENS token balance is not voting power. The voting address needs checkpointed
 delegated ENS at the proposal snapshot block. `prepare-delegation --dao ens`

@@ -99,7 +99,17 @@ curl 'http://localhost:8080/v1/daos/ens/votes?limit=25'
 curl http://localhost:8080/v1/daos/ens/sync-status
 ```
 
-Lists use `limit` (1–100) and opaque `cursor` values. The history endpoint is the paginated indexed-event API consumed by `IndexApiClient`, which joins proposals and validates the existing `historyDocumentSchema`. Configure the normal CLI with `GAVEL_INDEX_API_URL=http://localhost:8080`.
+Lists use `limit` (1–100) and opaque `cursor` values. The history endpoint is the paginated indexed-event API consumed by `IndexApiClient`, which joins proposals and validates the existing `historyDocumentSchema`.
+
+## Client endpoint selection
+
+`IndexApiClient` reads the public index at `https://index.gavel.vote` unless `GAVEL_INDEX_API_URL` is set, so an ordinary user needs no configuration. Point clients at this deployment with `GAVEL_INDEX_API_URL=http://localhost:8080`; that override is the only supported way to select a private or self-hosted index.
+
+> **Open item:** the public endpoint is a deployment task tracked separately from the client change. Until it is serving, treat zero-config reads as unavailable and set `GAVEL_INDEX_API_URL` explicitly.
+
+The client sends no credentials. It has no authentication mechanism today — no bearer token, no API key, no signed request — and credentials must not be embedded in `GAVEL_INDEX_API_URL`: a URL is logged, echoed in error text, and copied between environments far more freely than a secret should be. A private deployment must therefore be reached over a network boundary that authenticates for it (a private network, a reverse proxy performing its own authentication, or an operator-controlled tunnel). If a client-side credential is ever required, it needs a request-header mechanism added to `IndexApiClient` first; do not work around its absence with a URL.
+
+The client strips any userinfo, query and fragment from the endpoint before recording provenance. That is defence against accidental leakage into a history document, not permission to put a secret in the URL.
 
 ## Operations and security
 

@@ -57,7 +57,7 @@ is last-write-wins.
 
 Replace the address before use. This Nouns example refreshes public vote history
 and derives a profile. ENS and Railgun use the same storage shape and the same
-`history --dao` command, which reads the configured governance index. Add
+`history --dao` command, which reads the governance index. Add
 existing `preferences.json` and `rules.json` arguments only when those files were
 staged and actually exist.
 

@@ -25,10 +25,11 @@ For an on-demand governance workflow:
 1. Select one of `nouns`, `ens`, or `railgun-eth`; keep each DAO's history and
    profile separate. ENS Snapshot and Governor votes are separate venues.
 2. Fetch history and build/load the private profile. ENS and Railgun history
-   require `GAVEL_INDEX_API_URL` to point at a governance index; Nouns uses it
-   too when it is set. Report an unset, stale, or failing index as a blocked
-   prerequisite and stop. Do not substitute another source, and do not read an
-   empty indexed history as a voter with no votes.
+   comes from the public governance index with no configuration; Nouns uses its
+   subgraph unless `GAVEL_INDEX_API_URL` selects an operator's index. Report a
+   stale or failing index as a blocked prerequisite and stop. Do not substitute
+   another source, and do not read an empty indexed history as a voter with no
+   votes.
 3. Fetch the canonical proposal, then predict and inspect it. ENS Governor
    proposals come from the index and are live-verified over RPC. Call an
    uncalibrated value a `heuristic score`, never an accuracy probability. If

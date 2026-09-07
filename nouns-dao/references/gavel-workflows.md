@@ -23,14 +23,14 @@ If the user has not selected a path, first follow `interaction-and-formatting.md
      --output ../gavel-publish/history.json
    ```
 
-   ENS and Railgun require `GAVEL_INDEX_API_URL` in Bankr's Env Vars, pointing
-   at a Gavel governance index; see `bankr-runtime.md` → Network configuration.
-   Nouns reads that same index when the variable is set and falls back to its
-   public subgraph when it is not. Keep ENS Governor and Snapshot histories
-   separate, and exclude Railgun sponsorship events.
+   ENS and Railgun read the public Gavel governance index with no configuration;
+   Nouns uses its public subgraph. `GAVEL_INDEX_API_URL` is an optional operator
+   override that redirects every DAO to a private index; see `bankr-runtime.md`
+   → Network configuration. Keep ENS Governor and Snapshot histories separate,
+   and exclude Railgun sponsorship events.
 
-   The command fails when the index is unset, has no checkpoint, reports a sync
-   error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`. Report that
+   The command fails when the index has no checkpoint, reports a sync error, or
+   is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`. Report that failing
    prerequisite and stop. Do not substitute another source, and never present an
    empty or refused indexed history as a voter with no votes.
 3. Report the address, DAO, vote count, reason coverage if available after profile
@@ -93,11 +93,11 @@ override old behavior without erasing the historical record.
    cd gavel && node bin/gavel.js proposal 123 --dao <nouns|ens|railgun-eth> --output ../gavel-publish/proposal-123.json
    ```
 
-   ENS requires `GAVEL_INDEX_API_URL`, because the complete immutable
-   description and action arrays are emitted only in `ProposalCreated`; the CLI
+   ENS reads the governance index, because the complete immutable description
+   and action arrays are emitted only in `ProposalCreated`; the CLI
    live-verifies that indexed metadata against the Governor before using it.
-   Nouns and Railgun Ethereum read the index when it is configured and fall back
-   to the Nouns subgraph and direct contract reads when it is not. Do not
+   Nouns uses its subgraph and Railgun Ethereum uses direct contract reads,
+   unless `GAVEL_INDEX_API_URL` redirects them to an operator's index. Do not
    substitute Snapshot metadata for an executable proposal.
 2. Security-inspect it independently:
 

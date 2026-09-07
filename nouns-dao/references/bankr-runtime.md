@@ -86,15 +86,18 @@ evidence.
 
 - Public history/proposal ingestion needs outbound HTTPS.
 - ENS and Railgun history, and ENS Governor proposal metadata, come from a Gavel
-  governance index. Set `GAVEL_INDEX_API_URL` in Bankr's secure Env Vars to the
-  index base URL, and optionally `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default
-  `3600`). Refer to both by name and never echo their values. Nouns also reads
-  the index when the variable is set and otherwise uses its public subgraph.
-- A Bankr sandbox runs outside the operator's network, so a loopback-bound or
-  LAN-only index is unreachable from it. Reaching one requires the operator to
-  publish an authenticated HTTPS endpoint. Until that exists, say ENS and
-  Railgun workflows are unavailable in this runtime rather than substituting
-  another source.
+  governance index. This needs no setup in Bankr: with nothing configured the
+  CLI reads the public index at `https://index.gavel.vote` over ordinary
+  outbound HTTPS. No Env Var, no shared secret, no tunnel, and no private
+  network are involved. Nouns continues to use its public subgraph.
+  **Open item:** the public endpoint is being stood up separately, so treat
+  zero-config ENS and Railgun reads as unavailable until it is serving.
+- `GAVEL_INDEX_API_URL` is an optional override for an operator who runs their
+  own index, and `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`) tightens
+  the freshness limit. An override must be reachable from a Bankr sandbox, which
+  runs outside any operator network: a loopback- or LAN-bound index is not.
+  Never put credentials in the URL; the client sends no authentication and has
+  no mechanism for it.
 - The index serves public governance data read-only. It is not private voter
   state and never belongs in `/gavel/data/private/`.
 - Indexed reads gate on checkpoint freshness: a missing checkpoint, a reported

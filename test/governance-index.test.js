@@ -316,6 +316,50 @@ test("history fails closed when the index is empty, failing or stale", async () 
   assert.equal(classifyOperationalFailure("history", refusal).category, "STALE_DATA");
 });
 
+test("index client defaults to the public endpoint and treats GAVEL_INDEX_API_URL as an override", async () => {
+  const { IndexApiClient, DEFAULT_INDEX_API_URL } = require("../packages/governance-index");
+  assert.equal(DEFAULT_INDEX_API_URL, "https://index.gavel.vote");
+
+  const requested = [];
+  const fetch = async (url) => {
+    requested.push(url);
+    return { ok: true, status: 200, async json() {
+      if (url.includes("/sync-status")) return { sources: [{ sourceId: "s", finalizedHead: "7", updatedAt: new Date().toISOString(), lastError: null }] };
+      return { items: [], nextCursor: null };
+    } };
+  };
+  const previous = process.env.GAVEL_INDEX_API_URL;
+  try {
+    // Unset: an ordinary user reaches the public index with no configuration.
+    delete process.env.GAVEL_INDEX_API_URL;
+    const fallback = new IndexApiClient({ fetch });
+    assert.equal(fallback.baseUrl, DEFAULT_INDEX_API_URL);
+    assert.equal(fallback.isDefaultEndpoint, true);
+    const document = await fallback.fetchHistory("ens", ADDRESS);
+    assert.equal(document.source.endpoint, DEFAULT_INDEX_API_URL);
+    assert.ok(requested.every((url) => url.startsWith(`${DEFAULT_INDEX_API_URL}/`)), requested.join(" "));
+
+    // Set: the operator's index is used verbatim, trailing slash trimmed.
+    process.env.GAVEL_INDEX_API_URL = "http://127.0.0.1:18080/";
+    const override = new IndexApiClient({ fetch });
+    assert.equal(override.baseUrl, "http://127.0.0.1:18080");
+    assert.equal(override.isDefaultEndpoint, false);
+
+    // An explicit base URL still wins over the environment.
+    assert.equal(new IndexApiClient({ fetch, baseUrl: "https://index.example" }).baseUrl, "https://index.example");
+
+    // A malformed override is refused rather than silently replaced.
+    process.env.GAVEL_INDEX_API_URL = "not-a-url";
+    assert.throws(() => new IndexApiClient({ fetch }), /must be an HTTP\(S\) URL/);
+  } finally {
+    if (previous === undefined) delete process.env.GAVEL_INDEX_API_URL;
+    else process.env.GAVEL_INDEX_API_URL = previous;
+  }
+});
+
+// Credentials do not belong in an index URL and no documentation offers them as
+// an option; this proves that a misconfigured endpoint still cannot leak one
+// into a stored history document.
 test("index client rejects unknown DAOs and never leaks credentials into provenance", async () => {
   const { IndexApiClient } = require("../packages/governance-index");
   const client = new IndexApiClient({
