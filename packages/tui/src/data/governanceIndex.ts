@@ -11,13 +11,25 @@ import type { Config } from '../config.js';
 import type { Proposal, ProposalStatus } from '../types.js';
 import { INDEX_MAX_STALENESS_MS } from '../constants.js';
 
-/** Normalized proposal document served by `/v1/daos/<dao>/proposals`. */
+/**
+ * Normalized proposal document served by `/v1/daos/<dao>/proposals`.
+ *
+ * `state` is the raw upstream value and can be stale -- the Nouns subgraph
+ * reports `ACTIVE` for proposals that lost their vote months ago. Read
+ * `effectiveStatus`, which is what the indexer derived from the voting window,
+ * the finalized block and the tallies. Both are optional here only so an older
+ * index still renders.
+ */
 interface IndexedProposal {
   id: string;
   title: string;
   description: string;
   proposer: string;
   state: string;
+  sourceState?: string;
+  effectiveStatus?: string;
+  outcome?: string;
+  trackingState?: 'HOT' | 'WARM' | 'FINAL';
   startBlock: string;
   endBlock: string;
   quorumVotes: string;
@@ -56,7 +68,7 @@ async function request<T>(config: Config, path: string): Promise<T> {
 function mapStatus(raw: string): ProposalStatus {
   const s = raw.toUpperCase();
   const known: ProposalStatus[] = [
-    'PENDING', 'ACTIVE', 'CANCELLED', 'VETOED', 'QUEUED',
+    'PENDING', 'ACTIVE', 'CANCELLED', 'VETOED', 'SUCCEEDED', 'QUEUED',
     'EXECUTED', 'DEFEATED', 'EXPIRED', 'UPDATABLE', 'OBJECTION_PERIOD',
   ];
   return (known.find((k) => k === s) ?? 'PENDING') as ProposalStatus;
@@ -118,7 +130,7 @@ export async function fetchProposals(
     title: (p.title ?? `Proposal ${p.id}`).trim() || `Proposal ${p.id}`,
     description: p.description ?? '',
     proposer: p.proposer ?? '',
-    status: mapStatus(p.state),
+    status: mapStatus(p.effectiveStatus ?? p.outcome ?? p.state),
     forVotes: BigInt(p.forVotes ?? '0'),
     againstVotes: BigInt(p.againstVotes ?? '0'),
     abstainVotes: BigInt(p.abstainVotes ?? '0'),

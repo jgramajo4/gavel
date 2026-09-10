@@ -4,7 +4,7 @@ A self-hosted, read-only PostgreSQL index for Nouns, ENS and Railgun Ethereum go
 
 ## Configure
 
-Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH` (default 64), `INDEXER_BLOCK_BATCH_SIZE` (default 5000), `ENS_PROPOSAL_BLOCK_BATCH_SIZE` (optional ENS-only override), `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `INDEXER_FULL_SCAN_INTERVAL_SECONDS` (default 21600), `INDEXER_MAX_CHECKPOINT_AGE_SECONDS` (default 900), `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default 3600), `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
+Copy `.env.example` to `.env`. PostgreSQL accepts either `DATABASE_URL` or libpq's native `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`. Compose creates three roles: the bootstrap `gavel` owner for migrations, `gavel_indexer` for ingestion, and SELECT-only `gavel_api` for the HTTP service. Set distinct strong values for `POSTGRES_PASSWORD`, `GAVEL_INDEXER_DB_PASSWORD`, and `GAVEL_API_DB_PASSWORD`. Other variables are `ETHEREUM_RPC_URL`, `INDEXER_ENABLED_DAOS`, `INDEXER_CONFIRMATION_DEPTH` (default 64), `INDEXER_BLOCK_BATCH_SIZE` (default 5000), `ENS_PROPOSAL_BLOCK_BATCH_SIZE` (optional ENS-only override), `INDEXER_RPC_CONCURRENCY`, `INDEXER_DB_POOL_SIZE`, `INDEXER_FULL_SCAN_INTERVAL_SECONDS` (default 21600), `INDEXER_WARM_REFRESH_SECONDS` (default 900), `INDEXER_MAX_CHECKPOINT_AGE_SECONDS` (default 900), `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default 3600), `API_HOST`, `API_PORT`, and `LOG_LEVEL`. `TALLY_API_KEY` and `TALLY_API_URL` are reserved; Tally ingestion is **not implemented**. Railgun defaults to its verified Voting creation block `15505853`; `RAILGUN_FROM_BLOCK` is an optional override. Nouns depends on the Nouns Camp subgraph. ENS uses canonical Governor logs from the documented safe lower bound 13699665.
 
 ### Block ranges and RPC portability
 
@@ -50,11 +50,87 @@ npm run indexer -- sync --all
 npm run indexer -- status
 npm run indexer -- health
 npm run indexer -- sync --all --full
-npm run indexer -- reconcile --dao ens
+npm run indexer -- reconcile --dao nouns
 npm run indexer -- serve
 ```
 
-`backfill` performs a **full** proposal enumeration; `sync` performs an **incremental** one unless `--full` is passed or `INDEXER_FULL_SCAN_INTERVAL_SECONDS` has elapsed since the last full pass. Only a full enumeration is authoritative about which proposals exist, so only a full pass may delete indexed rows; an incremental pass discovers proposals created in the synced block range and re-reads mutable state solely for proposals that are not in a terminal state. This is what keeps a steady-state cycle from rescanning DAO history.
+`backfill` performs a **full** proposal enumeration; `sync` performs an **incremental** one unless `--full` is passed or `INDEXER_FULL_SCAN_INTERVAL_SECONDS` has elapsed since the last full pass. Only a full enumeration is authoritative about which proposals exist, so only a full pass may delete indexed rows; an incremental pass discovers proposals created in the synced block range and re-reads mutable state solely for proposals Gavel still tracks as changeable. This is what keeps a steady-state cycle from rescanning DAO history.
+
+## Proposal status: source, effective, tracking
+
+Three things are kept apart, and confusing them is what made a defeated Nouns
+proposal look live for months.
+
+| Concept | Field | Meaning |
+|---|---|---|
+| Source/raw state | `state`, `sourceState` (`proposals.proposal_status`) | Exactly what the upstream subgraph/API/Governor reported. Preserved for provenance and debugging. **Not authoritative.** |
+| Effective/canonical status | `effectiveStatus`, `outcome` (`proposals.effective_status`) | What Gavel believes, derived from the voting window, the finalized block, the tallies and quorum, and the lifecycle events the source does report. **This is what consumers should read.** |
+| Tracking state | `trackingState` (`proposals.tracking_state`) | How closely the indexer still needs to observe the proposal: `HOT`, `WARM` or `FINAL`. |
+
+`state` and `outcome` keep the exact meanings they already had, so nothing
+external shifts underneath a consumer; `sourceState` and `effectiveStatus` name
+those meanings unambiguously, and `trackingState` is new.
+
+| Tracking state | Covers | Refresh cadence |
+|---|---|---|
+| `HOT` | updatable, pending, active voting, objection period, and any label Gavel does not model | every cycle |
+| `WARM` | succeeded, queued -- won the vote, can still be queued, executed, vetoed or expired | at most once per `INDEXER_WARM_REFRESH_SECONDS` |
+| `FINAL` | defeated, executed, cancelled, vetoed, expired, sponsorship-expired | never re-read; only reconciliation touches it |
+
+The derivation lives in one place, `packages/core/src/governance/lifecycle.js`,
+and every proposal the indexer persists passes through it, whichever path
+produced it. So an incremental cycle terminalizes a proposal by itself:
+
+```
+sourceState  = ACTIVE        (the Nouns subgraph never advances this)
+endBlock     finalized
+tallies      imply defeat
+=> effectiveStatus = DEFEATED, trackingState = FINAL
+```
+
+Gavel only overrides a source on the one transition a source can fail to
+observe: a voting window that closed without an event. A source reporting
+`SUCCEEDED`, `QUEUED` or any terminal status is believed, an `UNKNOWN` record
+that has not been read yet is never derived from its placeholder tallies, and a
+timestamp-timed venue (Railgun) is left to its own adapter.
+
+### Why this matters for cost
+
+The Nouns subgraph's `status` enum only advances on an explicit governance event,
+so a proposal that simply ran out of voting time and lost is reported `ACTIVE`
+for the rest of the DAO's life. Planning the refresh set from that value meant
+roughly half of all Nouns history was re-read on every cycle and grew forever.
+For a ~996-proposal Nouns index the modelled steady state is:
+
+| | proposals refreshed | upstream requests/cycle | historical proposals touched |
+|---|---|---|---|
+| before, incremental cycle | ~499 | ~6 | ~499 |
+| before, 6-hourly full sweep | 996 | 2 | 996 |
+| after, incremental cycle | ~4 | 2 | ~4 |
+| after, reconciliation (on demand) | 996 | 2 | 996 |
+
+### Observability
+
+`gavel-indexer status` reports a `tracking` census per DAO. Each cycle logs one
+`proposal_refresh_plan` line (`upstreamRefresh`, `locallyTerminalized`), and a
+`proposal_finalized` / `proposal_lifecycle_changed` line **only** for proposals
+whose canonical status actually moved, carrying `sourceState`,
+`effectiveStatus`, `trackingState`, `lifecycleReason` and `refreshReason`.
+Immutable proposals log nothing.
+
+### Reconciliation
+
+`reconcile --dao <dao>` runs a full enumeration for any enabled DAO: bootstrap,
+repair, migration, and the disappearance check that removes a proposal upstream
+no longer serves. For ENS it additionally runs the canonical per-proposal audit
+it always has. It is the exceptional path -- ordinary lifecycle correctness does
+not depend on it, and a recently ended proposal reaches its final status through
+incremental processing.
+
+Residual: a Nouns proposal that was queued and then expired without an execution
+or veto event keeps a stale `QUEUED` source status, so it stays `WARM` rather
+than becoming `FINAL`. Gavel does not index the timelock `eta`, so it cannot
+derive expiry. The `WARM` cadence bounds what that costs.
 
 `backfill --dao nouns` paginates Nouns subgraph votes and independently enumerates every proposal at one pinned snapshot, preserving immutable source records while refreshing mutable status and tallies. ENS ProposalCreated and VoteCast logs persist proposals and votes; a VoteCast with unavailable ProposalCreated metadata remains stored but cannot form a complete history document until its proposal exists. Railgun VoteCast ingestion calls the existing `RailgunDaoAdapter.fetchProposal` and persists the materialized proposal. Delegation tables/API counts exist, but delegation ingestion is not implemented (coverage is PARTIAL).
 

@@ -1,9 +1,12 @@
 const { DAO_CONFIGS } = require("./config");
 const { redactErrorMessage } = require("./redaction");
+const { applyGovernanceLifecycle, TrackingState } = require("../../core/src/governance/lifecycle");
 const { DEFAULT_LOG_BLOCK_BATCH_SIZE, blockRanges, parseBlockBatchSize } = require("../../core/src/rpc/block-range");
 
+const DEFAULT_WARM_REFRESH_MS = 15 * 60 * 1000;
+
 class GovernanceSyncWorker {
-  constructor({ store, sources, batchSize = DEFAULT_LOG_BLOCK_BATCH_SIZE, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, logger = null }) { this.store = store; this.sources = sources; this.batchSize = parseBlockBatchSize(batchSize, "batchSize"); this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); }
+  constructor({ store, sources, batchSize = DEFAULT_LOG_BLOCK_BATCH_SIZE, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, warmRefreshIntervalMs = DEFAULT_WARM_REFRESH_MS, logger = null }) { this.store = store; this.sources = sources; this.batchSize = parseBlockBatchSize(batchSize, "batchSize"); this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.warmRefreshIntervalMs = Number(warmRefreshIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); if (!Number.isFinite(this.warmRefreshIntervalMs) || this.warmRefreshIntervalMs < 0) throw new RangeError("warmRefreshIntervalMs must be a non-negative number"); }
   async syncDao(daoId, options = {}) {
     const source = this.sources[daoId]; if (!source) throw new Error(`No source configured for ${daoId}`);
     const run = () => this._syncDao(daoId, source, options);
@@ -17,9 +20,74 @@ class GovernanceSyncWorker {
     return !Number.isFinite(age) || age >= this.fullScanIntervalMs;
   }
 
+  /**
+   * The single canonical derivation point. Every proposal the indexer is about
+   * to persist passes through here, whichever path produced it: incremental
+   * discovery, incremental refresh, or full enumeration. Sources report; only
+   * this decides what Gavel believes and how closely it keeps watching.
+   */
+  _deriveProposal(proposal, finalizedBlock) {
+    if (!proposal?.normalized) return proposal;
+    return {
+      ...proposal,
+      normalized: applyGovernanceLifecycle(proposal.normalized, { finalizedBlock }),
+      lastObservedBlock: String(finalizedBlock),
+    };
+  }
+
+  /**
+   * Re-derives each candidate against the height its stored tallies were read
+   * at, and terminalizes the ones that are canonically done without spending an
+   * upstream request. In ordinary operation this is a no-op, because a proposal
+   * refreshed past its deadline was already terminalized on write. It matters
+   * after a restore, a migration, or an index written by an older build, where
+   * it collapses a stale hot set on the first cycle instead of over hours of
+   * upstream refreshes.
+   */
+  _planProposalRefresh(daoId, context) {
+    const refreshProposals = [];
+    const terminalized = [];
+    for (const row of context.refreshProposals || []) {
+      const observedBlock = row.lastObservedBlock;
+      const derived = observedBlock == null || !row.normalized
+        ? null
+        : applyGovernanceLifecycle(row.normalized, { finalizedBlock: observedBlock });
+      if (derived?.trackingState === TrackingState.FINAL) {
+        terminalized.push({ daoId, proposalId: row.proposalId, contentHash: row.contentHash, normalized: derived, lastObservedBlock: String(observedBlock) });
+      } else {
+        refreshProposals.push(row);
+      }
+    }
+    return { ...context, refreshProposals, terminalized };
+  }
+
   async _proposalContext(daoId, full) {
-    if (full || typeof this.store.getProposalSyncContext !== "function") return { refreshProposals: [], maxProposalId: null };
-    return this.store.getProposalSyncContext(daoId);
+    if (full || typeof this.store.getProposalSyncContext !== "function") return { refreshProposals: [], maxProposalId: null, terminalized: [] };
+    const context = await this.store.getProposalSyncContext(daoId, { warmRefreshIntervalMs: this.warmRefreshIntervalMs });
+    return this._planProposalRefresh(daoId, context);
+  }
+
+  /**
+   * One line per proposal whose canonical status moved, and never a line for the
+   * immutable majority. A steady Nouns cycle therefore logs a handful of records,
+   * not a few hundred.
+   */
+  _logLifecycleChange(daoId, previous, proposal, reason) {
+    const next = proposal?.normalized;
+    if (!next) return;
+    if (previous && previous.effectiveStatus === next.effectiveStatus && previous.trackingState === next.trackingState) return;
+    this.logger.info({
+      event: next.trackingState === TrackingState.FINAL ? "proposal_finalized" : "proposal_lifecycle_changed",
+      dao: daoId,
+      proposalId: proposal.proposalId,
+      sourceState: next.sourceState,
+      effectiveStatus: next.effectiveStatus,
+      trackingState: next.trackingState,
+      previousEffectiveStatus: previous?.effectiveStatus ?? null,
+      previousTrackingState: previous?.trackingState ?? null,
+      lifecycleReason: next.lifecycleReason,
+      refreshReason: reason,
+    });
   }
 
   async _syncDao(daoId, source, options) {
@@ -37,6 +105,16 @@ class GovernanceSyncWorker {
     // disappeared, so it is also the only pass allowed to reconcile deletions.
     const full = this._shouldFullScan(checkpoint, options);
     const proposalContext = { full, ...(await this._proposalContext(daoId, full)) };
+    const previousLifecycle = new Map((proposalContext.refreshProposals || []).map((row) => [String(row.proposalId), { effectiveStatus: row.effectiveStatus ?? row.normalized?.effectiveStatus ?? null, trackingState: row.trackingState ?? row.normalized?.trackingState ?? null }]));
+    this.logger.info({ event: "proposal_refresh_plan", dao: daoId, source: source.id, mode: full ? "full" : "incremental", head: finalHead, upstreamRefresh: proposalContext.refreshProposals.length, locallyTerminalized: proposalContext.terminalized.length });
+    // Terminalization is committed before any upstream call so a source outage
+    // cannot keep a canonically dead proposal in the hot set.
+    if (proposalContext.terminalized.length) await this.store.transaction(async (tx) => {
+      for (const proposal of proposalContext.terminalized) {
+        await tx.upsertProposal(proposal);
+        this._logLifecycleChange(daoId, null, proposal, "stored_tallies_finalized");
+      }
+    });
     let fetchedProposals = [];
     try {
       fetchedProposals = enumeratesProposals ? await source.fetchProposals(start, finalHead, finalHead, proposalContext) : [];
@@ -55,7 +133,7 @@ class GovernanceSyncWorker {
         while (true) { try { logs = await source.fetchRange(from, to, finalHead); break; } catch (error) { if (++attempt >= this.retries) throw error; this.logger.warn({ event: "sync_retry", dao: daoId, source: source.id, fromBlock: from, toBlock: to, attempt, error: redactErrorMessage(error) }); await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1))); } }
         const normalized = [];
         for (let index = 0; index < logs.length; index += this.concurrency) normalized.push(...await Promise.all(logs.slice(index, index + this.concurrency).map((entry) => source.normalizeLog(entry, finalHead))));
-        const canonicalRecords = normalized;
+        const canonicalRecords = normalized.map((record) => (record?.proposal ? { ...record, proposal: this._deriveProposal(record.proposal, finalHead) } : record));
         await this.store.transaction(async (tx) => {
           if (tx.reconcileRange) await tx.reconcileRange({ daoId, sourceId: source.id, fromBlock: from, toBlock: to, records: canonicalRecords });
           for (const row of canonicalRecords) if (await tx.ingest(row)) records += 1;
@@ -72,14 +150,22 @@ class GovernanceSyncWorker {
     // Replay canonical event placement first. Proposal enumeration is then the
     // authoritative finalized-head refresh for mutable state and tallies.
     if (enumeratesProposals) await this.store.transaction(async (tx) => {
-      for (const proposal of materializedProposals) await tx.upsertProposal(proposal.proposal || proposal);
+      for (const proposal of materializedProposals) {
+        const derived = this._deriveProposal(proposal.proposal || proposal, finalHead);
+        await tx.upsertProposal(derived);
+        this._logLifecycleChange(daoId, previousLifecycle.get(String(derived.proposalId)), derived, full ? "full_enumeration" : "incremental_refresh");
+      }
+      const derivedRecords = proposalRecords.map((record) => ({ ...record, proposal: this._deriveProposal(record.proposal, finalHead) }));
       // Only a full enumeration is authoritative about which proposals exist.
-      if (full && tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: proposalRecords });
-      for (const row of proposalRecords) if (await tx.ingest(row)) records += 1;
+      if (full && tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: derivedRecords });
+      for (const row of derivedRecords) {
+        if (await tx.ingest(row)) records += 1;
+        this._logLifecycleChange(daoId, previousLifecycle.get(String(row.proposal?.proposalId)), row.proposal, full ? "full_enumeration" : "incremental_refresh");
+      }
       if (full) await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: Math.max(finalHead + 1, Number(checkpoint?.nextBlock || 0)), finalizedHead: finalHead, updatedAt: new Date().toISOString(), lastFullScanAt: new Date().toISOString(), lastError: null });
     });
-    return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records, fullProposalScan: full };
+    return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records, fullProposalScan: full, proposalsRefreshed: proposalRecords.length + materializedProposals.length, proposalsTerminalizedLocally: proposalContext.terminalized.length };
   }
   async syncAll(options = {}) { const results = []; for (const daoId of Object.keys(this.sources)) results.push(await this.syncDao(daoId, options)); return results; }
 }
-module.exports = { GovernanceSyncWorker };
+module.exports = { GovernanceSyncWorker, DEFAULT_WARM_REFRESH_MS };

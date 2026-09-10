@@ -127,6 +127,40 @@ test("migration applies against a real PostgreSQL server", { skip }, async () =>
     ]);
     const applied = (await store.pool.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((row) => row.version);
     assert.ok(applied.includes("001_initial"));
+    assert.ok(applied.includes("003_proposal_lifecycle"));
+  } finally { await store.close(); }
+});
+
+test("the lifecycle migration backfills tracking state from the already-derived outcome", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    // An index written before the lifecycle model: `outcome` already held the
+    // right verdict, `proposal_status` held the stale upstream one, and only the
+    // latter was ever consulted.
+    const rows = [
+      ["992", "ACTIVE", "DEFEATED", "FINAL"],
+      ["994", "CANCELLED", "CANCELLED", "FINAL"],
+      ["995", "ACTIVE", "DEFEATED", "FINAL"],
+      ["996", "PENDING", "PENDING", "HOT"],
+      ["997", "ACTIVE", "SUCCEEDED", "WARM"],
+    ];
+    for (const [id, status, outcome] of rows) {
+      await store.pool.query(`
+        INSERT INTO proposals(dao_id,proposal_id,content_hash,proposal_status,outcome,normalized,lifecycle_reason)
+        VALUES('ens',$1,$2,$3,$4,'{}'::jsonb,NULL)
+      `, [id, "a".repeat(64), status, outcome]);
+    }
+    await store.pool.query(await require("node:fs/promises").readFile(
+      require("node:path").join(__dirname, "..", "packages", "governance-index", "migrations", "003_proposal_lifecycle.sql"), "utf8",
+    ));
+    const migrated = (await store.pool.query(
+      "SELECT proposal_id::text AS id,proposal_status,effective_status,tracking_state FROM proposals WHERE dao_id='ens' ORDER BY proposal_id",
+    )).rows;
+    assert.deepEqual(
+      migrated.map((row) => [row.id, row.proposal_status, row.effective_status, row.tracking_state]),
+      rows,
+      "the derived verdict decides tracking state; the raw upstream value is left untouched",
+    );
   } finally { await store.close(); }
 });
 

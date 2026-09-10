@@ -14,6 +14,13 @@ function sanitizeTrainingVote(vote, cutoffBlock, queriedAt) {
       ...vote.proposal,
       state: "REDACTED_AT_BACKTEST_CUTOFF",
       outcome: "REDACTED_AT_BACKTEST_CUTOFF",
+      sourceState: "REDACTED_AT_BACKTEST_CUTOFF",
+      effectiveStatus: "REDACTED_AT_BACKTEST_CUTOFF",
+      lifecycleReason: "REDACTED_AT_BACKTEST_CUTOFF",
+      // Tracking state is a closed enum, so it is reset to the pre-finalization
+      // value rather than to the redaction sentinel: "still being observed" is
+      // exactly what was knowable at the cutoff.
+      trackingState: "HOT",
       forVotes: "0",
       againstVotes: "0",
       abstainVotes: "0",

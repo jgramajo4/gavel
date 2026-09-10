@@ -30,7 +30,10 @@ function decodeProposalCursor(value) {
   try { const parsed = JSON.parse(Buffer.from(value, "base64url").toString()); if (parsed[0] !== "proposal" || !/^\d+$/.test(parsed[1])) throw new Error(); return parsed[1]; }
   catch { throw new TypeError("invalid cursor"); }
 }
-const TERMINAL_PROPOSAL_STATES = new Set(["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"]);
+const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
+// Mirrors the Postgres store: a WARM proposal is re-read on a slower cadence
+// than a live vote, and a FINAL one is not re-read at all.
+const DEFAULT_WARM_REFRESH_MS = 15 * 60 * 1000;
 function canonicalMaterial(row) { return JSON.stringify({ blockNumber: String(row.blockNumber), blockHash: row.blockHash || null, recordType: row.recordType, proposalId: row.proposalId || null, contentHash: row.contentHash || null, payload: row.payload }); }
 function immutableEventMaterial(row) { return JSON.stringify({ recordType: row.recordType, proposalId: row.proposalId || null, contentHash: row.contentHash || null, payload: row.payload }); }
 
@@ -59,8 +62,26 @@ class MemoryGovernanceStore {
     this.checkpoints.set(key, { ...existing, ...row, lastFullScanAt: row.lastFullScanAt || existing?.lastFullScanAt || null });
   }
   upsertProposal(row) {
+    const effectiveStatus = row.normalized?.effectiveStatus || row.normalized?.outcome || "UNKNOWN";
+    const stored = {
+      ...row,
+      effectiveStatus,
+      trackingState: row.normalized?.trackingState || trackingStateFor(effectiveStatus),
+      lifecycleReason: row.normalized?.lifecycleReason || null,
+      updatedAt: new Date().toISOString(),
+    };
     const index = this.proposals.findIndex((x) => x.daoId === row.daoId && x.proposalId === row.proposalId);
-    if (index < 0) this.proposals.push({ ...row }); else this.proposals[index] = { ...this.proposals[index], ...row };
+    if (index < 0) {
+      this.proposals.push({ lastObservedBlock: row.lastObservedBlock ?? null, ...stored });
+    } else {
+      const previous = this.proposals[index];
+      const observed = [previous.lastObservedBlock, row.lastObservedBlock].filter((value) => value != null).map(BigInt);
+      this.proposals[index] = {
+        ...previous,
+        ...stored,
+        lastObservedBlock: observed.length ? String(observed.reduce((a, b) => (a > b ? a : b))) : null,
+      };
+    }
     if (row.actions) {
       this.proposalActions = this.proposalActions.filter((x) => !(x.daoId === row.daoId && x.proposalId === row.proposalId));
       this.proposalActions.push(...row.actions.map((action) => ({ daoId: row.daoId, proposalId: row.proposalId, ...action })));
@@ -120,13 +141,45 @@ class MemoryGovernanceStore {
       }
     }
   }
-  getProposalSyncContext(daoId) {
+  getProposalSyncContext(daoId, options = {}) {
     const rows = this.proposals.filter((row) => row.daoId === daoId);
     const maxProposalId = rows.reduce((max, row) => (max == null || BigInt(row.proposalId) > BigInt(max) ? row.proposalId : max), null);
+    const warmAfterMs = Number(options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_MS);
+    const now = Number(options.now ?? Date.now());
+    // Refresh eligibility comes from Gavel's tracking state, never from the raw
+    // upstream value: a source stuck on ACTIVE must not pin a dead proposal here.
     const refreshProposals = rows
-      .filter((row) => !TERMINAL_PROPOSAL_STATES.has(String(row.normalized?.state || "").toUpperCase()))
-      .map((row) => ({ proposalId: row.proposalId, contentHash: row.contentHash, normalized: row.normalized }));
+      .filter((row) => {
+        const trackingState = row.trackingState || trackingStateFor(row.effectiveStatus || row.normalized?.outcome);
+        if (trackingState === TrackingState.FINAL) return false;
+        if (trackingState === TrackingState.HOT) return true;
+        const age = now - new Date(row.updatedAt || 0).getTime();
+        return !Number.isFinite(age) || age >= warmAfterMs;
+      })
+      .sort((a, b) => (BigInt(a.proposalId) < BigInt(b.proposalId) ? -1 : 1))
+      .map((row) => ({
+        proposalId: row.proposalId,
+        contentHash: row.contentHash,
+        normalized: row.normalized,
+        trackingState: row.trackingState || null,
+        effectiveStatus: row.effectiveStatus || null,
+        lastObservedBlock: row.lastObservedBlock ?? null,
+        updatedAt: row.updatedAt || null,
+      }));
     return { maxProposalId, refreshProposals };
+  }
+
+  trackingCounts() {
+    const counts = new Map();
+    for (const row of this.proposals) {
+      const trackingState = row.trackingState || trackingStateFor(row.effectiveStatus || row.normalized?.outcome);
+      const key = `${row.daoId}:${trackingState}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, count]) => {
+      const [daoId, trackingState] = key.split(":");
+      return { daoId, trackingState, count };
+    });
   }
 
   async listDaos() { return [...this.daos.values()].sort((a,b) => a.id.localeCompare(b.id)); }
@@ -144,7 +197,7 @@ class MemoryGovernanceStore {
     if (decoded) rows = rows.filter((x) => compareCursor(x, decoded) > 0);
     const items = rows.slice(0, limit); return { items, nextCursor: rows.length > limit ? encodeCursor(items.at(-1)) : null };
   }
-  async status() { return { daos: this.daos.size, proposals: this.proposals.length, votes: this.voteEvents.length, delegations: this.delegationEvents.length, checkpoints: [...this.checkpoints.values()] }; }
+  async status() { return { daos: this.daos.size, proposals: this.proposals.length, votes: this.voteEvents.length, delegations: this.delegationEvents.length, tracking: this.trackingCounts(), checkpoints: [...this.checkpoints.values()] }; }
   async syncStatus(daoId) { return [...this.checkpoints.values()].filter((x) => x.daoId === daoId); }
 }
 module.exports = { MemoryGovernanceStore, eventKey, encodeCursor, decodeCursor, encodeProposalCursor, decodeProposalCursor };

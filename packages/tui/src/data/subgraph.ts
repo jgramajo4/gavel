@@ -43,7 +43,7 @@ interface RawProposal {
 function mapStatus(raw: string): ProposalStatus {
   const s = raw.toUpperCase();
   const known: ProposalStatus[] = [
-    'PENDING', 'ACTIVE', 'CANCELLED', 'VETOED', 'QUEUED',
+    'PENDING', 'ACTIVE', 'CANCELLED', 'VETOED', 'SUCCEEDED', 'QUEUED',
     'EXECUTED', 'DEFEATED', 'EXPIRED', 'UPDATABLE', 'OBJECTION_PERIOD',
   ];
   return (known.find((k) => k === s) ?? 'PENDING') as ProposalStatus;

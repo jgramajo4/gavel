@@ -37,7 +37,7 @@ function usage() {
     "  sync --all\n" +
     "  status\n" +
     "  health\n" +
-    "  reconcile --dao ens\n" +
+    "  reconcile --dao nouns|ens|railgun-eth\n" +
     "  ensure-roles\n" +
     "  verify-permissions [--role gavel_api] [--expect read-only|read-write] [--allow-catalog-fallback]\n" +
     "  serve\n" +
@@ -117,9 +117,21 @@ function buildRuntime(db) {
     batchSize: blockBatchSize,
     concurrency: integer(process.env.INDEXER_RPC_CONCURRENCY || "4", "INDEXER_RPC_CONCURRENCY", 1),
     fullScanIntervalMs: integer(process.env.INDEXER_FULL_SCAN_INTERVAL_SECONDS || "21600", "INDEXER_FULL_SCAN_INTERVAL_SECONDS", 60) * 1000,
+    warmRefreshIntervalMs: integer(process.env.INDEXER_WARM_REFRESH_SECONDS || "900", "INDEXER_WARM_REFRESH_SECONDS", 0) * 1000,
     logger: log,
   });
   return { worker, provider, sources };
+}
+
+// Reconciliation is the exceptional path: a full enumeration that is authoritative
+// about which proposals still exist, plus whatever canonical audit a DAO supports.
+// Ordinary lifecycle correctness does not depend on it -- the incremental path
+// derives and terminalizes on its own.
+async function reconcile(db, worker, provider, daoId) {
+  const sync = await worker.syncDao(daoId, { fullProposalScan: true });
+  if (daoId !== "ens") return { ok: true, dao: daoId, sync };
+  const audit = await reconcileEns(db, provider);
+  return { ...audit, sync };
 }
 
 async function reconcileEns(db, provider) {
@@ -255,8 +267,8 @@ async function main() {
       return output(await worker.syncDao(dao, options));
     }
     if (command === "reconcile") {
-      if (dao !== "ens") throw new Error("reconcile currently supports --dao ens");
-      const result = await reconcileEns(db, provider);
+      if (!dao || !sources[dao]) throw new Error(`DAO must be enabled in INDEXER_ENABLED_DAOS: ${enabled().join(",")}`);
+      const result = await reconcile(db, worker, provider, dao);
       output(result);
       if (!result.ok) process.exitCode = 2;
       return;
@@ -279,4 +291,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildRuntime, enabled, healthStatus, main, runContinuously };
+module.exports = { buildRuntime, enabled, healthStatus, main, reconcile, runContinuously };

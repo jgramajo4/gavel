@@ -22,6 +22,10 @@ function toTrainingEvidence(vote) {
   const {
     state: _state,
     outcome: _outcome,
+    sourceState: _sourceState,
+    effectiveStatus: _effectiveStatus,
+    trackingState: _trackingState,
+    lifecycleReason: _lifecycleReason,
     forVotes: _forVotes,
     againstVotes: _againstVotes,
     abstainVotes: _abstainVotes,

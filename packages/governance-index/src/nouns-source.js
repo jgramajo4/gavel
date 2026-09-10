@@ -2,6 +2,7 @@ const { createHash } = require("node:crypto");
 const { getAddress } = require("ethers");
 const { DAO_CONFIGS } = require("./config");
 const { normalizeVote, normalizeProposal } = require("../../nouns-adapter/src/history");
+const { isTerminalRow } = require("./sources");
 
 const PROPOSAL_FIELDS = `id title description status proposer { id } targets values signatures calldatas createdTimestamp createdBlock startBlock endBlock quorumVotes forVotes againstVotes abstainVotes`;
 const VOTE_FIELDS = `id supportDetailed votesRaw reason blockNumber blockTimestamp transactionHash clientId voter { id } proposal { ${PROPOSAL_FIELDS} }`;
@@ -52,7 +53,7 @@ class NounsSubgraphSource {
     const rows = await this.page(NEW_PROPOSALS_PAGE, "proposals", fromBlock, snapshot, snapshot);
     const discovered = new Set(rows.map((row) => String(row.id)));
     const refreshIds = (context.refreshProposals || [])
-      .filter((row) => !discovered.has(String(row.proposalId)))
+      .filter((row) => !discovered.has(String(row.proposalId)) && !isTerminalRow(row))
       .map((row) => String(row.proposalId));
     for (let index = 0; index < refreshIds.length; index += 100) {
       const data = await this.request(REFRESH_PROPOSALS, { ids: refreshIds.slice(index, index + 100), snapshot: Number(snapshot) });

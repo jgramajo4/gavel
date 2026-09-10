@@ -2,6 +2,7 @@ const { Contract, Interface, AbiCoder, getAddress, keccak256, toUtf8Bytes } = re
 const { DAO_CONFIGS } = require("./config");
 const { proposalContentHash } = require("./hash");
 const { blockRanges, resolveLogBlockBatchSize } = require("../../core/src/rpc/block-range");
+const { TrackingState, isTerminalStatus } = require("../../core/src/governance/lifecycle");
 
 const ENS_ABI = [
   "event ProposalCreated(uint256 proposalId,address proposer,address[] targets,uint256[] values,string[] signatures,bytes[] calldatas,uint256 startBlock,uint256 endBlock,string description)",
@@ -16,11 +17,20 @@ const RAILGUN_ABI = ["event VoteCast(uint256 indexed id,address indexed voter,bo
 const ENS_IFACE = new Interface(ENS_ABI); const RAILGUN_IFACE = new Interface(RAILGUN_ABI);
 const SUPPORT = ["AGAINST", "FOR", "ABSTAIN"];
 const ENS_STATES = ["PENDING", "ACTIVE", "CANCELLED", "DEFEATED", "SUCCEEDED", "QUEUED", "EXPIRED", "EXECUTED"];
-// States that can never change again. Anything else is re-read at the finalized
-// head. Unknown labels are deliberately treated as non-terminal so a new state
-// is refreshed rather than frozen.
-const TERMINAL_STATES = new Set(["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"]);
-function isTerminalState(state) { return TERMINAL_STATES.has(String(state || "").toUpperCase()); }
+// Refresh eligibility is Gavel's tracking state, not the raw source value: a
+// source that never advances past ACTIVE must not pin a finished proposal in the
+// refresh set. The worker has already planned the set, so a row that reaches
+// here is one the planner still wants observed; this is a defensive second look
+// for a store or caller that supplied its own context.
+function isTerminalRow(row) {
+  if (row?.trackingState) return row.trackingState === TrackingState.FINAL;
+  const derived = row?.effectiveStatus ?? row?.normalized?.effectiveStatus ?? row?.normalized?.outcome;
+  if (derived) return isTerminalStatus(derived);
+  // Nothing classified this row, so a caller supplied its own context. The raw
+  // source state is all that is left and it is consulted last, never first: a
+  // stale non-terminal value costs one refresh, which is the safe direction.
+  return isTerminalStatus(row?.normalized?.state);
+}
 function timestamp(block) { return new Date(Number(block.timestamp) * 1000).toISOString(); }
 function raw(config, log, head, kind, endpoint) { return { daoId: config.id, sourceId: config.source.id, chainId: config.chainId, contractAddress: getAddress(log.address), transactionHash: log.transactionHash, logIndex: Number(log.index ?? log.logIndex), blockNumber: String(log.blockNumber), blockHash: log.blockHash || null, recordType: kind, payload: { topics: log.topics, data: log.data }, sourceKind: config.source.kind, sourceEndpoint: endpoint, observedHead: String(head) }; }
 
@@ -79,7 +89,7 @@ class EnsGovernorSource extends BlockRangeSource {
     }
     for (const row of context.refreshProposals || []) {
       const proposalId = String(row.proposalId);
-      if (discovered.has(proposalId) || isTerminalState(row.normalized?.state)) continue;
+      if (discovered.has(proposalId) || isTerminalRow(row)) continue;
       records.push(await this.refreshProposal({
         proposal: { daoId: "ens", proposalId, contentHash: row.contentHash, normalized: row.normalized, actions: row.normalized?.actions },
       }, head));
@@ -120,7 +130,7 @@ class RailgunVotingSource extends BlockRangeSource {
     if (!context.full) {
       for (const row of context.refreshProposals || []) {
         const proposalId = String(row.proposalId);
-        if (Number(proposalId) >= firstNewId || isTerminalState(row.normalized?.state)) continue;
+        if (Number(proposalId) >= firstNewId || isTerminalRow(row)) continue;
         records.push({ proposal: await this.loadProposal(proposalId, head) });
       }
     }
@@ -132,4 +142,4 @@ class RailgunVotingSource extends BlockRangeSource {
   }
   async normalizeLog(log, head) { const parsed = RAILGUN_IFACE.parseLog(log); const block = await this.provider.getBlock(log.blockNumber); if (!block) throw new Error(`missing block ${log.blockNumber}`); const a = parsed.args; const id=a.id.toString(); const proposal = await this.loadProposal(id, head); const rawRecord = raw(this.config, log, head, "vote", this.rpcUrl); rawRecord.sourcePublicEndpoint = this.publicEndpoint; rawRecord.proposalId = id; return { raw: rawRecord, proposal, vote: { daoId: "railgun-eth", chainId: 1, contractAddress: this.config.contractAddress, proposalId: id, voter: getAddress(a.voter), support: a.affirmative ? "FOR" : "AGAINST", reason: null, voteWeight: a.votes.toString(), blockNumber: String(log.blockNumber), timestamp: timestamp(block), transactionHash: log.transactionHash, logIndex: Number(log.index ?? log.logIndex), sourceKind: this.config.source.kind, sourceEndpoint: this.rpcUrl, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(head) } }; }
 }
-module.exports = { ENS_ABI, RAILGUN_ABI, BlockRangeSource, EnsGovernorSource, RailgunVotingSource, isTerminalState };
+module.exports = { ENS_ABI, RAILGUN_ABI, BlockRangeSource, EnsGovernorSource, RailgunVotingSource, isTerminalRow };
