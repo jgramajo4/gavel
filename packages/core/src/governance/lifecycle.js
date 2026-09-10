@@ -34,6 +34,11 @@ const WARM_STATUSES = Object.freeze(new Set(["SUCCEEDED", "QUEUED"]));
 // has observed an event Gavel cannot re-derive, so it is believed. UNKNOWN is
 // deliberately absent: it marks a record that has not been read from its source
 // yet, whose zeroed placeholder tallies would derive a confident wrong verdict.
+// Pre-vote / in-vote labels. UPDATABLE is Nouns Governor `state()` enum 10
+// (the proposer can still edit before voting starts). It is a phase of PENDING
+// governance, not a distinct protocol outcome and not the Nouns UI string
+// "OPEN FOR CHANGES". That copy belongs in a display layer. Gavel does not
+// invent OPEN_FOR_CHANGES as a canonical status.
 const OPEN_STATUSES = Object.freeze(new Set([
   "UPDATABLE", "PENDING", "ACTIVE", "OBJECTION_PERIOD",
 ]));
