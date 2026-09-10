@@ -152,6 +152,47 @@ function applyGovernanceLifecycle(normalized, options = {}) {
   };
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+/**
+ * Merge canonical persisted lifecycle columns onto a stored `normalized` blob.
+ *
+ * Migration 003 backfilled `effective_status` / `tracking_state` without
+ * rewriting historical JSON. Reads must not treat that blob as authoritative
+ * for those fields. `state` stays the raw upstream value.
+ */
+function presentProposal(normalized, persisted = {}) {
+  if (!normalized && !persisted) return null;
+  const doc = normalized && typeof normalized === "object" ? { ...normalized } : {};
+  const sourceState = firstPresent(
+    persisted.sourceState,
+    persisted.proposalStatus,
+    doc.sourceState,
+    doc.state,
+  );
+  const outcome = firstPresent(persisted.outcome, doc.outcome);
+  const effectiveStatus = firstPresent(persisted.effectiveStatus, doc.effectiveStatus, outcome);
+  const trackingState = firstPresent(persisted.trackingState, doc.trackingState);
+  const lifecycleReason = firstPresent(persisted.lifecycleReason, doc.lifecycleReason);
+  const state = firstPresent(doc.state, persisted.proposalStatus, sourceState);
+  return {
+    ...doc,
+    ...(state ? { state } : {}),
+    ...(sourceState ? { sourceState } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(effectiveStatus ? { effectiveStatus } : {}),
+    ...(trackingState ? { trackingState } : {}),
+    ...(lifecycleReason ? { lifecycleReason } : {}),
+  };
+}
+
 module.exports = {
   TrackingState,
   FINAL_STATUSES,
@@ -162,4 +203,5 @@ module.exports = {
   isTerminalStatus,
   deriveGovernanceStatus,
   applyGovernanceLifecycle,
+  presentProposal,
 };
