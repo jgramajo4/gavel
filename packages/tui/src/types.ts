@@ -5,6 +5,7 @@ export type ProposalStatus =
   | 'ACTIVE'
   | 'CANCELLED'
   | 'VETOED'
+  | 'SUCCEEDED'
   | 'QUEUED'
   | 'EXECUTED'
   | 'DEFEATED'

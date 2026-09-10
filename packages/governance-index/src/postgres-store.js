@@ -12,8 +12,13 @@ const {
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
 const { APPLICATION_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
 
-const TERMINAL_PROPOSAL_STATES = ["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "EXPIRED", "DEFEATED", "SPONSORSHIP_EXPIRED"];
+const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
+
+// A WARM proposal (succeeded, queued) can still change, but not on the cadence a
+// live vote does. Re-reading it once a quarter hour is enough and keeps a steady
+// cycle proportional to open governance rather than to post-vote backlog.
+const DEFAULT_WARM_REFRESH_MS = 15 * 60 * 1000;
 
 function proposalCursor(value) {
   if (!value) return null;
@@ -96,12 +101,17 @@ class PostgresTransaction {
 
   async upsertProposal(row) {
     const normalized = row.normalized;
+    // `proposal_status` stays the raw upstream value. `effective_status` is what
+    // Gavel derived, and `tracking_state` is what the refresh planner reads --
+    // never the raw value, which upstream may leave stale forever.
+    const effectiveStatus = normalized?.effectiveStatus || normalized?.outcome || "UNKNOWN";
+    const trackingState = normalized?.trackingState || trackingStateFor(effectiveStatus);
     await this.client.query(`
       INSERT INTO proposals(
         dao_id,proposal_id,content_hash,title,description,proposer,proposal_status,outcome,
         created_block,start_block,end_block,quorum_votes,for_votes,against_votes,abstain_votes,
-        normalized,first_seen_block
-      ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$9)
+        normalized,first_seen_block,effective_status,tracking_state,lifecycle_reason,last_observed_block
+      ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$9,$17,$18,$19,$20)
       ON CONFLICT(dao_id,proposal_id) DO UPDATE SET
         content_hash=excluded.content_hash,title=excluded.title,description=excluded.description,
         proposer=excluded.proposer,proposal_status=excluded.proposal_status,outcome=excluded.outcome,
@@ -109,6 +119,9 @@ class PostgresTransaction {
         quorum_votes=excluded.quorum_votes,for_votes=excluded.for_votes,
         against_votes=excluded.against_votes,abstain_votes=excluded.abstain_votes,
         normalized=excluded.normalized,
+        effective_status=excluded.effective_status,tracking_state=excluded.tracking_state,
+        lifecycle_reason=excluded.lifecycle_reason,
+        last_observed_block=GREATEST(COALESCE(proposals.last_observed_block,0),COALESCE(excluded.last_observed_block,0)),
         first_seen_block=LEAST(proposals.first_seen_block,excluded.first_seen_block),updated_at=now()
     `, [
       row.daoId, row.proposalId, row.contentHash, normalized?.title || "",
@@ -117,6 +130,7 @@ class PostgresTransaction {
       normalized?.createdBlock ?? null, normalized?.startBlock ?? null, normalized?.endBlock ?? null,
       normalized?.quorumVotes ?? null, normalized?.forVotes ?? null,
       normalized?.againstVotes ?? null, normalized?.abstainVotes ?? null, normalized,
+      effectiveStatus, trackingState, normalized?.lifecycleReason || null, row.lastObservedBlock ?? null,
     ]);
     if (row.actions !== undefined) {
       await this.client.query("DELETE FROM proposal_actions WHERE dao_id=$1 AND proposal_id=$2", [row.daoId, row.proposalId]);
@@ -341,7 +355,8 @@ class PostgresGovernanceStore {
   async migrate(options = {}) {
     const dir = path.join(__dirname, "..", "migrations");
     await this.pool.query(await fs.readFile(path.join(dir, "001_initial.sql"), "utf8"));
-    const versions = ["001_initial"];
+    await this.pool.query(await fs.readFile(path.join(dir, "003_proposal_lifecycle.sql"), "utf8"));
+    const versions = ["001_initial", "003_proposal_lifecycle"];
 
     // Role creation is idempotent and privilege-aware: on a fresh volume the
     // entrypoint script has already made the roles, on a reused volume this is
@@ -456,17 +471,33 @@ class PostgresGovernanceStore {
 
   // Feeds incremental proposal enumeration: the highest indexed proposal id and
   // the proposals whose state can still change.
-  async getProposalSyncContext(daoId) {
+  async getProposalSyncContext(daoId, options = {}) {
     const max = (await this.pool.query(
       "SELECT max(proposal_id)::text AS \"maxProposalId\" FROM proposals WHERE dao_id=$1", [daoId],
     )).rows[0]?.maxProposalId ?? null;
+    const warmAfterMs = Number(options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_MS);
+    // Everything still worth observing: every HOT proposal, plus WARM ones that
+    // have gone unrefreshed long enough. FINAL rows are not selected at all, so
+    // steady-state cost tracks open governance instead of DAO history.
     const refreshProposals = (await this.pool.query(`
-      SELECT proposal_id::text AS "proposalId",content_hash AS "contentHash",normalized
+      SELECT proposal_id::text AS "proposalId",content_hash AS "contentHash",normalized,
+        tracking_state AS "trackingState",effective_status AS "effectiveStatus",
+        last_observed_block::text AS "lastObservedBlock",updated_at AS "updatedAt"
       FROM proposals
-      WHERE dao_id=$1 AND upper(proposal_status) <> ALL($2::text[])
+      WHERE dao_id=$1 AND tracking_state <> $2
+        AND (tracking_state = $3 OR updated_at <= now() - make_interval(secs => $4))
       ORDER BY proposal_id
-    `, [daoId, TERMINAL_PROPOSAL_STATES])).rows;
+    `, [daoId, TrackingState.FINAL, TrackingState.HOT, Math.max(0, warmAfterMs) / 1000])).rows;
     return { maxProposalId: max, refreshProposals };
+  }
+
+  // Lifecycle census for `gavel-indexer status`: how much of the index is still
+  // being observed, and how much has been proven done.
+  async trackingCounts() {
+    return (await this.pool.query(`
+      SELECT dao_id AS "daoId",tracking_state AS "trackingState",count(*)::int AS count
+      FROM proposals GROUP BY dao_id,tracking_state ORDER BY dao_id,tracking_state
+    `)).rows;
   }
 
   async listDaos() {
@@ -552,7 +583,7 @@ class PostgresGovernanceStore {
         last_full_scan_at AS "lastFullScanAt",last_error AS "lastError"
       FROM sync_checkpoints ORDER BY dao_id,source_id
     `);
-    return { ...counts.rows[0], checkpoints: checkpoints.rows };
+    return { ...counts.rows[0], tracking: await this.trackingCounts(), checkpoints: checkpoints.rows };
   }
 
   async syncStatus(daoId) {

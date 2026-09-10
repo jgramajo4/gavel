@@ -55,6 +55,7 @@ const STATUS_COLORS: Record<ProposalStatus, string> = {
   PENDING: 'yellow',
   UPDATABLE: 'yellow',
   OBJECTION_PERIOD: 'yellow',
+  SUCCEEDED: 'cyan',
   QUEUED: 'cyan',
   EXECUTED: 'blue',
   DEFEATED: 'red',

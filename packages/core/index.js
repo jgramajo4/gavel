@@ -1,5 +1,6 @@
 module.exports = {
   ...require("./src/schema/governance"),
+  ...require("./src/governance/lifecycle"),
   ...require("./src/schema/execution"),
   ...require("./src/profile/build"),
   ...require("./src/profile/onboarding"),

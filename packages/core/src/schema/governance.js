@@ -26,8 +26,16 @@ const normalizedProposalSchema = z.object({
   title: z.string(),
   description: z.string(),
   proposer: addressSchema,
+  // `state` is the raw upstream value and `outcome` Gavel's derived verdict.
+  // Both keep their existing meaning; the lifecycle fields below name those
+  // semantics explicitly and are optional so documents written before the
+  // lifecycle model still parse.
   state: z.string().min(1),
   outcome: z.string().min(1),
+  sourceState: z.string().min(1).optional(),
+  effectiveStatus: z.string().min(1).optional(),
+  trackingState: z.enum(["HOT", "WARM", "FINAL"]).optional(),
+  lifecycleReason: z.string().min(1).optional(),
   createdBlock: decimalStringSchema,
   createdAt: z.string().datetime(),
   startBlock: decimalStringSchema,

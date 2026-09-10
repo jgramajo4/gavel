@@ -8,6 +8,10 @@ const {
   normalizedVoteSchema,
 } = require("../../core/src/schema/governance");
 const { Support } = require("../../core/src/schema/governance");
+const {
+  applyGovernanceLifecycle,
+  deriveGovernanceStatus,
+} = require("../../core/src/governance/lifecycle");
 
 const DEFAULT_ENDPOINT = "https://www.nouns.camp/subgraphs/nouns";
 const DEFAULT_PAGE_SIZE = 100;
@@ -103,17 +107,17 @@ function proposalContentHash(proposal) {
   return createHash("sha256").update(material).digest("hex");
 }
 
+// Thin wrapper over the shared derivation so the subgraph adapter and the
+// indexer cannot drift apart on what a proposal's outcome is.
 function proposalOutcome(proposal, subgraphBlock) {
-  const state = String(proposal.status || "UNKNOWN").toUpperCase();
-  if (["EXECUTED", "CANCELLED", "CANCELED", "VETOED", "QUEUED"].includes(state)) {
-    return state === "CANCELED" ? "CANCELLED" : state;
-  }
-  if (BigInt(subgraphBlock) <= BigInt(proposal.endBlock)) return state;
-
-  const passed =
-    BigInt(proposal.forVotes) > BigInt(proposal.againstVotes) &&
-    BigInt(proposal.forVotes) >= BigInt(proposal.quorumVotes);
-  return passed ? "SUCCEEDED" : "DEFEATED";
+  return deriveGovernanceStatus({
+    sourceState: proposal.status,
+    endBlock: proposal.endBlock,
+    forVotes: proposal.forVotes,
+    againstVotes: proposal.againstVotes,
+    quorumVotes: proposal.quorumVotes,
+    finalizedBlock: subgraphBlock,
+  }).effectiveStatus;
 }
 
 function normalizeActions(proposal) {
@@ -137,14 +141,15 @@ function normalizeActions(proposal) {
 function normalizeProposal(proposal, context) {
   if (!proposal) throw new Error("Cannot normalize an empty proposal");
   const contentHash = proposalContentHash(proposal);
-  return normalizedProposalSchema.parse({
+  // The lifecycle pass owns `outcome`, `effectiveStatus` and `trackingState`;
+  // `state` stays the untouched upstream value.
+  return normalizedProposalSchema.parse(applyGovernanceLifecycle({
     id: String(proposal.id),
     contentHash,
     title: String(proposal.title || ""),
     description: String(proposal.description || ""),
     proposer: getAddress(proposal.proposer.id),
     state: String(proposal.status || "UNKNOWN").toUpperCase(),
-    outcome: proposalOutcome(proposal, context.subgraphBlock),
     createdBlock: String(proposal.createdBlock),
     createdAt: isoFromUnixSeconds(proposal.createdTimestamp),
     startBlock: String(proposal.startBlock),
@@ -154,7 +159,7 @@ function normalizeProposal(proposal, context) {
     againstVotes: String(proposal.againstVotes),
     abstainVotes: String(proposal.abstainVotes),
     actions: normalizeActions(proposal),
-  });
+  }, { finalizedBlock: context.subgraphBlock }));
 }
 
 function normalizeVote(rawVote, context) {

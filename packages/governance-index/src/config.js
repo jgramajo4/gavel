@@ -20,8 +20,18 @@ const DAO_CONFIGS = Object.freeze({
   }),
   nouns: Object.freeze({
     id: "nouns", name: "Nouns DAO", chainId: 1, governanceType: "nouns-governor",
+    // `contractAddress` is the NounsToken ERC-721, which is what every indexed
+    // Nouns record has been keyed on since the first backfill; vote events are
+    // unique on (chain_id, contract_address, transaction_hash, log_index), so
+    // moving it would fork every existing row's identity. It stays, and the
+    // governor gets named separately.
     contractAddress: getAddress("0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03"),
-    currentGovernor: getAddress("0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03"),
+    tokenAddress: getAddress("0x9C8fF314C9Bc7F6e59A9d9225Fb22946427eDC03"),
+    // The NounsDAOProxy. This previously repeated the token address, so anything
+    // that took `currentGovernor` at its word and called `state(uint256)` on it
+    // hit a contract with no such function. This is the address the vote
+    // preparation adapter has always used.
+    currentGovernor: getAddress("0x6f3E6272A167e8AcCb32072d08E0957F9c79223d"),
     fromBlock: 12985438,
     source: { id: "nouns-subgraph", kind: "nouns-subgraph", endpoint: "https://www.nouns.camp/subgraphs/nouns" },
   }),
