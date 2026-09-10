@@ -17,8 +17,6 @@ const CLI = path.join(__dirname, "..", "packages", "governance-index", "bin", "g
 const INDEXER_PASSWORD = "indexer-test-only";
 const API_PASSWORD = "api-test-only";
 
-// The CLI is the deployment interface, so the exit codes Terra gates on are
-// exercised by running it, not by calling the store directly.
 function runCli(args, extra = {}) {
   const env = { ...process.env, DATABASE_URL: ADMIN_URL, ...extra };
   for (const key of ["PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"]) delete env[key];
@@ -30,8 +28,6 @@ function runCli(args, extra = {}) {
 }
 
 async function dropApplicationRoles(store) {
-  // Roles are cluster-scoped, so they may hold grants in databases this test
-  // cannot reach. Drop what is owned here and report whether they really went.
   for (const role of ["gavel_api", "gavel_indexer"]) {
     try {
       await store.pool.query(`DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname='${role}') THEN EXECUTE 'DROP OWNED BY ${role}'; END IF; END $$;`);
@@ -43,8 +39,6 @@ async function dropApplicationRoles(store) {
   )).rows.map((row) => row.rolname);
 }
 
-// Pins the role passwords so the wire-level assertions do not depend on
-// whatever a previous run or a previous deployment left in the cluster.
 async function withApplicationRoles(store) {
   await ensureRoles(store.pool, {
     env: { GAVEL_INDEXER_DB_PASSWORD: INDEXER_PASSWORD, GAVEL_API_DB_PASSWORD: API_PASSWORD },
@@ -57,9 +51,6 @@ async function withApplicationRoles(store) {
   }
 }
 
-// The probe role holds a schema grant, and PostgreSQL refuses to drop a role
-// anything still depends on. Revoke what it owns first, or the role survives the
-// run and the next one skips this test instead of running it.
 async function dropProbeRole(store, role) {
   await store.pool.query(`DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname='${role}') THEN EXECUTE 'DROP OWNED BY ${role}'; END IF; END $$;`);
   await store.pool.query(`DROP ROLE IF EXISTS ${role}`);
@@ -114,3 +105,99 @@ async function freshStore() {
   });
   return store;
 }
+
+test("migration applies against a real PostgreSQL server", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    const tables = (await store.pool.query(
+      "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )).rows.map((row) => row.tablename);
+    assert.deepEqual(tables, [
+      "daos", "delegation_events", "governance_sources", "proposal_actions",
+      "proposals", "raw_governance_records", "schema_migrations", "sync_checkpoints", "vote_events",
+    ]);
+    const applied = (await store.pool.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((row) => row.version);
+    assert.ok(applied.includes("001_initial"));
+    assert.ok(applied.includes("003_proposal_lifecycle"));
+  } finally { await store.close(); }
+});
+
+test("the lifecycle migration backfills tracking state from the already-derived outcome", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    const rows = [
+      ["992", "ACTIVE", "DEFEATED", "FINAL"],
+      ["994", "CANCELLED", "CANCELLED", "FINAL"],
+      ["995", "ACTIVE", "DEFEATED", "FINAL"],
+      ["996", "PENDING", "PENDING", "HOT"],
+      ["997", "ACTIVE", "SUCCEEDED", "WARM"],
+    ];
+    for (const [id, status, outcome] of rows) {
+      await store.pool.query(`
+        INSERT INTO proposals(dao_id,proposal_id,content_hash,proposal_status,outcome,normalized,lifecycle_reason)
+        VALUES('ens',$1,$2,$3,$4,'{}'::jsonb,NULL)
+      `, [id, "a".repeat(64), status, outcome]);
+    }
+    await store.pool.query(await require("node:fs/promises").readFile(
+      require("node:path").join(__dirname, "..", "packages", "governance-index", "migrations", "003_proposal_lifecycle.sql"), "utf8",
+    ));
+    const migrated = (await store.pool.query(
+      "SELECT proposal_id::text AS id,proposal_status,effective_status,tracking_state FROM proposals WHERE dao_id='ens' ORDER BY proposal_id",
+    )).rows;
+    assert.deepEqual(
+      migrated.map((row) => [row.id, row.proposal_status, row.effective_status, row.tracking_state]),
+      rows,
+      "the derived verdict decides tracking state; the raw upstream value is left untouched",
+    );
+  } finally { await store.close(); }
+});
+
+test("canonical event identity rejects a duplicate transaction hash and log index", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    await store.transaction(async (tx) => { await tx.insertVote(voteRow()); });
+    await assert.rejects(
+      store.transaction(async (tx) => {
+        await tx.client.query(`
+          INSERT INTO vote_events(dao_id,chain_id,contract_address,proposal_id,voter,support,vote_weight,
+            block_number,block_time,transaction_hash,log_index,source_kind,source_endpoint,source_public_endpoint,observed_head)
+          VALUES('ens',1,$1,'1',$2,'AGAINST','5',10,now(),$3,0,'k','https://e','https://e',20)
+        `, [GOVERNOR, OTHER, TX]);
+      }),
+      /duplicate key value violates unique constraint/,
+    );
+  } finally { await store.close(); }
+});
+
+test("re-ingesting the same batch is idempotent and repairs a dropped vote", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    await store.transaction(async (tx) => { assert.equal(await tx.ingest(record()), true); });
+    await store.transaction(async (tx) => { assert.equal(await tx.ingest(record()), false); });
+    const counts = async () => ({
+      raw: Number((await store.pool.query("SELECT count(*) c FROM raw_governance_records")).rows[0].c),
+      votes: Number((await store.pool.query("SELECT count(*) c FROM vote_events")).rows[0].c),
+    });
+    assert.deepEqual(await counts(), { raw: 1, votes: 1 });
+    await store.pool.query("DELETE FROM vote_events");
+    await store.transaction(async (tx) => { await tx.ingest(record()); });
+    assert.deepEqual(await counts(), { raw: 1, votes: 1 });
+  } finally { await store.close(); }
+});
+
+test("a failed batch leaves the checkpoint un-advanced", { skip }, async () => {
+  const store = await freshStore();
+  try {
+    await store.transaction(async (tx) => {
+      await tx.setCheckpoint({ daoId: "ens", sourceId: "governor-logs", nextBlock: 100, finalizedHead: 100, lastError: null });
+    });
+    await assert.rejects(store.transaction(async (tx) => {
+      await tx.ingest(record());
+      await tx.setCheckpoint({ daoId: "ens", sourceId: "governor-logs", nextBlock: 200, finalizedHead: 200, lastError: null });
+      throw new Error("batch blew up after writing");
+    }), /batch blew up/);
+    const checkpoint = await store.getCheckpoint("ens", "governor-logs");
+    assert.equal(checkpoint.nextBlock, "100", "checkpoint must not advance past uncommitted data");
+    assert.equal(Number((await store.pool.query("SELECT count(*) c FROM raw_governance_records")).rows[0].c), 0);
+  } finally { await store.close(); }
+});
