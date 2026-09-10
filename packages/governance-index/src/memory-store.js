@@ -30,7 +30,7 @@ function decodeProposalCursor(value) {
   try { const parsed = JSON.parse(Buffer.from(value, "base64url").toString()); if (parsed[0] !== "proposal" || !/^\d+$/.test(parsed[1])) throw new Error(); return parsed[1]; }
   catch { throw new TypeError("invalid cursor"); }
 }
-const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
+const { TrackingState, trackingStateFor, presentProposal } = require("../../core/src/governance/lifecycle");
 // Mirrors the Postgres store: a WARM proposal is re-read on a slower cadence
 // than a live vote, and a FINAL one is not re-read at all.
 const DEFAULT_WARM_REFRESH_MS = 15 * 60 * 1000;
@@ -95,7 +95,6 @@ class MemoryGovernanceStore {
     if (existing) {
       if (canonicalMaterial(existing) !== canonicalMaterial(raw)) throw new Error(`canonical event drift for ${key}`);
       if (record.proposal) this.upsertProposal(record.proposal);
-      // Repair normalized rows that an earlier partial write dropped.
       if (record.vote) this.insertVote(record.vote);
       if (record.delegation) this.insertDelegation(record.delegation);
       return false;
@@ -146,8 +145,6 @@ class MemoryGovernanceStore {
     const maxProposalId = rows.reduce((max, row) => (max == null || BigInt(row.proposalId) > BigInt(max) ? row.proposalId : max), null);
     const warmAfterMs = Number(options.warmRefreshIntervalMs ?? DEFAULT_WARM_REFRESH_MS);
     const now = Number(options.now ?? Date.now());
-    // Refresh eligibility comes from Gavel's tracking state, never from the raw
-    // upstream value: a source stuck on ACTIVE must not pin a dead proposal here.
     const refreshProposals = rows
       .filter((row) => {
         const trackingState = row.trackingState || trackingStateFor(row.effectiveStatus || row.normalized?.outcome);
@@ -184,12 +181,19 @@ class MemoryGovernanceStore {
 
   async listDaos() { return [...this.daos.values()].sort((a,b) => a.id.localeCompare(b.id)); }
   async getDao(id) { return this.daos.get(id) || null; }
-  async getProposal(daoId, proposalId) { return this.proposals.find((x) => x.daoId === daoId && x.proposalId === proposalId)?.normalized || null; }
+  async getProposal(daoId, proposalId) {
+    const row = this.proposals.find((x) => x.daoId === daoId && x.proposalId === proposalId);
+    return row ? presentProposal(row.normalized, row) : null;
+  }
   async listProposals({ daoId, limit, cursor }) {
     const decoded = typeof cursor === "string" && !/^\d+$/.test(cursor) ? decodeProposalCursor(cursor) : cursor;
     let rows = this.proposals.filter((x) => x.daoId === daoId).sort((a,b) => BigInt(a.proposalId) < BigInt(b.proposalId) ? 1 : -1);
     if (decoded) rows = rows.filter((x) => BigInt(x.proposalId) < BigInt(decoded));
-    const selected = rows.slice(0, limit); return { items: selected.map((row) => row.normalized), nextCursor: rows.length > limit ? encodeProposalCursor(selected.at(-1).proposalId) : null };
+    const selected = rows.slice(0, limit);
+    return {
+      items: selected.map((row) => presentProposal(row.normalized, row)),
+      nextCursor: rows.length > limit ? encodeProposalCursor(selected.at(-1).proposalId) : null,
+    };
   }
   async listVotes({ daoId, voter, limit, cursor }) {
     const decoded = typeof cursor === "string" ? decodeCursor(cursor) : cursor;
