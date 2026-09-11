@@ -35,3 +35,10 @@ test("migration provenance and replacement checklist are recorded", () => {
   assert.match(migration, /Replace proposal ingestion/);
   assert.match(migration, /canonical wallet handoff/);
 });
+
+test("TUI index adapter displays effectiveStatus when the API exposes it", () => {
+  const adapter = fs.readFileSync(path.join(tuiRoot, "src", "data", "governanceIndex.ts"), "utf8");
+  assert.match(adapter, /effectiveStatus \?\? p\.outcome \?\? p\.state/);
+  assert.match(adapter, /sourceState\?:/);
+  assert.match(adapter, /trackingState\?:/);
+});

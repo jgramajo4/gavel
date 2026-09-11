@@ -20,25 +20,10 @@
 
 const TrackingState = Object.freeze({ HOT: "HOT", WARM: "WARM", FINAL: "FINAL" });
 
-// Canonically terminal: no sequence of later blocks can move a proposal out of
-// one of these.
 const FINAL_STATUSES = Object.freeze(new Set([
   "DEFEATED", "EXECUTED", "CANCELLED", "VETOED", "EXPIRED", "SPONSORSHIP_EXPIRED",
 ]));
-// Post-vote but still mutable: the proposal won, and queueing, execution, veto
-// or expiry can still happen.
 const WARM_STATUSES = Object.freeze(new Set(["SUCCEEDED", "QUEUED"]));
-// Pre-finalization labels. These are the only source values Gavel may override,
-// because they are the only ones a source can report while being stale about a
-// voting window that has already closed. A source that says SUCCEEDED or QUEUED
-// has observed an event Gavel cannot re-derive, so it is believed. UNKNOWN is
-// deliberately absent: it marks a record that has not been read from its source
-// yet, whose zeroed placeholder tallies would derive a confident wrong verdict.
-// Pre-vote / in-vote labels. UPDATABLE is Nouns Governor `state()` enum 10
-// (the proposer can still edit before voting starts). It is a phase of PENDING
-// governance, not a distinct protocol outcome and not the Nouns UI string
-// "OPEN FOR CHANGES". That copy belongs in a display layer. Gavel does not
-// invent OPEN_FOR_CHANGES as a canonical status.
 const OPEN_STATUSES = Object.freeze(new Set([
   "UPDATABLE", "PENDING", "ACTIVE", "OBJECTION_PERIOD",
 ]));
@@ -50,17 +35,12 @@ const STATUS_ALIASES = Object.freeze({
   VETOD: "VETOED",
 });
 
-/** Upper-cases and folds spelling variants onto Gavel's canonical labels. */
 function normalizeStatus(value) {
   const raw = String(value ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
   if (!raw) return "UNKNOWN";
   return STATUS_ALIASES[raw] || STATUS_ALIASES[raw.replace(/_/g, "")] || raw;
 }
 
-/**
- * An unrecognized label is deliberately HOT rather than FINAL: a source that
- * grows a new state must cost an extra refresh, never a frozen record.
- */
 function trackingStateFor(status) {
   const normalized = normalizeStatus(status);
   if (FINAL_STATUSES.has(normalized)) return TrackingState.FINAL;
@@ -81,37 +61,21 @@ function verdict(effectiveStatus, reason) {
   return { effectiveStatus, trackingState: trackingStateFor(effectiveStatus), reason };
 }
 
-/**
- * Derives the canonical status of one proposal.
- *
- * `finalizedBlock` is the block height the caller has actually confirmed — the
- * indexer's finalized head or a pinned subgraph snapshot — not the chain tip.
- * Deriving against an unconfirmed height would terminalize a proposal from
- * tallies that can still move.
- */
 function deriveGovernanceStatus(input = {}) {
   const sourceState = normalizeStatus(input.sourceState ?? input.state);
   if (sourceState === "UNKNOWN") return verdict(sourceState, "source_state_unknown");
   if (FINAL_STATUSES.has(sourceState)) return verdict(sourceState, "source_state_terminal");
-  // SUCCEEDED/QUEUED and any label this module does not model are the source's
-  // to report; Gavel only fills in the transition a source cannot observe.
   if (!OPEN_STATUSES.has(sourceState)) return verdict(sourceState, "source_state_post_vote");
-  // Block-timed governance only. A timestamp-timed venue carries a placeholder
-  // end block, and comparing a block height against it would terminalize an open
-  // proposal instantly.
   if (input.timing != null && input.timing !== "block") return verdict(sourceState, "timing_not_block");
 
   const endBlock = toBigInt(input.endBlock);
   const finalizedBlock = toBigInt(input.finalizedBlock);
-  // A zero end block is a placeholder, not a deadline that has already passed.
   if (endBlock == null || endBlock === 0n || finalizedBlock == null) return verdict(sourceState, "voting_window_unknown");
   if (finalizedBlock <= endBlock) return verdict(sourceState, "voting_open");
 
   const forVotes = toBigInt(input.forVotes);
   const againstVotes = toBigInt(input.againstVotes);
   const quorumVotes = toBigInt(input.quorumVotes);
-  // Without tallies there is nothing to derive from. Staying on the source value
-  // keeps the proposal observed rather than guessing an outcome.
   if (forVotes == null || againstVotes == null || quorumVotes == null) {
     return verdict(sourceState, "tallies_unavailable");
   }
@@ -121,15 +85,6 @@ function deriveGovernanceStatus(input = {}) {
     : verdict("DEFEATED", "voting_finalized_defeated");
 }
 
-/**
- * Returns a normalized proposal carrying its canonical lifecycle fields.
- *
- * `state` keeps its existing meaning (the raw upstream value) so external
- * contracts do not shift underneath consumers, and `outcome` keeps its existing
- * meaning (Gavel's derived verdict) which is now exactly `effectiveStatus`.
- * Idempotent: re-applying it re-derives from `sourceState`, not from a previous
- * derivation.
- */
 function applyGovernanceLifecycle(normalized, options = {}) {
   const sourceState = normalizeStatus(normalized?.sourceState ?? normalized?.state);
   const derived = deriveGovernanceStatus({
@@ -152,6 +107,59 @@ function applyGovernanceLifecycle(normalized, options = {}) {
   };
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function knownStatus(value) {
+  const text = firstPresent(value);
+  return !text || text === "UNKNOWN" ? undefined : text;
+}
+
+/**
+ * Merge canonical persisted lifecycle columns onto a stored `normalized` blob.
+ *
+ * Migration 003 backfilled `effective_status` / `tracking_state` without
+ * rewriting historical JSON. Reads must not treat that blob as authoritative
+ * for those fields. `state` stays the raw upstream value.
+ *
+ * Store defaults (UNKNOWN / HOT) are not copied onto documents that never had
+ * a lifecycle verdict. A migrated Nouns 992 has a real DEFEATED/FINAL pair and
+ * is overlaid; a title-only placeholder stays a title-only placeholder.
+ */
+function presentProposal(normalized, persisted = {}) {
+  if (!normalized && !persisted) return null;
+  const doc = normalized && typeof normalized === "object" ? { ...normalized } : {};
+  const sourceState = firstPresent(
+    knownStatus(persisted.sourceState),
+    knownStatus(persisted.proposalStatus),
+    doc.sourceState,
+    doc.state,
+  );
+  const outcome = firstPresent(knownStatus(persisted.outcome), doc.outcome);
+  const effectiveStatus = firstPresent(knownStatus(doc.effectiveStatus), knownStatus(persisted.effectiveStatus), outcome);
+  const trackingState = firstPresent(
+    doc.trackingState,
+    effectiveStatus ? persisted.trackingState : undefined,
+  );
+  const lifecycleReason = firstPresent(persisted.lifecycleReason, doc.lifecycleReason);
+  const state = firstPresent(doc.state, knownStatus(persisted.proposalStatus), sourceState);
+  return {
+    ...doc,
+    ...(state ? { state } : {}),
+    ...(sourceState ? { sourceState } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(effectiveStatus ? { effectiveStatus } : {}),
+    ...(trackingState ? { trackingState } : {}),
+    ...(lifecycleReason ? { lifecycleReason } : {}),
+  };
+}
+
 module.exports = {
   TrackingState,
   FINAL_STATUSES,
@@ -162,4 +170,5 @@ module.exports = {
   isTerminalStatus,
   deriveGovernanceStatus,
   applyGovernanceLifecycle,
+  presentProposal,
 };

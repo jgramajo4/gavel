@@ -3,12 +3,16 @@ const { getAddress } = require("ethers");
 const { z } = require("zod");
 const { decodeCursor, decodeProposalCursor } = require("./memory-store");
 const { redactErrorMessage } = require("./redaction");
+const { presentProposal } = require("../../core/src/governance/lifecycle");
 
 const limitSchema = z.coerce.number().int().min(1).max(100).default(25);
 const daoSchema = z.enum(["nouns", "ens", "railgun-eth"]);
 const proposalSchema = z.string().regex(/^\d+$/).max(78);
 function json(res, status, body) { const payload = JSON.stringify(body); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "cache-control": "no-store" }); res.end(payload); }
-function publicProposal(row) { return row?.normalized || row; }
+function publicProposal(row) {
+  if (!row) return row;
+  return presentProposal(row.normalized || row, row);
+}
 function publicEndpoint(value, explicit) {
   try {
     const url = new URL(explicit || value);
@@ -58,7 +62,7 @@ function createReadOnlyApi({ store, logger = null }) {
       if (parts.length === 3) { const row = await store.getDao(dao); return row ? json(res, 200, row) : json(res, 404, { error: "dao_not_found" }); }
       if (parts[3] === "proposals" && parts.length === 4) {
         const cursor = decodeProposalCursor(url.searchParams.get("cursor"));
-        const page = await store.listProposals({ daoId: dao, limit, cursor }); return json(res, 200, page);
+        const page = await store.listProposals({ daoId: dao, limit, cursor }); return json(res, 200, { ...page, items: (page.items || []).map(publicProposal) });
       }
       if (parts[3] === "proposals" && parts.length === 5) { const id = proposalSchema.parse(parts[4]); const row = await store.getProposal(dao, id); return row ? json(res, 200, publicProposal(row)) : json(res, 404, { error: "proposal_not_found" }); }
       if (parts[3] === "voters" && parts[5] === "history" && parts.length === 6) { const voter = getAddress(parts[4]); const cursor = decodeCursor(url.searchParams.get("cursor")); const page = await store.listVotes({ daoId: dao, voter, limit, cursor }); return json(res, 200, { dao, chainId: 1, voter, ...page, items: page.items.map(publicVote) }); }
