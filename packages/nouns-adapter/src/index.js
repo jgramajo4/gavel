@@ -1,5 +1,6 @@
 const { Contract } = require("ethers");
 
+const { installGovernanceContract } = require("../../core/src/dao/contract");
 const { inspectNounsProposal } = require("./security");
 const { DEFAULT_ENDPOINT, NounsSubgraphHistoryAdapter } = require("./history");
 const {
@@ -34,6 +35,17 @@ class NounsDaoAdapter {
       waapAutonomous: true,
     });
     this.supportedActions = Object.freeze(["CAST_VOTE"]);
+    // Nouns records one receipt per voter per proposal: `getReceipt().hasVoted`
+    // is decisive and the governor rejects a second vote. So neither repeat
+    // voting nor replacement is permitted, and the execution layer enforces
+    // exactly that without knowing why.
+    installGovernanceContract(this, {
+      adapterVersion: "nouns@1.1.0",
+      semantics: { canVoteMultipleTimes: false, canReplaceVote: false },
+      governanceTargets: [GOVERNANCE_ADDRESS],
+      // castRefundableVoteWithReason(uint256,uint8,string,uint32)
+      governanceSelectors: { CAST_VOTE: ["0x8136730f"] },
+    });
     this.provider = options.provider;
     this.governance = options.governance || new Contract(GOVERNANCE_ADDRESS, GOVERNANCE_ABI, options.provider);
     this.token = options.nounsToken || options.token || new Contract(NOUNS_TOKEN_ADDRESS, NOUNS_TOKEN_ABI, options.provider);

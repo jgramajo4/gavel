@@ -3,7 +3,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
-const { getAddress } = require("ethers");
+const { Wallet, getAddress } = require("ethers");
 
 const {
   DEFAULT_ENDPOINT,
@@ -19,6 +19,10 @@ const { IndexApiClient } = require("../../governance-index");
 const {
   ExecutionMode,
   Support,
+  assertCanonicalGovernanceAdapter,
+  governanceDeadline,
+  parseExecutionProfile,
+  profileIdentityReferences,
   ONBOARDING_QUESTIONS,
   applyBacktestEvaluationToPrediction,
   applyCalibrationToPrediction,
@@ -30,6 +34,7 @@ const {
   resolveDataDir,
   resolveExecutionReadiness,
   runChronologicalBacktest,
+  validatedIntentFromPreparation,
 } = require("../../core");
 
 const DATA_DIR = resolveDataDir();
@@ -85,6 +90,12 @@ Usage:
   gavel prepare-delegation --dao <nouns|ens> --asset-owner-address <address>
                            (--to <address> | --executor <safe|waap>)
                            [--rpc <url>] [--output <path>] [--stdout]
+  gavel execution prepare <preparation.json> [--dao <dao>] [--proposal <proposal.json>]
+                          [--output <path>] [--stdout]
+  gavel execution submit <validated-intent.json> --mode <mode>
+                         [--profile <execution-profile.json>]
+  gavel identity create --type safe-proposer --safe <address> [--chain-id <id>]
+                        [--label <name>] [--passphrase-env <VAR>]
 
 Commands:
   history   Fetch indexed governance history (Nouns defaults to its subgraph when no index is configured).
@@ -97,6 +108,15 @@ Commands:
   prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
   execution-status  Fail-closed readiness for unsigned, Safe, or WaaP execution.
   prepare-delegation  Prepare, but never submit, Nouns or ENS delegation calldata.
+  execution prepare   Lift a validated preparation into a canonical ValidatedExecutionIntent.
+  execution submit    Hand a Gavel-generated intent to a configured execution backend.
+  identity create     Create a locally held, encrypted Safe proposal identity.
+
+Execution boundary:
+  Execution commands operate only on Gavel-generated intents. There is no
+  surface that submits caller-supplied calldata: every action must travel
+  natural language -> governance intent -> execution intent -> validation
+  -> executor.
 
 Network:
   Chain-backed commands use ${DEFAULT_ETHEREUM_RPC_URL} by default.
@@ -743,6 +763,224 @@ async function prepareDelegationCommand(argv) {
   process.stdout.write(`${JSON.stringify({ ...preparation, output: absolutePath }, null, 2)}\n`);
 }
 
+/**
+ * `gavel execution prepare` -- lift a stored, validated preparation into the
+ * canonical ValidatedExecutionIntent and write the document.
+ *
+ * This is the boundary crossing made explicit. It reads only a Gavel-generated
+ * preparation: there is deliberately no way to supply a target and calldata.
+ */
+async function executionPrepareCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      dao: { type: "string" },
+      proposal: { type: "string" },
+      rpc: { type: "string" },
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("execution prepare requires one vote preparation JSON path");
+
+  const preparation = await readJson(positionals[0]);
+  const dao = values.dao || preparation.dao;
+  if (!dao) throw new Error("execution prepare requires --dao when the preparation does not name one");
+  const adapter = assertCanonicalGovernanceAdapter(
+    createDaoAdapter(dao, createEthereumProvider({ rpcUrl: values.rpc })),
+  );
+
+  // The proposal supplies the voting deadline, which is what lets the
+  // execution layer reject this intent once the window closes. Without it the
+  // intent still validates, and records say the deadline is unknown.
+  const proposalInput = values.proposal ? await readJson(values.proposal) : null;
+  const proposal = proposalInput?.proposal || proposalInput;
+  const validated = validatedIntentFromPreparation(adapter, preparation, {
+    adapterVersion: adapter.adapterVersion,
+    semantics: adapter.getExecutionSemantics(),
+    deadline: governanceDeadline(proposal),
+  });
+
+  const document = validated.toJSON();
+  if (values.stdout) {
+    process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
+    return;
+  }
+  const destination =
+    values.output ||
+    defaultPrivatePath("intents", validated.dao, `${validated.intent.source.proposalId}-${validated.intentHash.slice(2, 14)}.json`);
+  const absolutePath = await writePrivateJson(destination, document);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        intentHash: validated.intentHash,
+        voteIntentHash: validated.intent.source.voteIntentHash,
+        dao: validated.dao,
+        proposalId: validated.intent.source.proposalId,
+        support: validated.intent.source.support,
+        actor: validated.actor,
+        target: validated.intent.target,
+        selector: validated.validation.selector,
+        proposalState: validated.validation.proposalState,
+        autonomyAllowed: validated.validation.autonomyAllowed,
+        deadline: validated.validation.deadline,
+        semantics: validated.validation.semantics,
+        output: absolutePath,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+/**
+ * `gavel execution submit` -- hand a Gavel-generated intent to a configured
+ * execution backend.
+ *
+ * A stored intent document is not a ValidatedExecutionIntent: re-entering the
+ * boundary means re-validating against a live adapter, which is why this
+ * command needs the originating preparation rather than only the document. No
+ * live Safe Transaction Service or autonomous broadcaster client is bundled, so
+ * this reports what the configured profile would do and stops short of
+ * inventing a provider.
+ */
+async function executionSubmitCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      mode: { type: "string" },
+      profile: { type: "string" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("execution submit requires one validated intent JSON path");
+  const document = await readJson(positionals[0]);
+  if (document?.kind !== "VALIDATED_EXECUTION_INTENT") {
+    throw new Error("execution submit accepts only a document produced by `gavel execution prepare`");
+  }
+  if (!values.profile) {
+    throw new Error(
+      "execution submit requires --profile naming an execution profile. Mode selection is explicit: " +
+        "see docs/architecture/execution.md for the profile format.",
+    );
+  }
+  const profile = parseExecutionProfile(await readJson(values.profile));
+  const mode = normalizeMode(values.mode || profile.mode);
+  if (mode !== profile.mode) {
+    throw new Error(`--mode ${mode} does not match the profile mode ${profile.mode}`);
+  }
+
+  // Gavel ships the execution architecture, not a wallet provider. A backend
+  // is supplied by the runtime; refusing loudly beats pretending to submit.
+  throw new Error(
+    `No execution backend is registered for ${mode} in this build. The profile is valid ` +
+      `(identities: ${profileIdentityReferences(profile).map((entry) => `${entry.role}=${entry.reference}`).join(", ") || "none"}), ` +
+      `and intent ${document.intentHash} is ready. Register a ${mode} adapter with the ExecutionEngine ` +
+      "to submit, or use `gavel prepare-vote` output for out-of-band signing.",
+  );
+}
+
+/**
+ * `gavel identity create --type safe-proposer` -- create a locally held,
+ * encrypted Safe proposal identity.
+ *
+ * This is the BYOH installation flow's first step:
+ *
+ *   create proposal identity -> show address -> authorize as a Safe delegate
+ *   -> verify delegation -> bind identity to the user's Safe
+ *
+ * The key is generated here and written only in encrypted form, mode 0600,
+ * under GAVEL_DATA_DIR. It is a proposal identity: it never becomes a Safe
+ * owner, holds no funds, and holds no governance delegation.
+ */
+async function identityCreateCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      type: { type: "string" },
+      safe: { type: "string" },
+      "chain-id": { type: "string" },
+      label: { type: "string" },
+      "passphrase-env": { type: "string" },
+      output: { type: "string", short: "o" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 0) throw new Error("identity create accepts no positional arguments");
+  if (values.type !== "safe-proposer") {
+    throw new Error("identity create currently supports --type safe-proposer");
+  }
+  if (!values.safe) throw new Error("identity create requires --safe with the Safe address to propose into");
+  const safeAddress = getAddress(values.safe);
+  const chainId = Number(values["chain-id"] || 1);
+  const label = values.label || "safe-proposer-main";
+  if (!/^[A-Za-z0-9._-]+$/.test(label)) throw new Error("identity label must be alphanumeric with . _ or -");
+
+  const passphraseVariable = values["passphrase-env"] || "GAVEL_IDENTITY_PASSPHRASE";
+  const passphrase = process.env[passphraseVariable];
+  if (!passphrase || passphrase.length < 12) {
+    throw new Error(
+      `Set ${passphraseVariable} to a passphrase of at least 12 characters. ` +
+        "It encrypts the keystore and is never written to disk.",
+    );
+  }
+
+  const wallet = Wallet.createRandom();
+  const keystore = await wallet.encrypt(passphrase);
+  const destination = values.output || defaultPrivatePath("identities", `${label}.json`);
+  const absolutePath = await writePrivateJson(destination, {
+    version: 1,
+    kind: "GAVEL_PROPOSAL_IDENTITY",
+    role: "proposal",
+    label,
+    address: wallet.address,
+    scope: { safeAddress, chainId },
+    capabilities: ["proposeSafeTransaction"],
+    passphraseEnv: passphraseVariable,
+    createdAt: new Date().toISOString(),
+    keystore: JSON.parse(keystore),
+  });
+
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        role: "proposal",
+        reference: `local:${label}`,
+        address: wallet.address,
+        scope: { safeAddress, chainId },
+        capabilities: ["proposeSafeTransaction"],
+        output: absolutePath,
+        nextSteps: [
+          `Add ${wallet.address} as a delegate (not an owner) of Safe ${safeAddress} on chain ${chainId}.`,
+          "Verify the delegation, then reference it from an execution profile as " +
+            `execution.safe.proposalIdentity: "local:${label}".`,
+          "This identity can only propose transactions into the Safe queue. Human Safe owners " +
+            "retain authorization, and it can be revoked by removing the delegate without " +
+            "touching the Safe's owners.",
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -759,6 +997,17 @@ async function main() {
   if (command === "prepare-vote") return prepareVoteCommand(argv);
   if (command === "execution-status") return executionStatusCommand(argv);
   if (command === "prepare-delegation") return prepareDelegationCommand(argv);
+  if (command === "execution") {
+    const [subcommand, ...rest] = argv;
+    if (subcommand === "prepare") return executionPrepareCommand(rest);
+    if (subcommand === "submit") return executionSubmitCommand(rest);
+    throw new Error("execution accepts the subcommands prepare and submit");
+  }
+  if (command === "identity") {
+    const [subcommand, ...rest] = argv;
+    if (subcommand === "create") return identityCreateCommand(rest);
+    throw new Error("identity accepts the subcommand create");
+  }
   throw new Error(`Unknown command: ${command}`);
 }
 

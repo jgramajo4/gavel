@@ -4,6 +4,7 @@ const { Contract, Interface, getAddress } = require("ethers");
 
 const { normalizedProposalSchema, Support } = require("../../core/src/schema/governance");
 const { predictionDocumentSchema } = require("../../core/src/schema/prediction");
+const { installGovernanceContract } = require("../../core/src/dao/contract");
 const { inspectNounsProposal } = require("../../nouns-adapter/src/security");
 
 const CHAIN_ID = 1;
@@ -140,6 +141,18 @@ class RailgunDaoAdapter {
       waapAutonomous: false,
     });
     this.supportedActions = Object.freeze(["CAST_VOTE"]);
+    // Railgun is the case that proves replay rules belong here rather than in
+    // the execution layer. Votes are cast by staked amount and successive
+    // partial votes are legitimate until stake is exhausted, so a second
+    // execution on one proposal is normal -- the opposite of Nouns and ENS. A
+    // cast vote still cannot be withdrawn, so replacement stays false.
+    installGovernanceContract(this, {
+      adapterVersion: "railgun-eth@1.1.0",
+      semantics: { canVoteMultipleTimes: true, canReplaceVote: false },
+      governanceTargets: [RAILGUN_VOTING_ADDRESS],
+      // vote(uint256,uint256,bool,address,uint256)
+      governanceSelectors: { CAST_VOTE: ["0x4f526875"] },
+    });
     this.provider = options.provider;
     this.voting = options.voting || new Contract(RAILGUN_VOTING_ADDRESS, RAILGUN_VOTING_ABI, options.provider);
     this.staking = options.staking || new Contract(RAILGUN_STAKING_ADDRESS, RAILGUN_STAKING_ABI, options.provider);

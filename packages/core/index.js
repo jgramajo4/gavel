@@ -20,6 +20,7 @@ module.exports = {
   ...require("./src/execution/adapter"),
   ...require("./src/execution/replay"),
   ...require("./src/execution/engine"),
+  ...require("./src/execution/profile"),
   ...require("./src/execution/readiness"),
   ...require("./src/execution/transaction-binding"),
   ...require("./src/execution/executors/unsigned"),
@@ -30,6 +31,7 @@ module.exports = {
   ...require("./src/execution/executors/safe-supervised"),
   ...require("./src/execution/executors/waap-autonomous"),
   ...require("./src/dao/registry"),
+  ...require("./src/dao/contract"),
   ...require("./src/storage/private-state"),
   ...require("./src/rpc/block-range"),
 };

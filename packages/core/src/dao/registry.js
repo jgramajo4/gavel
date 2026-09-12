@@ -1,5 +1,12 @@
 const { capabilityForMode } = require("../execution/modes");
 
+/**
+ * The methods an adapter must have to be registered at all.
+ *
+ * Kept here rather than in `dao/contract.js` because `contract.js` reaches the
+ * intent modules, which reach back here to validate -- so the list lives in the
+ * module with no dependencies of its own.
+ */
 const REQUIRED_ADAPTER_METHODS = [
   "validateProposal",
   "getVotingPower",
@@ -61,6 +68,7 @@ class DaoRegistry {
 
 module.exports = {
   DaoRegistry,
+  REQUIRED_ADAPTER_METHODS,
   assertDaoAdapter,
   assertModeSupported,
   assertActionSupported,

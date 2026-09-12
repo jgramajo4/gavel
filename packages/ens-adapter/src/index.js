@@ -4,6 +4,7 @@ const { Contract, Interface, getAddress, id, keccak256, toUtf8Bytes } = require(
 const { Support } = require("../../core/src/schema/governance");
 const { predictionDocumentSchema } = require("../../core/src/schema/prediction");
 const { normalizedProposalSchema } = require("../../core/src/schema/governance");
+const { installGovernanceContract } = require("../../core/src/dao/contract");
 const { inspectNounsProposal } = require("../../nouns-adapter/src/security");
 
 const CHAIN_ID = 1;
@@ -132,6 +133,16 @@ class EnsDaoAdapter {
       waapAutonomous: false,
     });
     this.supportedActions = Object.freeze(["CAST_VOTE"]);
+    // OpenZeppelin Governor tracks `hasVoted` per proposal and reverts on a
+    // second vote, so ENS has the same one-vote rule as Nouns -- arrived at
+    // from a different contract, which is why each adapter declares its own.
+    installGovernanceContract(this, {
+      adapterVersion: "ens@1.1.0",
+      semantics: { canVoteMultipleTimes: false, canReplaceVote: false },
+      governanceTargets: [ENS_GOVERNOR_ADDRESS],
+      // castVoteWithReason(uint256,uint8,string)
+      governanceSelectors: { CAST_VOTE: ["0x7b3c71d3"] },
+    });
     this.provider = options.provider;
     this.governor = options.governor || new Contract(ENS_GOVERNOR_ADDRESS, ENS_GOVERNOR_ABI, options.provider);
     this.token = options.token || new Contract(ENS_TOKEN_ADDRESS, ENS_TOKEN_ABI, options.provider);
