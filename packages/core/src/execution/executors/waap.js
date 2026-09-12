@@ -1,3 +1,12 @@
+/**
+ * DEPRECATED. Superseded by `executors/waap-autonomous.js`.
+ *
+ * The original single-phase WaaP executor, kept working through the migration.
+ * The new adapter takes an ExecutionIdentity rather than an opaque client,
+ * evaluates policy in `prepare()` before anything can be broadcast, treats a
+ * throwing or unshaped policy result as refusal, and reports a reverted
+ * transaction as FAILED rather than trusting a provider's own verdict.
+ */
 const { getAddress } = require("ethers");
 
 const { assertActionSupported } = require("../../dao/registry");

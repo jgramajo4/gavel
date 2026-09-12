@@ -1,3 +1,17 @@
+/**
+ * DEPRECATED. Superseded by `executors/safe-supervised.js`.
+ *
+ * This is the original single-phase Safe executor. It is kept working so
+ * existing callers and stored prepared-transaction documents keep functioning
+ * through the migration, but it has none of the properties the new adapter
+ * adds: no ProposalIdentity (the signing authority is hidden inside the
+ * injected client), no locally computed safeTxHash to check the service
+ * against, no owner or confirmer check, no nonce handling, no prepare/submit
+ * split, and no execution records or idempotency.
+ *
+ * New code should construct a `SafeSupervisedExecutionAdapter` and drive it
+ * through the `ExecutionEngine`.
+ */
 const { getAddress } = require("ethers");
 
 const { ExecutionMode, ExecutionStatus, executionResultSchema } = require("../../schema/execution");
