@@ -112,7 +112,42 @@ evidence.
   override for higher limits, privacy requirements, or a dedicated provider.
   Archive-heavy proposal checks can require this override. Refer to the variable
   by name and never echo its value.
-- No private key is required by Gavel. It produces unsigned calldata only.
+- No private key is required by Gavel. It produces validated unsigned calldata
+  only. Execution identities, where an operator configures them, are resolved
+  through credential references rather than keys in configuration; see the
+  execution boundary section below.
+
+## Execution boundary
+
+Bankr is a runtime around Gavel core, not a second implementation of it. It owns
+no governance logic and no execution logic: every governance action goes through
+the canonical CLI, and Bankr's job is to run commands and report their JSON.
+
+A natural-language request must never become a wallet call directly. Every
+action travels the same path:
+
+```
+natural language
+  -> governance intent      (VoteIntent)
+  -> canonical execution intent  (ExecutionIntent)
+  -> validation             (ValidatedExecutionIntent)
+  -> executor
+```
+
+In practice that means:
+
+- Produce transactions only with `gavel prepare-vote`, and lift them across the
+  boundary only with `gavel execution prepare`. Both read Gavel-generated
+  documents.
+- There is no command that accepts a target and calldata, and none should be
+  constructed. If a request cannot be expressed as a governance intent for a
+  supported DAO, it is out of scope -- say so rather than reaching for a wallet.
+- Never assemble, sign, or broadcast a transaction outside the CLI. No private
+  key is required by Gavel: it produces validated unsigned calldata only.
+- A `BLOCKED` preparation is a refusal. Report its blockers and stop; do not
+  retry with checks relaxed, and do not treat a blocker as advisory.
+
+See `docs/architecture/execution.md` in the Gavel repository for the full model.
 
 If runtime installation, dependency installation, RPC access, command execution,
 artifact publication, or later restoration fails, report the exact stage and
