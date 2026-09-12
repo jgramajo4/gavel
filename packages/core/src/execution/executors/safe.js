@@ -16,6 +16,7 @@ const { getAddress } = require("ethers");
 
 const { ExecutionMode, ExecutionStatus, executionResultSchema } = require("../../schema/execution");
 const {
+  assertDeprecatedPathAllowed,
   assertPreparedGovernanceTransaction,
   assertExecutorDidNotMutate,
 } = require("../transaction-binding");
@@ -24,6 +25,7 @@ const SAFE_STATUSES = new Set(Object.values(ExecutionStatus));
 
 class SafeSupervisedExecutor {
   constructor(options) {
+    assertDeprecatedPathAllowed("SafeSupervisedExecutor");
     if (!options?.client || typeof options.client.propose !== "function") {
       throw new TypeError("Safe proposer client is required");
     }

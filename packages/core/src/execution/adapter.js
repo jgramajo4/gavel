@@ -20,6 +20,7 @@
  */
 
 const { getExecutionMode } = require("./modes");
+const { deepFreeze } = require("../intent/canonical");
 const { isValidatedExecutionIntent } = require("../intent/validated");
 
 const REQUIRED_METHODS = Object.freeze(["prepare", "submit", "status"]);
@@ -63,6 +64,14 @@ function assertPreparable(adapter, validated) {
  * `payload` is provider-shaped and deliberately opaque to the engine. The
  * validated intent travels with it so `submit()` can re-check that nothing
  * drifted between the phases.
+ *
+ * The payload is **deeply** frozen. A shallow `Object.freeze({ ...payload })`
+ * left nested objects writable, so `preparation.payload.request.to = attacker`
+ * between `prepare()` and `submit()` was an arbitrary-execution path that
+ * carried a genuine intent hash. Deep freezing closes it -- and, because a
+ * caller can always construct a look-alike preparation object, every adapter's
+ * `submit()` additionally derives the onchain call from `validated.intent`
+ * rather than reading it back out of the payload.
  */
 function executionPreparation(adapter, validated, payload, extra = {}) {
   const mode = getExecutionMode(adapter.mode).mode;
@@ -70,7 +79,7 @@ function executionPreparation(adapter, validated, payload, extra = {}) {
     mode,
     intentHash: validated.intentHash,
     validated,
-    payload: Object.freeze({ ...payload }),
+    payload: deepFreeze(structuredClone(payload)),
     ...extra,
   });
 }

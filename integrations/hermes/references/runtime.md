@@ -123,11 +123,19 @@ If the result reports `redelegationRequired`, disclose both addresses and use
 change. Railgun delegation is per stake and is intentionally not handled by the
 generic command.
 
-Safe clients integrate with the proposer-only `SafeSupervisedExecutor` API.
-Gavel does not create a Safe or choose its address; operators configure an
-existing Safe. No Safe owner key belongs in Gavel. WaaP clients integrate with the
-`WaapAutonomousExecutor` API and must provide a policy hook; live WaaP broadcast
-is intentionally not supplied by this integration.
+Safe clients integrate with `SafeSupervisedExecutionAdapter`, which takes a
+proposal identity (never an owner key) and an onchain owner reader it uses to
+refuse running if that identity is a Safe owner. Gavel does not create a Safe or
+choose its address; operators configure an existing Safe. WaaP clients integrate
+with `WaapAutonomousExecutionAdapter` and must supply a policy hook -- there is
+no default-allow policy. Live WaaP broadcast is intentionally not supplied by
+this integration.
+
+The older single-phase `SafeSupervisedExecutor` / `WaapAutonomousExecutor`
+classes are deprecated, are no longer exported from `@gavel/core`, and refuse to
+construct unless `GAVEL_ALLOW_DEPRECATED_EXECUTORS=1` is set. Do not wire new
+integrations to them: they accept a caller-supplied target and calldata and
+stamp them validated. See `docs/architecture/execution.md`.
 
 ## Profile portability
 

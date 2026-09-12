@@ -34,6 +34,23 @@ const ENS_TOKEN_ABI = [
 ];
 
 const governorInterface = new Interface(ENS_GOVERNOR_ABI);
+const SUPPORT_LABELS = Object.freeze(["AGAINST", "FOR", "ABSTAIN"]);
+
+/**
+ * Decode `castVoteWithReason(uint256,uint8,string)` into the governance
+ * decision it encodes, so the canonical boundary can bind an execution
+ * intent's declared proposal, support and reason to the actual bytes.
+ */
+function decodeEnsVoteCall(data) {
+  const decoded = governorInterface.decodeFunctionData("castVoteWithReason", data);
+  const supportCode = Number(decoded[1]);
+  if (!SUPPORT_LABELS[supportCode]) throw new Error(`Unknown ENS support code ${supportCode}`);
+  return {
+    proposalId: decoded[0].toString(),
+    support: SUPPORT_LABELS[supportCode],
+    reason: decoded[2] === "" ? null : decoded[2],
+  };
+}
 const tokenInterface = new Interface(ENS_TOKEN_ABI);
 
 function decimal(value, label) {
@@ -152,6 +169,11 @@ class EnsDaoAdapter {
 
   validateProposal(proposal) {
     return inspectNounsProposal(proposal);
+  }
+
+  decodeGovernanceCall(action, data) {
+    if (action !== "CAST_VOTE") throw new Error(`ENS does not decode governance action ${action}`);
+    return decodeEnsVoteCall(data);
   }
 
   async getVotingPower(address, blockTag) {
@@ -355,6 +377,7 @@ class EnsDaoAdapter {
 
 module.exports = {
   CHAIN_ID,
+  decodeEnsVoteCall,
   ENS_GOVERNOR_ADDRESS,
   ENS_TOKEN_ADDRESS,
   ENS_TIMELOCK_ADDRESS,

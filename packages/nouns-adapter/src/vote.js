@@ -82,6 +82,27 @@ function safeErrorMessage(error) {
   return String(message).replace(/\s+/g, " ").slice(0, 300);
 }
 
+const SUPPORT_LABELS = Object.freeze(["AGAINST", "FOR", "ABSTAIN"]);
+
+/**
+ * Decode `castRefundableVoteWithReason(uint256,uint8,string,uint32)` into the
+ * governance decision it encodes.
+ *
+ * Used by the canonical boundary to prove that an execution intent's declared
+ * proposal, support and reason are the ones actually in the calldata.
+ */
+function decodeNounsVoteCall(data) {
+  const decoded = voteInterface.decodeFunctionData("castRefundableVoteWithReason", data);
+  const supportCode = Number(decoded[1]);
+  if (!SUPPORT_LABELS[supportCode]) throw new Error(`Unknown Nouns support code ${supportCode}`);
+  return {
+    proposalId: decoded[0].toString(),
+    support: SUPPORT_LABELS[supportCode],
+    reason: decoded[2] === "" ? null : decoded[2],
+    clientId: Number(decoded[3]),
+  };
+}
+
 class NounsVotePreparationAdapter {
   constructor(options) {
     if (!options?.provider) throw new TypeError("A JSON-RPC provider is required");
@@ -312,6 +333,7 @@ class NounsVotePreparationAdapter {
 
 module.exports = {
   CHAIN_ID,
+  decodeNounsVoteCall,
   CLIENT_ID,
   GOVERNANCE_ADDRESS,
   NOUNS_TOKEN_ADDRESS,

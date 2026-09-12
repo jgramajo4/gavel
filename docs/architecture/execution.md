@@ -124,11 +124,11 @@ validated.validation    // { adapterVersion, validatedAt, proposalState,
                         //   semantics, checks }
 ```
 
-**This is the important architectural artifact.** It is a class with a private
-constructor sealed by a module-scoped symbol that is never exported, so the only
-code in the process that can mint one is `validateExecutionIntent()`. Identity is
-a private-field brand check rather than `instanceof`, so
-`Object.create(ValidatedExecutionIntent.prototype)` does not pass either.
+**This is the important architectural artifact.** Its constructor is gated by a
+module-scoped symbol that is never exported, so the only code that can mint one
+is `validateExecutionIntent()`. Identity is a private-field brand check rather
+than `instanceof`, so `Object.create(ValidatedExecutionIntent.prototype)` does
+not pass either.
 
 The consequence is the intended asymmetry:
 
@@ -146,19 +146,56 @@ This replaces the previous `validated: true` field on prepared transactions,
 which any caller could write for arbitrary calldata while producing a
 self-consistent hash.
 
-**Validation does not trust the adapter.** `validateExecutionIntent()`:
+### What the seal proves, and what it does not
+
+Stated precisely, because an overstated version of this was previously in this
+document and is a defect in its own right.
+
+**It proves** that `validateExecutionIntent()` ran with a DAO adapter and that
+its checks passed (below), and that the intent has not been edited since.
+
+**It does not prove that chain state was read.** `validateExecutionIntent()`
+performs no I/O: it consumes `evidence` supplied by its caller. Live
+verification is `GovernanceAdapter.prepareValidatedIntent()`, which calls the
+adapter's `prepareVote()` against a provider and mints only from that result.
+
+**It does not prove a genuine adapter was used.** The adapter is a parameter,
+so code already executing in-process can supply a self-consistent fake adapter
+and mint. What contains that is the layer above: the CLI resolves adapters from
+a fixed registry of DAO ids and has no surface that accepts an adapter object,
+and `gavel execution prepare` / `execution submit` take governance inputs and
+re-run live validation rather than lifting a stored document. An attacker who
+can already call arbitrary functions in the Gavel process is outside what a
+type boundary can address.
+
+**Validation does not trust the adapter's evidence.**
+`validateExecutionIntent()`:
 
 - re-derives the 4-byte selector from the calldata rather than believing the
   evidence's claim about it;
-- requires the target to be an address the adapter itself declared as part of
-  its governance system (`governanceTargets`, else `governanceContracts`);
-- checks the selector against the adapter's declared selectors for the action;
-- re-derives the `voteIntentHash` link when the VoteIntent is supplied;
+- requires the target to be an address the adapter **explicitly declared** in
+  `governanceTargets`. There is no fallback to `governanceContracts`: that map
+  holds every contract an adapter knows about (ENS's includes the token and the
+  timelock), so falling back to it widened the allowed target set beyond the
+  governor;
+- requires the adapter to declare `governanceSelectors` for the action, and the
+  calldata's selector to be one of them. An adapter that declared none used to
+  accept any selector against a declared target, including a governor's own
+  `execute`, `queue` or `cancel`;
+- **requires the adapter to decode its own calldata** and cross-checks the
+  encoded proposal, support and reason against `intent.source`. A selector says
+  which function is called, not with what: the same valid
+  `castRefundableVoteWithReason` selector encodes a vote FOR proposal 42 and
+  AGAINST proposal 999, so without this the declared decision was unbound to
+  the bytes. A decoder is mandatory rather than optional, because skipping the
+  check silently is the hole;
+- **requires** the originating VoteIntent and re-derives the `voteIntentHash`
+  link. Made optional, the provenance could simply be omitted;
 - requires `proposalStateVotable`, `actorEligible`, and that every check the
   adapter reported actually passed.
 
 A buggy or compromised adapter cannot bless a call to an address it never
-declared.
+declared, and no caller can swap a vote's arguments behind a valid selector.
 
 ## 3. Intent hashing
 
@@ -483,6 +520,24 @@ Every provider-specific value lives here and nowhere near the intent, which is
 what makes retry safe and the same intent portable across modes. The canonical
 governance intent is never mutated to carry provider history.
 
+`audit` also carries the intent's execution-critical fields (`calldata`,
+`value`, `operation`, `governanceTarget`), which is what lets an adapter
+re-verify a provider's account of a transaction after a restart, when the
+`ValidatedExecutionIntent` itself is long gone.
+
+**Stores.** `ExecutionEngine` requires an explicit store; there is no default,
+because an in-memory default silently loses deduplication on restart and the
+failure mode is a duplicate governance action rather than an error.
+
+| Store | Use |
+| --- | --- |
+| `FileExecutionRecordStore` | durable; one JSON file per record at 0600, atomic per-record writes. Single-process: it does not coordinate between concurrent Gavel processes sharing a directory. |
+| `InMemoryExecutionRecordStore` | tests only. |
+
+A deployment needing multi-process coordination should implement the same
+interface (`get`, `getById`, `put`, `listByKey`, `listByIntentHash`,
+`listByProposal`) over its own database.
+
 ## 11. Idempotency and replay
 
 `packages/core/src/execution/replay.js`
@@ -654,16 +709,21 @@ surface exists.
 
 ## 15. Security invariants
 
-| Invariant | Enforcement |
-| --- | --- |
-| **Governance** — only Gavel-generated, adapter-validated actions cross into execution | `ValidatedExecutionIntent`'s private constructor; `assertPreparable()` in every adapter |
-| **Mutation** — execution-critical fields cannot silently change after validation | the intent is deeply frozen; `intentHash` covers `target`, `value`, `data`, `chainId`, `actor`; any change is a new intent needing revalidation |
-| **Identity** — proposal identities cannot become autonomous execution identities | distinct types with private-field brands; no exported conversion |
-| **Safe** — supervised mode never requires Gavel to be a Safe owner | `ProposalIdentity` has no broadcast capability; the adapter refuses a proposer in the owner set |
-| **Authorization** — Safe execution authority stays with the human threshold | the adapter refuses a response counting the proposer as a confirming owner |
-| **Autonomous** — autonomous execution needs an explicit executor and policy | `autonomyAllowed` defaults closed; no default-allow policy; a missing policy hook is a constructor error |
-| **Arbitrary-call** — no runtime converts natural language into arbitrary wallet calls | no CLI or core surface accepts a target and calldata; every action goes natural language → governance intent → execution intent → validation → executor |
-| **Separation** — one key never serves both roles | `ExecutionIdentitySet.assertSeparation()`; profile-level reference check |
+Each row says what is actually enforced and where. Where an invariant has a
+known limit, the limit is stated rather than omitted.
+
+| Invariant | Enforcement | Known limit |
+| --- | --- | --- |
+| **Governance** — only Gavel-generated, adapter-validated actions cross into execution | `ValidatedExecutionIntent`'s symbol-gated constructor and private-field brand; `assertPreparable()` in every adapter; the CLI's execution commands take governance inputs and re-run live validation | `validateExecutionIntent()` takes the adapter as a parameter and does no I/O, so in-process code can supply a fake adapter (see §2) |
+| **Mutation** — execution-critical fields cannot change after validation | the intent is cloned and deeply frozen; `intentHash` covers `target`, `value`, `data`, `chainId`, `actor`; **preparation payloads are deeply frozen, and every adapter's `submit()` rebuilds the onchain call from `validated.intent` rather than reading the payload** | — |
+| **Calldata binding** — the declared decision is the one in the bytes | the adapter must implement `decodeGovernanceCall()`; core cross-checks the encoded proposal, support and reason against `intent.source` | a DAO whose vote call carries no reason (Railgun) reports `null`, and the intent must agree |
+| **Identity separation** — proposal identities cannot become execution identities | distinct types with per-class private-field brands; no exported conversion; **`ExecutionEngine` resolves every registered adapter's identity address and refuses to run if a proposal and an execution identity share one** | profile-level checking compares credential *references*; the address check is what actually enforces it |
+| **Safe** — supervised mode never requires Gavel to be a Safe owner | `ProposalIdentity` has no broadcast capability; **an onchain `getOwners` reader is required, not optional**, and is re-read on every prepare and submit | relies on the operator's reader being an honest view of the Safe |
+| **Authorization** — Safe authority stays with the human threshold | the adapter refuses a proposal the service reports as confirmed by the proposal identity | if the service omits `confirmations` the count is zero, so the state reads as awaiting authorization rather than authorized |
+| **Provider distrust** — provider metadata is never the authority | the SafeTx hash is computed locally and recomputed at submit; verification is a **read-back** after proposing, since the real API returns an empty body; **every execution-critical field must be present and match, on submit and on every poll — an absent field is an error, not a pass** | — |
+| **Autonomous** — autonomy needs an explicit executor and policy | `autonomyAllowed` defaults closed and is checked before policy; only an explicit `{ allowed: true }` approves; a missing policy hook is a constructor error | policy scope (allowlists, rate limits) is the wallet's job, not Gavel's |
+| **Replay and freshness** — a stale or duplicate action is refused | idempotency on `intentHash + mode + actor`; replay across every attempt on the proposal under DAO-declared semantics; **an unknown or unevaluable deadline is refused by default** rather than treated as never expiring | correctness across restarts requires a durable store; the engine has no in-memory default, but `InMemoryExecutionRecordStore` is still selectable |
+| **Arbitrary-call** — no runtime turns natural language into arbitrary wallet calls | no CLI or core surface accepts a target and calldata; the deprecated single-phase executors are unexported and inert without `GAVEL_ALLOW_DEPRECATED_EXECUTORS=1` | the document builder those executors used stays callable by path, because `prepare-delegation` emits unsigned calldata with it |
 
 ## 16. Threat model
 
@@ -673,12 +733,19 @@ An attacker embeds instructions in proposal text to make the agent submit
 arbitrary calldata.
 
 *Mitigation.* Execution adapters accept only a `ValidatedExecutionIntent`, whose
-constructor is unreachable outside its module. Even a fully compromised agent
-loop has no function to call that turns a chosen target and calldata into one:
-validation requires a live DAO adapter, and the target must be an address that
-adapter declared. Proposal prose is already classified
-`UNTRUSTED_GOVERNANCE_CONTENT` / `NEVER_FOLLOW` by the security inspector above
-the boundary.
+constructor is unreachable outside its module, and their `submit()` derives the
+onchain call from that intent rather than from any payload handed to them. An
+agent driving the CLI has no surface that accepts a target and calldata: the
+execution commands take a prediction and a proposal and re-run live validation,
+so a doctored document cannot be laundered into a sealed intent. The calldata's
+encoded proposal and support must match the declared decision, so a valid
+selector with swapped arguments is refused. Proposal prose is separately
+classified `UNTRUSTED_GOVERNANCE_CONTENT` / `NEVER_FOLLOW` above the boundary.
+
+*Residual.* An attacker with arbitrary in-process code execution can construct
+a self-consistent fake adapter and mint (see §2). The boundary is a defence
+against an agent choosing bad *inputs*, not against arbitrary code running
+inside Gavel.
 
 ### Compromised Safe proposal identity
 
@@ -710,12 +777,18 @@ is independently revocable.
 
 The Safe Transaction Service or a wallet provider behaves incorrectly.
 
-*Mitigation.* Provider metadata is never the authority. The `safeTxHash` is
-computed locally and compared; the target and calldata are re-verified against
-the validated intent on every status poll; a provider-reported state must be a
-legal transition from the recorded one or the update is refused; a
-mined-but-reverted transaction is `FAILED` regardless of what the provider calls
-it.
+*Mitigation.* Provider metadata is never the authority, and **omission is
+treated as failure**. The `safeTxHash` is computed locally, recomputed at
+submit, and compared. After proposing, the proposal is read back and every
+execution-critical field — `safeTxHash`, `safe`, `chainId`, `to`, `data`,
+`value`, `operation`, `nonce` — must be present and must match the validated
+intent; the same check runs on every poll. A provider-reported state must be a
+legal transition from the recorded one. A mined-but-reverted transaction is
+`FAILED` regardless of what the provider calls it.
+
+This was the shape of a real hole: the checks were written as `if (field &&
+mismatch)`, so a service returning `{ isExecuted: true }` with no `to`, `data`
+or `safeTxHash` passed all of them and reported a successful execution.
 
 ### Replay
 
@@ -723,9 +796,18 @@ An old validated intent is resubmitted.
 
 *Mitigation.* The adapter-recorded deadline is checked at submission, so an
 intent validated while a proposal was ACTIVE is rejected once the window closes.
-Execution records plus DAO-declared semantics reject a second governance action
-on the same proposal, including under a different intent hash or a different
-mode. Idempotency returns the existing attempt instead of creating another.
+A deadline that is unknown, or that cannot be evaluated because no current block
+number was supplied, is refused rather than passed — previously it read as "not
+expired", which made such an intent submittable indefinitely. Execution records
+plus DAO-declared semantics reject a second governance action on the same
+proposal, including under a different intent hash or a different mode.
+Idempotency returns the existing attempt instead of creating another.
+
+*Operational requirement.* Deduplication is only as durable as the record
+store. Use `FileExecutionRecordStore` (or an implementation of the same
+interface over your own database) for anything that submits; the engine refuses
+to construct without an explicit store so the choice cannot be made by
+accident.
 
 ### Credential exposure through logs
 
@@ -769,10 +851,20 @@ proposal                 normalized proposal + contentHash
 | 5 | Autonomous execution against validated intents | adapter done; no live broadcaster client is bundled |
 | 6 | ENS, Railgun and future DAOs on the same contract | done — all three satisfy the canonical contract |
 
-Backwards compatibility is preserved. `gavel prepare-vote` emits the same
-document; `from-preparation.js` bridges stored preparations into canonical
-intents; the previous single-phase executors still work and are marked
-deprecated with pointers to their replacements.
+Backwards compatibility is mostly preserved. `gavel prepare-vote` emits the
+same document and `from-preparation.js` still bridges stored preparations into
+canonical intents in-process.
+
+Two deliberate breaks:
+
+- **`gavel execution prepare` no longer accepts a stored preparation.** It takes
+  a prediction and a proposal and re-runs live validation. Lifting a document
+  was a hole: a `READY_TO_SIGN` JSON could be edited to encode a different
+  proposal behind the same valid selector.
+- **The deprecated single-phase executors are unexported and inert.** They are
+  requirable by path with `GAVEL_ALLOW_DEPRECATED_EXECUTORS=1` for an in-flight
+  migration. `@gavel/core` no longer exposes them, because they stamp
+  `validated: true` on caller-supplied calldata.
 
 **Not bundled.** Gavel ships the execution architecture, not a wallet provider.
 No live Safe Transaction Service client and no autonomous broadcaster are

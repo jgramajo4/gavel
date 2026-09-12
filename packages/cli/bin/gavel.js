@@ -20,8 +20,7 @@ const {
   ExecutionMode,
   Support,
   assertCanonicalGovernanceAdapter,
-  governanceDeadline,
-  parseExecutionProfile,
+  assertProductionReady,
   profileIdentityReferences,
   ONBOARDING_QUESTIONS,
   applyBacktestEvaluationToPrediction,
@@ -34,7 +33,6 @@ const {
   resolveDataDir,
   resolveExecutionReadiness,
   runChronologicalBacktest,
-  validatedIntentFromPreparation,
 } = require("../../core");
 
 const DATA_DIR = resolveDataDir();
@@ -90,10 +88,12 @@ Usage:
   gavel prepare-delegation --dao <nouns|ens> --asset-owner-address <address>
                            (--to <address> | --executor <safe|waap>)
                            [--rpc <url>] [--output <path>] [--stdout]
-  gavel execution prepare <preparation.json> [--dao <dao>] [--proposal <proposal.json>]
-                          [--output <path>] [--stdout]
-  gavel execution submit <validated-intent.json> --mode <mode>
-                         [--profile <execution-profile.json>]
+  gavel execution prepare <prediction.json> <proposal.json> --support <choice>
+                          [--execution-address <address>] [--asset-owner <address>]
+                          [--reason <text>] [--rpc <url>] [--output <path>] [--stdout]
+  gavel execution submit <prediction.json> <proposal.json> --support <choice>
+                         --profile <execution-profile.json> [--mode <mode>]
+                         [--expect-intent <hash|intent.json>] [--rpc <url>]
   gavel identity create --type safe-proposer --safe <address> [--chain-id <id>]
                         [--label <name>] [--passphrase-env <VAR>]
 
@@ -108,15 +108,16 @@ Commands:
   prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
   execution-status  Fail-closed readiness for unsigned, Safe, or WaaP execution.
   prepare-delegation  Prepare, but never submit, Nouns or ENS delegation calldata.
-  execution prepare   Lift a validated preparation into a canonical ValidatedExecutionIntent.
-  execution submit    Hand a Gavel-generated intent to a configured execution backend.
+  execution prepare   Validate live against the DAO and emit a canonical ValidatedExecutionIntent.
+  execution submit    Re-validate live, then hand the intent to a configured execution backend.
   identity create     Create a locally held, encrypted Safe proposal identity.
 
 Execution boundary:
   Execution commands operate only on Gavel-generated intents. There is no
   surface that submits caller-supplied calldata: every action must travel
   natural language -> governance intent -> execution intent -> validation
-  -> executor.
+  -> executor. A stored intent document is an audit artifact, never an
+  authorization: submission always re-validates against live chain state.
 
 Network:
   Chain-backed commands use ${DEFAULT_ETHEREUM_RPC_URL} by default.
@@ -764,19 +765,32 @@ async function prepareDelegationCommand(argv) {
 }
 
 /**
- * `gavel execution prepare` -- lift a stored, validated preparation into the
- * canonical ValidatedExecutionIntent and write the document.
+ * `gavel execution prepare` -- run live governance validation and emit the
+ * canonical ValidatedExecutionIntent.
  *
- * This is the boundary crossing made explicit. It reads only a Gavel-generated
- * preparation: there is deliberately no way to supply a target and calldata.
+ * It takes the same inputs as `prepare-vote` (a prediction and a normalized
+ * proposal) and runs the DAO adapter against a provider, because that is the
+ * only thing that makes a validated intent a statement about chain state.
+ *
+ * It deliberately does NOT accept a stored preparation document. Lifting one
+ * was a hole: a `READY_TO_SIGN` JSON could be edited to encode a different
+ * proposal id behind the same valid selector, and the seal would be stamped
+ * over the attacker's calldata without anything re-reading the chain.
  */
 async function executionPrepareCommand(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
-      dao: { type: "string" },
-      proposal: { type: "string" },
+      support: { type: "string" },
+      from: { type: "string" },
+      "asset-owner": { type: "string" },
+      "execution-address": { type: "string" },
+      reason: { type: "string" },
+      amount: { type: "string" },
+      hint: { type: "string" },
+      "acknowledge-security-review": { type: "boolean", default: false },
+      "acknowledge-prediction-review": { type: "boolean", default: false },
       rpc: { type: "string" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
@@ -787,25 +801,44 @@ async function executionPrepareCommand(argv) {
     process.stdout.write(usage());
     return;
   }
-  if (positionals.length !== 1) throw new Error("execution prepare requires one vote preparation JSON path");
+  if (positionals.length !== 2) {
+    throw new Error("execution prepare requires prediction and normalized proposal JSON paths");
+  }
+  if (!values.support) {
+    throw new Error("execution prepare requires --support AGAINST, FOR, or ABSTAIN as explicit confirmation");
+  }
 
-  const preparation = await readJson(positionals[0]);
-  const dao = values.dao || preparation.dao;
-  if (!dao) throw new Error("execution prepare requires --dao when the preparation does not name one");
-  const adapter = assertCanonicalGovernanceAdapter(
-    createDaoAdapter(dao, createEthereumProvider({ rpcUrl: values.rpc })),
-  );
+  const [prediction, proposalInput] = await Promise.all([
+    readJson(positionals[0]),
+    readJson(positionals[1]),
+  ]);
+  const proposal = proposalInput.proposal || proposalInput;
+  const provider = createEthereumProvider({ rpcUrl: values.rpc });
+  const adapter = assertCanonicalGovernanceAdapter(createDaoAdapter(prediction.dao, provider));
 
-  // The proposal supplies the voting deadline, which is what lets the
-  // execution layer reject this intent once the window closes. Without it the
-  // intent still validates, and records say the deadline is unknown.
-  const proposalInput = values.proposal ? await readJson(values.proposal) : null;
-  const proposal = proposalInput?.proposal || proposalInput;
-  const validated = validatedIntentFromPreparation(adapter, preparation, {
-    adapterVersion: adapter.adapterVersion,
-    semantics: adapter.getExecutionSemantics(),
-    deadline: governanceDeadline(proposal),
+  // Live validation. `prepareValidatedIntent` calls the adapter's own
+  // `prepareVote()` against the provider and mints only from that result.
+  const { preparation, validated, blockers } = await adapter.prepareValidatedIntent({
+    prediction,
+    proposal,
+    selectedSupport: values.support,
+    votingAddress: values["execution-address"] || values.from,
+    executionAddress: values["execution-address"] || values.from,
+    assetOwnerAddress: values["asset-owner"],
+    reason: values.reason,
+    amount: values.amount,
+    hint: values.hint,
+    acknowledgeSecurityReview: values["acknowledge-security-review"],
+    acknowledgePredictionReview: values["acknowledge-prediction-review"],
   });
+
+  if (!validated) {
+    process.stdout.write(
+      `${JSON.stringify({ status: preparation.status, dao: preparation.dao, proposalId: preparation.proposalId, blockers }, null, 2)}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
 
   const document = validated.toJSON();
   if (values.stdout) {
@@ -832,6 +865,9 @@ async function executionPrepareCommand(argv) {
         deadline: validated.validation.deadline,
         semantics: validated.validation.semantics,
         output: absolutePath,
+        note:
+          "This document is an audit artifact, not an authorization. `gavel execution submit` " +
+          "re-runs live validation rather than trusting it.",
       },
       null,
       2,
@@ -840,23 +876,35 @@ async function executionPrepareCommand(argv) {
 }
 
 /**
- * `gavel execution submit` -- hand a Gavel-generated intent to a configured
- * execution backend.
+ * `gavel execution submit` -- re-validate live, then hand the intent to a
+ * configured execution backend.
  *
- * A stored intent document is not a ValidatedExecutionIntent: re-entering the
- * boundary means re-validating against a live adapter, which is why this
- * command needs the originating preparation rather than only the document. No
- * live Safe Transaction Service or autonomous broadcaster client is bundled, so
- * this reports what the configured profile would do and stops short of
- * inventing a provider.
+ * It takes the governance inputs, not a stored intent document. A document is
+ * an audit artifact: re-entering the boundary means re-validating against a
+ * live adapter, so submitting from JSON would mean trusting whatever that JSON
+ * says. `--expect-intent` pins the run to a previously reviewed intent hash,
+ * which is how a human approval is carried forward without the document itself
+ * becoming the authorization.
+ *
+ * No live Safe Transaction Service or autonomous broadcaster is bundled, so
+ * this stops at the point where a backend would be invoked.
  */
 async function executionSubmitCommand(argv) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
+      support: { type: "string" },
+      from: { type: "string" },
+      "asset-owner": { type: "string" },
+      "execution-address": { type: "string" },
+      reason: { type: "string" },
       mode: { type: "string" },
       profile: { type: "string" },
+      "expect-intent": { type: "string" },
+      "acknowledge-security-review": { type: "boolean", default: false },
+      "acknowledge-prediction-review": { type: "boolean", default: false },
+      rpc: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -864,30 +912,64 @@ async function executionSubmitCommand(argv) {
     process.stdout.write(usage());
     return;
   }
-  if (positionals.length !== 1) throw new Error("execution submit requires one validated intent JSON path");
-  const document = await readJson(positionals[0]);
-  if (document?.kind !== "VALIDATED_EXECUTION_INTENT") {
-    throw new Error("execution submit accepts only a document produced by `gavel execution prepare`");
+  if (positionals.length !== 2) {
+    throw new Error("execution submit requires prediction and normalized proposal JSON paths");
   }
+  if (!values.support) throw new Error("execution submit requires --support as explicit confirmation");
   if (!values.profile) {
     throw new Error(
       "execution submit requires --profile naming an execution profile. Mode selection is explicit: " +
         "see docs/architecture/execution.md for the profile format.",
     );
   }
-  const profile = parseExecutionProfile(await readJson(values.profile));
+
+  const profile = assertProductionReady(await readJson(values.profile));
   const mode = normalizeMode(values.mode || profile.mode);
   if (mode !== profile.mode) {
     throw new Error(`--mode ${mode} does not match the profile mode ${profile.mode}`);
   }
 
-  // Gavel ships the execution architecture, not a wallet provider. A backend
-  // is supplied by the runtime; refusing loudly beats pretending to submit.
+  const [prediction, proposalInput] = await Promise.all([
+    readJson(positionals[0]),
+    readJson(positionals[1]),
+  ]);
+  const provider = createEthereumProvider({ rpcUrl: values.rpc });
+  const adapter = assertCanonicalGovernanceAdapter(createDaoAdapter(prediction.dao, provider));
+  const { validated, blockers } = await adapter.prepareValidatedIntent({
+    prediction,
+    proposal: proposalInput.proposal || proposalInput,
+    selectedSupport: values.support,
+    votingAddress: values["execution-address"] || values.from,
+    executionAddress: values["execution-address"] || values.from,
+    assetOwnerAddress: values["asset-owner"],
+    reason: values.reason,
+    acknowledgeSecurityReview: values["acknowledge-security-review"],
+    acknowledgePredictionReview: values["acknowledge-prediction-review"],
+  });
+  if (!validated) {
+    throw new Error(`Live validation refused this vote: ${blockers.map((blocker) => blocker.code).join(", ")}`);
+  }
+
+  // A reviewed intent hash pins the run: if live revalidation produces a
+  // different action than the human approved, stop rather than submit it.
+  if (values["expect-intent"]) {
+    const expected = /^0x[0-9a-f]{64}$/.test(values["expect-intent"])
+      ? values["expect-intent"]
+      : (await readJson(values["expect-intent"])).intentHash;
+    if (expected !== validated.intentHash) {
+      throw new Error(
+        `Live revalidation produced intent ${validated.intentHash}, not the reviewed ${expected}. ` +
+          "The governance action changed; review it again rather than submitting this one.",
+      );
+    }
+  }
+
   throw new Error(
-    `No execution backend is registered for ${mode} in this build. The profile is valid ` +
-      `(identities: ${profileIdentityReferences(profile).map((entry) => `${entry.role}=${entry.reference}`).join(", ") || "none"}), ` +
-      `and intent ${document.intentHash} is ready. Register a ${mode} adapter with the ExecutionEngine ` +
-      "to submit, or use `gavel prepare-vote` output for out-of-band signing.",
+    `No execution backend is registered for ${mode} in this build. Live validation passed ` +
+      `(intent ${validated.intentHash}, identities: ` +
+      `${profileIdentityReferences(profile).map((entry) => `${entry.role}=${entry.reference}`).join(", ") || "none"}). ` +
+      `Register a ${mode} adapter with the ExecutionEngine to submit, or use \`gavel prepare-vote\` ` +
+      "output for out-of-band signing.",
   );
 }
 

@@ -30,13 +30,19 @@ transaction into the Safe's approval queue. Authorize it as a Safe **delegate**,
 never as an owner.
 
 The proposal identity cannot execute anything, holds no funds, holds no
-governance delegation, and does not count toward the Safe threshold. This is
-structural rather than a matter of configuration: `ProposalIdentity` has no
-signing or broadcast method to call, and `SafeSupervisedExecutionAdapter` refuses
-to run if that identity appears in the Safe's owner set, or if the Transaction
-Service reports it as a confirming owner. It is revocable on its own — remove the
-delegate entry and Gavel loses its proposal authority without any change to the
-Safe's owners.
+governance delegation, and does not count toward the Safe threshold.
+
+This is enforced, not configured. `ProposalIdentity` has no signing or broadcast
+method to call, and `SafeSupervisedExecutionAdapter` **requires an onchain owner
+reader** (`safeInfo.getOwners`) — it will not construct without one, because
+nothing else establishes that Gavel's signature does not count toward the
+threshold. The owner set is re-read on every prepare and every submit, so an
+address added to the Safe later is caught rather than missed by a cached
+snapshot. A proposal the Transaction Service reports as *confirmed* by the
+proposal identity is refused for the same reason.
+
+It is revocable on its own — remove the delegate entry and Gavel loses its
+proposal authority without any change to the Safe's owners.
 
 ## Creating a proposal identity (BYOH)
 
@@ -87,13 +93,30 @@ knows any of it, and the Safe adapter knows no DAO.
 The operator supplies an existing Safe address. Gavel does not create a Safe,
 choose a Safe, or request an owner key.
 
-## The service is not trusted
+## The service is not trusted, and silence is not consent
 
-The `safeTxHash` is computed locally from the EIP-712 SafeTx payload and
-compared with the one the Transaction Service returns; a mismatch fails closed.
-On every status poll the returned target and calldata are re-checked against the
-validated intent, so a service that starts describing a different transaction
-for a known hash surfaces immediately rather than silently.
+The `safeTxHash` is computed locally from the EIP-712 SafeTx payload, recomputed
+at submit from the validated intent, and compared; a mismatch fails closed. The
+signature is produced over the recomputed body, so it can never belong to a
+transaction other than the one being sent.
+
+Verification is a **read-back**, not a check of the propose response: the real
+Safe API answers a successful propose with an empty body, so the response cannot
+be the check. After proposing, the proposal is read back and every
+execution-critical field — `safeTxHash`, `safe`, `chainId`, `to`, `data`,
+`value`, `operation`, `nonce` — must be present and must match. The same check
+runs on every status poll.
+
+**An absent field is an error, not a pass.** This mattered: the checks were
+originally written as `if (field && mismatch)`, so a service returning
+`{ isExecuted: true }` with no `to`, `data` or `safeTxHash` satisfied all of
+them and reported a successful execution of whatever Gavel thought it had
+proposed.
+
+Your service client must report the chain it queried. The Safe Transaction
+Service is per-chain by endpoint and does not always carry `chainId` in the
+body, but a field that is sometimes absent is a field an attacker can omit — and
+the client is your code, so it can always surface it.
 
 ## Lifecycle
 
@@ -104,7 +127,14 @@ EXECUTED`, or terminating in `FAILED`, `CANCELLED` or `EXPIRED`. The previous
 
 Retries are idempotent on `intentHash + mode + actor`, so running submission
 twice returns the existing proposal instead of queueing a second identical Safe
-transaction.
+transaction. A standalone `prepare()` does not count as an attempt in flight —
+nothing left the process — so a dry run does not block the real submission.
+
+Deduplication is only as durable as the execution record store. Use
+`FileExecutionRecordStore`, or your own implementation of the same interface:
+the engine refuses to construct without an explicit store, because an in-memory
+default loses every guarantee on restart and the failure mode is a duplicate
+vote.
 
 ## Before you start
 

@@ -32,10 +32,16 @@ entries.
 
 This is enforced, not advised. `WaapAutonomousExecutionAdapter` requires an
 `ExecutionIdentity`, and a `ProposalIdentity` structurally cannot be one —
-different types, private-field brand checks, and no exported conversion.
-`ExecutionIdentitySet.assertSeparation()` additionally refuses two identities
-that resolve to the same address, and an execution profile cannot name one
-credential reference for both roles.
+different types, per-class private-field brand checks, and no exported
+conversion.
+
+Type separation alone is not enough, because both roles are ultimately
+addresses and one signing backend can wrap both. So `ExecutionEngine` resolves
+the actual address of every registered adapter's identity and refuses to run if
+a proposal identity and an execution identity share one. A profile cannot name
+the same credential reference for both roles either — but note that two
+*different* references can resolve to one key, which is why the address check on
+the execution path is the one that matters.
 
 ## Gates
 
@@ -46,7 +52,10 @@ Every one of these must pass, and each fails closed:
 - `validation.autonomyAllowed` is true. An advisory observed-behavior
   recommendation sets it false and is never executed autonomously, whatever the
   policy would have said;
-- the actor, chain and target match the configured execution identity;
+- the actor, chain and target match the configured execution identity, checked
+  again at submit against `validated.intent` rather than against the prepared
+  payload — the broadcast request is rebuilt from the intent, so a preparation
+  altered between `prepare()` and `submit()` cannot redirect it;
 - the calldata's selector is one the DAO adapter declared for the action against
   a target it declared;
 - the policy returns an explicit `{ allowed: true }`. A throw, a rejected

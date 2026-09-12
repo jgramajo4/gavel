@@ -10,6 +10,7 @@ const {
   NOUNS_TOKEN_ADDRESS,
   NOUNS_TOKEN_ABI,
   NounsVotePreparationAdapter,
+  decodeNounsVoteCall,
 } = require("./vote");
 const { NounsDelegationPreparationAdapter } = require("./delegation");
 const {
@@ -64,6 +65,20 @@ class NounsDaoAdapter {
     return inspectNounsProposal(proposal);
   }
 
+  /**
+   * Decode a Nouns vote call so core can bind the governance decision to the
+   * bytes it claims to represent.
+   *
+   * A selector alone says which function is called, not with what: the same
+   * `castRefundableVoteWithReason` selector encodes a vote FOR proposal 42 and
+   * a vote AGAINST proposal 999. Core cannot decode this without becoming
+   * Nouns-aware, so the adapter does it and core cross-checks the result.
+   */
+  decodeGovernanceCall(action, data) {
+    if (action !== "CAST_VOTE") throw new Error(`Nouns does not decode governance action ${action}`);
+    return decodeNounsVoteCall(data);
+  }
+
   async getVotingPower(address, blockTag) {
     if (blockTag != null) return this.token.getPriorVotes(address, blockTag);
     return this.token.getCurrentVotes(address);
@@ -93,6 +108,7 @@ class NounsDaoAdapter {
 
 module.exports = {
   NounsDaoAdapter,
+  decodeNounsVoteCall,
   NounsDelegationPreparationAdapter,
   NounsSubgraphHistoryAdapter,
   DEFAULT_ENDPOINT,

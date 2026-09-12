@@ -12,12 +12,14 @@ const { getAddress } = require("ethers");
 const { assertActionSupported } = require("../../dao/registry");
 const { ExecutionMode, ExecutionStatus, executionResultSchema } = require("../../schema/execution");
 const {
+  assertDeprecatedPathAllowed,
   assertPreparedGovernanceTransaction,
   assertExecutorDidNotMutate,
 } = require("../transaction-binding");
 
 class WaapAutonomousExecutor {
   constructor(options) {
+    assertDeprecatedPathAllowed("WaapAutonomousExecutor");
     if (!options?.client || typeof options.client.submit !== "function") {
       throw new TypeError("WaaP governance client is required");
     }

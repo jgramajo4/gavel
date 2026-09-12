@@ -35,6 +35,25 @@ const RAILGUN_STAKING_ABI = [
 ];
 const votingInterface = new Interface(RAILGUN_VOTING_ABI);
 
+/**
+ * Decode `vote(uint256,uint256,bool,address,uint256)`.
+ *
+ * Railgun votes carry no reason field, so the decoded reason is null and an
+ * execution intent claiming a reason will not validate -- which is correct: the
+ * chain would never record it. The staked `amount` and `account` are returned
+ * too, so a caller can see the partial-vote size the calldata commits to.
+ */
+function decodeRailgunVoteCall(data) {
+  const decoded = votingInterface.decodeFunctionData("vote", data);
+  return {
+    proposalId: decoded[0].toString(),
+    amount: decoded[1].toString(),
+    support: decoded[2] ? Support.FOR : Support.AGAINST,
+    account: getAddress(decoded[3]),
+    reason: null,
+  };
+}
+
 function field(value, name, index) {
   return value?.[name] ?? value?.[index];
 }
@@ -161,6 +180,11 @@ class RailgunDaoAdapter {
 
   validateProposal(proposal) {
     return inspectNounsProposal(proposal);
+  }
+
+  decodeGovernanceCall(action, data) {
+    if (action !== "CAST_VOTE") throw new Error(`Railgun does not decode governance action ${action}`);
+    return decodeRailgunVoteCall(data);
   }
 
   async getVotingPower(address) {
@@ -345,6 +369,7 @@ class RailgunDaoAdapter {
 
 module.exports = {
   CHAIN_ID,
+  decodeRailgunVoteCall,
   RAILGUN_VOTING_ADDRESS,
   RAILGUN_STAKING_ADDRESS,
   RAILGUN_DELEGATOR_ADDRESS,

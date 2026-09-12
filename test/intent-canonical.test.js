@@ -5,6 +5,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { Interface } = require("ethers");
 
 const { createVoteIntent, voteIntentHash } = require("../packages/core/src/intent/vote-intent");
 const {
@@ -25,8 +26,19 @@ const SAFE = "0x0000000000000000000000000000000000000003";
 const GOVERNOR = "0x0000000000000000000000000000000000000010";
 const TOKEN = "0x0000000000000000000000000000000000000011";
 const ATTACKER = "0x00000000000000000000000000000000000000ff";
-const CALLDATA = "0x56781388000000000000000000000000000000000000000000000000000000000000002a";
-const SELECTOR = "0x56781388";
+// Real vote calldata: the boundary now binds the encoded proposal, support and
+// reason to the intent that claims them, so a stub byte string will not do.
+const voteInterface = new Interface([
+  "function castRefundableVoteWithReason(uint256 proposalId,uint8 support,string reason,uint32 clientId)",
+]);
+const SELECTOR = voteInterface.getFunction("castRefundableVoteWithReason").selector;
+
+function voteCalldata({ proposalId = 42, support = "FOR", reason = "Consistent with prior votes." } = {}) {
+  const code = { AGAINST: 0, FOR: 1, ABSTAIN: 2 }[support];
+  return voteInterface.encodeFunctionData("castRefundableVoteWithReason", [proposalId, code, reason ?? "", 38]);
+}
+
+const CALLDATA = voteCalldata();
 
 function voteIntent(overrides = {}) {
   return createVoteIntent({
@@ -60,7 +72,16 @@ function dao(overrides = {}) {
     chainId: 1,
     adapterVersion: "nouns@2.0.0",
     governanceContracts: { governor: GOVERNOR, token: TOKEN },
+    governanceTargets: [GOVERNOR],
     governanceSelectors: { CAST_VOTE: [SELECTOR] },
+    decodeGovernanceCall(action, data) {
+      const decoded = voteInterface.decodeFunctionData("castRefundableVoteWithReason", data);
+      return {
+        proposalId: decoded[0].toString(),
+        support: ["AGAINST", "FOR", "ABSTAIN"][Number(decoded[1])],
+        reason: decoded[2] === "" ? null : decoded[2],
+      };
+    },
     capabilities: { prepareVote: true, safeSupervised: true, waapAutonomous: true },
     supportedActions: ["CAST_VOTE"],
     validateProposal() {},
@@ -92,6 +113,7 @@ function evidence(overrides = {}) {
 function validate(overrides = {}) {
   return validateExecutionIntent({
     adapter: dao(),
+    voteIntent: overrides.voteIntent || voteIntent(),
     intent: executionIntent(),
     evidence: evidence(),
     ...overrides,
@@ -211,6 +233,13 @@ test("ValidatedExecutionIntent cannot be constructed, forged, or cast into", () 
     /accept only a ValidatedExecutionIntent/,
   );
 
+  // The VoteIntent is required, so nothing can mint without showing where the
+  // governance decision came from.
+  assert.throws(
+    () => validateExecutionIntent({ adapter: dao(), intent: executionIntent(), evidence: evidence() }),
+    (error) => error.code === "VOTE_INTENT_REQUIRED",
+  );
+
   // Round-tripping through JSON does not restore it: re-entering the boundary
   // requires re-validating against a live adapter.
   assert.equal(isValidatedExecutionIntent(JSON.parse(JSON.stringify(validated))), false);
@@ -234,7 +263,7 @@ test("a validated intent is immutable after validation", () => {
 
   // The caller's own copies cannot reach inside it either.
   const intent = executionIntent();
-  const held = validateExecutionIntent({ adapter: dao(), intent, evidence: evidence() });
+  const held = validateExecutionIntent({ adapter: dao(), voteIntent: voteIntent(), intent, evidence: evidence() });
   intent.target = ATTACKER;
   assert.equal(held.intent.target, GOVERNOR);
   assert.equal(held.intentHash, executionIntentHash(executionIntent()));
@@ -263,6 +292,13 @@ test("validation refuses arbitrary calldata, foreign targets, and undeclared sel
     }),
     "SELECTOR_NOT_ALLOWED_FOR_ACTION",
   );
+  // A valid selector whose arguments encode a different decision.
+  assert.equal(
+    codeOf({
+      intent: executionIntent({ data: voteCalldata({ proposalId: 999 }) }),
+    }),
+    "CALLDATA_DOES_NOT_MATCH_INTENT",
+  );
   // Evidence that disagrees with the calldata it claims to describe.
   assert.equal(codeOf({ evidence: evidence({ selector: "0xaaaaaaaa" }) }), "EVIDENCE_SELECTOR_MISMATCH");
   assert.equal(codeOf({ evidence: evidence({ governanceTarget: TOKEN }) }), "EVIDENCE_TARGET_MISMATCH");
@@ -273,7 +309,7 @@ test("validation refuses arbitrary calldata, foreign targets, and undeclared sel
   assert.equal(codeOf({ adapter: dao({ chainId: 8453 }) }), "CHAIN_MISMATCH");
   assert.equal(codeOf({ adapter: dao({ supportedActions: [] }) }), "ACTION_UNSUPPORTED");
   assert.equal(
-    codeOf({ adapter: dao({ governanceContracts: { governor: GOVERNOR }, governanceTargets: [] }) }),
+    codeOf({ adapter: dao({ governanceTargets: [] }) }),
     "ADAPTER_DECLARES_NO_GOVERNANCE_TARGETS",
   );
 
@@ -300,16 +336,16 @@ test("an adapter may only bless targets it declares, with no governance-contract
     (error) => error.code === "TARGET_NOT_GOVERNANCE_CONTRACT",
   );
 
-  // An adapter with no declared selector allowlist still gets target and
-  // selector-consistency checks, so it is safe but less specific.
-  const permissive = dao({ governanceSelectors: undefined });
-  assert.ok(
-    isValidatedExecutionIntent(
+  // An adapter with no declared selector allowlist is refused outright. Left
+  // optional, an adapter that simply never declared one accepted any 4-byte
+  // selector against a declared target -- including a governor's own execute.
+  assert.throws(
+    () =>
       validate({
-        adapter: permissive,
+        adapter: dao({ governanceSelectors: undefined }),
         intent: executionIntent({ data: "0xdeadbeef" }),
         evidence: evidence({ selector: "0xdeadbeef" }),
       }),
-    ),
+    (error) => error.code === "ADAPTER_DECLARES_NO_SELECTORS_FOR_ACTION",
   );
 });

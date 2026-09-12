@@ -18,6 +18,7 @@
 
 const { getAddress } = require("ethers");
 
+const { ExecutionState } = require("./lifecycle");
 const { isActiveRecord, isSuccessfulRecord } = require("./records");
 
 class ReplayRejected extends Error {
@@ -37,9 +38,9 @@ class ReplayRejected extends Error {
  * resubmitted after it closed. The deadline the adapter recorded is what makes
  * staleness detectable without re-reading the chain.
  *
- * `kind: "none"` means the adapter did not supply one. That is not treated as
- * "never expires" silently -- it is reported, so a caller can decide whether to
- * require a deadline.
+ * `kind: "none"` means the adapter did not supply one. `assertFresh()` refuses
+ * such an intent by default rather than treating it as never expiring, which is
+ * what an unknown deadline previously amounted to.
  */
 function evaluateFreshness(validated, clock = {}) {
   const deadline = validated.validation.deadline;
@@ -60,6 +61,18 @@ function evaluateFreshness(validated, clock = {}) {
 
 function assertFresh(validated, clock = {}) {
   const freshness = evaluateFreshness(validated, clock);
+  // An unknown deadline is not a pass. Left permissive, an intent minted
+  // without its proposal never went stale -- the deadline field said "none"
+  // and `expired` said false, so a validated intent stayed submittable
+  // indefinitely. Every DAO Gavel supports has a deadline, so the default is
+  // closed; an operator can opt in for one that genuinely does not.
+  if (!freshness.known && clock.allowUnknownDeadline !== true) {
+    throw new ReplayRejected(
+      "GOVERNANCE_DEADLINE_UNKNOWN",
+      `This intent carries no verifiable voting deadline (${freshness.kind}), so staleness cannot be ` +
+        "checked. Revalidate it against the proposal, or pass allowUnknownDeadline for a DAO with no deadline.",
+    );
+  }
   if (freshness.expired) {
     throw new ReplayRejected(
       "GOVERNANCE_WINDOW_CLOSED",
@@ -71,19 +84,44 @@ function assertFresh(validated, clock = {}) {
 }
 
 /**
+ * States in which something has actually reached a provider, so submitting
+ * again would duplicate an external effect.
+ *
+ * CREATED, VALIDATED and PREPARED are deliberately absent. They all mean
+ * nothing left the process: a standalone `prepare()` -- the dry run the
+ * three-phase contract exists to make possible -- used to record PREPARED and
+ * then block the real submission of the same intent until that record was
+ * abandoned.
+ */
+const SUBMITTED_STATES = Object.freeze(
+  new Set([
+    ExecutionState.SUBMITTED,
+    ExecutionState.AWAITING_AUTHORIZATION,
+    ExecutionState.AUTHORIZED,
+    ExecutionState.EXECUTING,
+  ]),
+);
+
+/**
  * The idempotency decision, from the records already stored under this key.
  *
  * Returns the record to hand back instead of submitting again, or null to
- * proceed. A live attempt and a succeeded attempt are both reasons not to
+ * proceed. A submitted attempt and a succeeded attempt are both reasons not to
  * submit; an abandoned one (failed, cancelled, expired) is not, so a genuine
- * retry after a provider failure still works.
+ * retry after a provider failure still works, and neither is a prepared-only
+ * attempt that never reached a provider.
  */
 function resolveIdempotency(records) {
   const succeeded = records.find((record) => isSuccessfulRecord(record));
   if (succeeded) return { record: succeeded, reason: "ALREADY_EXECUTED" };
-  const active = records.find((record) => isActiveRecord(record));
-  if (active) return { record: active, reason: "ALREADY_IN_FLIGHT" };
+  const inFlight = records.find((record) => SUBMITTED_STATES.has(record.state));
+  if (inFlight) return { record: inFlight, reason: "ALREADY_IN_FLIGHT" };
   return null;
+}
+
+/** A prepared-but-unsubmitted attempt under this key, to reuse rather than duplicate. */
+function reusablePreparedRecord(records) {
+  return records.find((record) => record.state === ExecutionState.PREPARED) || null;
 }
 
 /** The next attempt number for a key whose previous attempts are all dead. */
@@ -167,6 +205,8 @@ function assertReplayAllowed(validated, records, options = {}) {
 
 module.exports = {
   ReplayRejected,
+  SUBMITTED_STATES,
+  reusablePreparedRecord,
   assertFresh,
   assertReplayAllowed,
   evaluateFreshness,

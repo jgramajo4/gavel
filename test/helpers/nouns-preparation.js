@@ -13,6 +13,7 @@ const {
   GOVERNANCE_ADDRESS,
   NOUNS_TOKEN_ADDRESS,
   NounsVotePreparationAdapter,
+  decodeNounsVoteCall,
 } = require("../../packages/nouns-adapter/src/vote");
 
 const VOTER = "0x1111111111111111111111111111111111111111";
@@ -193,8 +194,13 @@ function nounsAdapterDescriptor(overrides = {}) {
     chainId: 1,
     adapterVersion: "nouns@test",
     governanceContracts: { governor: GOVERNANCE_ADDRESS, token: NOUNS_TOKEN_ADDRESS },
+    // Only the governor is a vote target: the contract map is not an allowlist.
+    governanceTargets: [GOVERNANCE_ADDRESS],
     // castRefundableVoteWithReason(uint256,uint8,string,uint32)
     governanceSelectors: { CAST_VOTE: ["0x8136730f"] },
+    // The boundary binds the encoded decision to the bytes, so a descriptor
+    // has to decode its own calldata just as the real adapter does.
+    decodeGovernanceCall: (action, data) => decodeNounsVoteCall(data),
     capabilities: { analyze: true, predict: true, prepareVote: true, safeSupervised: true, waapAutonomous: true },
     supportedActions: ["CAST_VOTE"],
     validateProposal() {},

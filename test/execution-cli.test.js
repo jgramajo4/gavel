@@ -5,9 +5,46 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+
+const { stubProvider } = require("./helpers/stub-rpc");
+const { ACTION_TARGET, VOTER, prediction, proposal } = require("./helpers/nouns-preparation");
 
 const CLI = path.resolve(__dirname, "..", "packages", "cli", "bin", "gavel.js");
+const PROPOSER = "0x3333333333333333333333333333333333333333";
+
+/**
+ * Run the CLI asynchronously.
+ *
+ * `spawnSync` blocks the parent's event loop, so a stub RPC server running in
+ * this process could never answer the child's requests -- the CLI would hang
+ * with zero calls served. Chain-backed CLI tests have to spawn asynchronously.
+ */
+function runAsync(args, options = {}) {
+  const dataDir = options.dataDir || fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-cli-"));
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: { ...process.env, GAVEL_DATA_DIR: dataDir, GAVEL_STRUCTURED_ERRORS: "0", ...options.env },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`the CLI did not exit within 30s: ${args.join(" ")}`));
+    }, 30_000);
+    child.on("error", reject);
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr, dataDir });
+    });
+  });
+}
 
 function run(args, env = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-cli-"));
@@ -16,6 +53,16 @@ function run(args, env = {}) {
     env: { ...process.env, GAVEL_DATA_DIR: dataDir, GAVEL_STRUCTURED_ERRORS: "0", ...env },
   });
   return { ...result, dataDir };
+}
+
+/** Write the prediction and proposal `execution prepare` consumes. */
+function governanceInputs() {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-in-"));
+  const predictionPath = path.join(scratch, "prediction.json");
+  const proposalPath = path.join(scratch, "proposal.json");
+  fs.writeFileSync(predictionPath, JSON.stringify(prediction()));
+  fs.writeFileSync(proposalPath, JSON.stringify(proposal()));
+  return { scratch, predictionPath, proposalPath };
 }
 
 test("the CLI exposes no surface that submits caller-supplied calldata", () => {
@@ -27,97 +74,163 @@ test("the CLI exposes no surface that submits caller-supplied calldata", () => {
   assert.doesNotMatch(stdout, /safe propose/);
   assert.doesNotMatch(stdout, /--calldata/);
   assert.doesNotMatch(source, /"calldata":\s*\{\s*type:/);
+  assert.doesNotMatch(source, /"data":\s*\{\s*type:/);
   assert.doesNotMatch(source, /command === "safe"/);
 
-  // The execution commands read Gavel-generated documents, not transactions.
-  assert.match(stdout, /gavel execution prepare <preparation\.json>/);
-  assert.match(stdout, /gavel execution submit <validated-intent\.json>/);
-  assert.match(stdout, /natural language -> governance intent -> execution intent/);
-});
-
-test("execution prepare lifts a validated preparation into a canonical intent", async () => {
-  const { prepareNounsVote } = require("./helpers/nouns-preparation");
-  const { proposal } = require("./helpers/nouns-preparation");
-  const preparation = await prepareNounsVote();
-
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-in-"));
-  const preparationPath = path.join(scratch, "preparation.json");
-  const proposalPath = path.join(scratch, "proposal.json");
-  fs.writeFileSync(preparationPath, JSON.stringify(preparation));
-  fs.writeFileSync(proposalPath, JSON.stringify(proposal()));
-
-  const prepared = run(["execution", "prepare", preparationPath, "--proposal", proposalPath, "--stdout"]);
-  assert.equal(prepared.status, 0, prepared.stderr);
-  const document = JSON.parse(prepared.stdout);
-
-  assert.equal(document.kind, "VALIDATED_EXECUTION_INTENT");
-  assert.match(document.intentHash, /^0x[0-9a-f]{64}$/);
-  assert.equal(document.intent.source.dao, "nouns");
-  assert.equal(document.intent.source.proposalId, "42");
-  assert.equal(document.intent.source.support, "FOR");
-  assert.equal(document.intent.operation, "CALL");
-  assert.equal(document.validation.adapterVersion, "nouns@1.1.0");
-  assert.equal(document.validation.proposalState, "ACTIVE");
-  assert.equal(document.validation.selector, "0x8136730f");
-  // The proposal supplied the deadline, and Nouns is block-timed.
-  assert.deepEqual(document.validation.deadline, { kind: "block", value: "200" });
-  // Nouns permits neither repeat nor replacement votes.
-  assert.deepEqual(document.validation.semantics, { canVoteMultipleTimes: false, canReplaceVote: false });
-
-  // Nothing provider-specific is in the intent.
-  for (const leaked of ["safeTxHash", "safeNonce", "sessionId", "providerRequestId"]) {
-    assert.equal(Object.prototype.hasOwnProperty.call(document.intent, leaked), false, leaked);
+  // No execution command takes a transaction. (`prepare-delegation --to` names
+  // a delegate, and its output is unsigned calldata for a human to sign -- it
+  // never reaches an executor.)
+  const executionOptions = source.slice(source.indexOf("async function executionPrepareCommand"));
+  const untilIdentity = executionOptions.slice(0, executionOptions.indexOf("async function identityCreateCommand"));
+  for (const forbidden of ['"to":', '"data":', '"calldata":', '"value":', '"target":']) {
+    assert.ok(!untilIdentity.includes(forbidden), `an execution command accepts ${forbidden}`);
   }
 
-  // Without a proposal the intent is still valid, but the deadline is unknown.
-  const noDeadline = run(["execution", "prepare", preparationPath, "--stdout"]);
-  assert.equal(noDeadline.status, 0, noDeadline.stderr);
-  const bare = JSON.parse(noDeadline.stdout);
-  assert.deepEqual(bare.validation.deadline, { kind: "none", value: null });
-  assert.equal(bare.intentHash, document.intentHash, "the deadline changed the intent identity");
-
-  // A blocked preparation cannot be lifted.
-  const blocked = await prepareNounsVote({ state: 3 });
-  const blockedPath = path.join(scratch, "blocked.json");
-  fs.writeFileSync(blockedPath, JSON.stringify(blocked));
-  const refused = run(["execution", "prepare", blockedPath, "--stdout"]);
-  assert.notEqual(refused.status, 0);
-  assert.match(refused.stderr, /READY_TO_SIGN/);
-
-  // Retargeted calldata does not survive re-validation against the adapter.
-  const retargeted = {
-    ...preparation,
-    transaction: { ...preparation.transaction, to: "0x00000000000000000000000000000000000000ff" },
-  };
-  const retargetedPath = path.join(scratch, "retargeted.json");
-  fs.writeFileSync(retargetedPath, JSON.stringify(retargeted));
-  const rejected = run(["execution", "prepare", retargetedPath, "--stdout"]);
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /not a declared nouns governance contract/);
+  // Both execution commands take governance inputs, not transactions.
+  assert.match(stdout, /gavel execution prepare <prediction\.json> <proposal\.json>/);
+  assert.match(stdout, /gavel execution submit <prediction\.json> <proposal\.json>/);
+  assert.match(stdout, /natural language -> governance intent -> execution intent/);
+  assert.match(stdout, /submission always re-validates against live chain state/);
 });
 
-test("execution prepare writes the intent under GAVEL_DATA_DIR with restrictive permissions", async () => {
-  const { prepareNounsVote } = require("./helpers/nouns-preparation");
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-out-"));
-  const preparationPath = path.join(scratch, "preparation.json");
-  fs.writeFileSync(preparationPath, JSON.stringify(await prepareNounsVote()));
+test("execution prepare reads live chain state and emits a sealed intent", async () => {
+  const { predictionPath, proposalPath } = governanceInputs();
+  const stub = stubProvider({ voter: VOTER, actionTarget: ACTION_TARGET, proposer: PROPOSER });
+  const rpc = await stub.start();
+  try {
+    const prepared = await runAsync([
+      "execution", "prepare", predictionPath, proposalPath,
+      "--support", "FOR", "--execution-address", VOTER, "--asset-owner", VOTER,
+      "--acknowledge-security-review", "--acknowledge-prediction-review",
+      "--rpc", rpc, "--stdout",
+    ]);
+    assert.equal(prepared.status, 0, prepared.stderr);
 
-  const prepared = run(["execution", "prepare", preparationPath]);
-  assert.equal(prepared.status, 0, prepared.stderr);
-  const summary = JSON.parse(prepared.stdout);
+    // The adapter actually talked to the chain: state, tallies, actions, the
+    // receipt, voting power, delegation and the canonical creation event all
+    // came from the provider rather than from the input documents.
+    for (const method of ["eth_chainId", "eth_blockNumber", "eth_getCode", "eth_call", "eth_getLogs"]) {
+      assert.ok(stub.calls.includes(method), `${method} was never requested`);
+    }
 
-  assert.ok(summary.output.startsWith(prepared.dataDir), summary.output);
-  assert.ok(summary.output.includes(path.join("intents", "nouns")));
-  assert.match(summary.intentHash, /^0x[0-9a-f]{64}$/);
-  assert.equal(summary.autonomyAllowed, false);
-  assert.equal(fs.statSync(summary.output).mode & 0o777, 0o600);
+    const document = JSON.parse(prepared.stdout);
+    assert.equal(document.kind, "VALIDATED_EXECUTION_INTENT");
+    assert.match(document.intentHash, /^0x[0-9a-f]{64}$/);
+    assert.equal(document.intent.source.dao, "nouns");
+    assert.equal(document.intent.source.proposalId, "42");
+    assert.equal(document.intent.source.support, "FOR");
+    assert.equal(document.intent.operation, "CALL");
+    assert.equal(document.validation.adapterVersion, "nouns@1.1.0");
+    assert.equal(document.validation.proposalState, "ACTIVE");
+    assert.equal(document.validation.selector, "0x8136730f");
+    // The deadline came from the live proposal read, so staleness is checkable.
+    assert.deepEqual(document.validation.deadline, { kind: "block", value: "200" });
+    assert.deepEqual(document.validation.semantics, { canVoteMultipleTimes: false, canReplaceVote: false });
+
+    // Nothing provider-specific is in the intent.
+    for (const leaked of ["safeTxHash", "safeNonce", "sessionId", "providerRequestId"]) {
+      assert.equal(Object.prototype.hasOwnProperty.call(document.intent, leaked), false, leaked);
+    }
+  } finally {
+    await stub.stop();
+  }
 });
 
-test("execution submit refuses anything that is not a Gavel-generated intent", async () => {
-  const { prepareNounsVote } = require("./helpers/nouns-preparation");
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-submit-"));
+test("execution prepare blocks when canonical chain state cannot be verified", async () => {
+  const { predictionPath, proposalPath } = governanceInputs();
+  // No ProposalCreated event: canonical freshness is unverifiable.
+  const stub = stubProvider({
+    voter: VOTER, actionTarget: ACTION_TARGET, proposer: PROPOSER, withCreationLog: false,
+  });
+  const rpc = await stub.start();
+  try {
+    const prepared = await runAsync([
+      "execution", "prepare", predictionPath, proposalPath,
+      "--support", "FOR", "--execution-address", VOTER, "--asset-owner", VOTER,
+      "--acknowledge-security-review", "--acknowledge-prediction-review",
+      "--rpc", rpc, "--stdout",
+    ]);
+    assert.equal(prepared.status, 2, prepared.stderr || prepared.stdout);
+    const report = JSON.parse(prepared.stdout);
+    assert.equal(report.status, "BLOCKED");
+    assert.ok(report.blockers.some((blocker) => blocker.code === "CANONICAL_VERSION_UNAVAILABLE"));
+  } finally {
+    await stub.stop();
+  }
+});
 
-  // A hand-written transaction is not an intent, whatever it is named.
+test("execution prepare fails closed when the chain disagrees with the inputs", async () => {
+  const { predictionPath, proposalPath } = governanceInputs();
+  const stub = stubProvider({
+    voter: VOTER,
+    actionTarget: ACTION_TARGET,
+    proposer: PROPOSER,
+    delegatee: "0x00000000000000000000000000000000000000ff",
+    state: 3, // DEFEATED
+  });
+  const rpc = await stub.start();
+  try {
+    const prepared = await runAsync([
+      "execution", "prepare", predictionPath, proposalPath,
+      "--support", "FOR", "--execution-address", VOTER, "--asset-owner", VOTER,
+      "--acknowledge-security-review", "--acknowledge-prediction-review",
+      "--rpc", rpc, "--stdout",
+    ]);
+    assert.equal(prepared.status, 2);
+    const codes = JSON.parse(prepared.stdout).blockers.map((blocker) => blocker.code);
+    assert.ok(codes.includes("PROPOSAL_NOT_ACTIVE"), codes.join(", "));
+    assert.ok(codes.includes("DELEGATION_MISMATCH"), codes.join(", "));
+  } finally {
+    await stub.stop();
+  }
+});
+
+test("a doctored proposal cannot be laundered into a sealed intent", async () => {
+  // The blocker-2 attack at the CLI: keep the same governor and the same valid
+  // selector, but point the inputs at a different proposal than the chain
+  // describes. Live revalidation is what catches it.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-doctored-"));
+  const predictionPath = path.join(scratch, "prediction.json");
+  const proposalPath = path.join(scratch, "proposal.json");
+  fs.writeFileSync(predictionPath, JSON.stringify(prediction({ proposalId: "999" })));
+  fs.writeFileSync(proposalPath, JSON.stringify(proposal({ id: "999" })));
+
+  const stub = stubProvider({ voter: VOTER, actionTarget: ACTION_TARGET, proposer: PROPOSER });
+  const rpc = await stub.start();
+  try {
+    const prepared = await runAsync([
+      "execution", "prepare", predictionPath, proposalPath,
+      "--support", "FOR", "--execution-address", VOTER, "--asset-owner", VOTER,
+      "--acknowledge-security-review", "--acknowledge-prediction-review",
+      "--rpc", rpc, "--stdout",
+    ]);
+    assert.notEqual(prepared.status, 0, "a proposal the chain does not describe was accepted");
+    // The chain reports proposal 42, so the canonical identity check fails.
+    const output = prepared.stdout || prepared.stderr;
+    assert.match(output, /CANONICAL_PROPOSAL_MISMATCH|CANONICAL_VERSION_UNAVAILABLE|PREDICTION_PROPOSAL_MISMATCH/);
+  } finally {
+    await stub.stop();
+  }
+});
+
+test("execution prepare requires governance inputs and an explicit support choice", () => {
+  const { predictionPath, proposalPath } = governanceInputs();
+
+  const noSupport = run(["execution", "prepare", predictionPath, proposalPath, "--stdout"]);
+  assert.notEqual(noSupport.status, 0);
+  assert.match(noSupport.stderr, /requires --support/);
+
+  // A stored preparation or intent document is not an accepted input: there is
+  // no path that mints a sealed intent from JSON alone.
+  const single = run(["execution", "prepare", predictionPath, "--support", "FOR"]);
+  assert.notEqual(single.status, 0);
+  assert.match(single.stderr, /requires prediction and normalized proposal JSON paths/);
+});
+
+test("execution submit re-validates live and never authorizes from a document", () => {
+  const { scratch, predictionPath, proposalPath } = governanceInputs();
+
+  // A hand-written transaction is not an accepted input, whatever it is named.
   const arbitrary = path.join(scratch, "arbitrary.json");
   fs.writeFileSync(
     arbitrary,
@@ -125,62 +238,64 @@ test("execution submit refuses anything that is not a Gavel-generated intent", a
   );
   const refused = run(["execution", "submit", arbitrary, "--mode", "safe-supervised"]);
   assert.notEqual(refused.status, 0);
-  assert.match(refused.stderr, /only a document produced by `gavel execution prepare`/);
+  assert.match(refused.stderr, /requires prediction and normalized proposal JSON paths/);
 
-  // The preparation itself is also not an intent.
-  const preparationPath = path.join(scratch, "preparation.json");
-  fs.writeFileSync(preparationPath, JSON.stringify(await prepareNounsVote()));
-  const wrongDocument = run(["execution", "submit", preparationPath, "--mode", "safe-supervised"]);
-  assert.notEqual(wrongDocument.status, 0);
-  assert.match(wrongDocument.stderr, /only a document produced by/);
-});
+  // Nor is a previously emitted intent document: submit takes governance
+  // inputs, because a document cannot be re-verified against chain state.
+  const intentDocument = path.join(scratch, "intent.json");
+  fs.writeFileSync(intentDocument, JSON.stringify({ kind: "VALIDATED_EXECUTION_INTENT", intentHash: `0x${"11".repeat(32)}` }));
+  const fromDocument = run(["execution", "submit", intentDocument, "--mode", "safe-supervised"]);
+  assert.notEqual(fromDocument.status, 0);
+  assert.match(fromDocument.stderr, /requires prediction and normalized proposal JSON paths/);
 
-test("execution submit requires an explicit execution profile and a matching mode", async () => {
-  const { prepareNounsVote } = require("./helpers/nouns-preparation");
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-exec-profile-"));
-  const preparationPath = path.join(scratch, "preparation.json");
-  fs.writeFileSync(preparationPath, JSON.stringify(await prepareNounsVote()));
-  const prepared = run(["execution", "prepare", preparationPath, "--stdout"]);
-  const intentPath = path.join(scratch, "intent.json");
-  fs.writeFileSync(intentPath, prepared.stdout);
-
-  // Mode selection is explicit: there is no implicit default.
-  const noProfile = run(["execution", "submit", intentPath, "--mode", "safe-supervised"]);
+  // Mode selection stays explicit.
+  const noProfile = run(["execution", "submit", predictionPath, proposalPath, "--support", "FOR"]);
   assert.notEqual(noProfile.status, 0);
   assert.match(noProfile.stderr, /requires --profile/);
+});
 
-  const profilePath = path.join(scratch, "profile.json");
-  fs.writeFileSync(
-    profilePath,
-    JSON.stringify({
-      version: 1,
-      mode: "safe-supervised",
-      safe: {
-        address: "0x0000000000000000000000000000000000000003",
-        chainId: 1,
-        proposalIdentity: "local:safe-proposer-main",
-      },
-    }),
-  );
+test("execution submit validates the profile before doing any governance work", () => {
+  const { scratch, predictionPath, proposalPath } = governanceInputs();
+  const write = (name, profile) => {
+    const target = path.join(scratch, name);
+    fs.writeFileSync(target, JSON.stringify(profile));
+    return target;
+  };
 
-  // A valid profile with no registered backend refuses loudly rather than
-  // pretending to submit.
-  const noBackend = run(["execution", "submit", intentPath, "--profile", profilePath]);
-  assert.notEqual(noBackend.status, 0);
-  assert.match(noBackend.stderr, /No execution backend is registered for safe-supervised/);
-  assert.match(noBackend.stderr, /proposal=local:safe-proposer-main/);
-
-  // A mode that contradicts the profile is an error, not a silent override.
-  const contradicting = run(["execution", "submit", intentPath, "--profile", profilePath, "--mode", "waap-autonomous"]);
+  const safeProfile = write("safe.json", {
+    version: 1,
+    mode: "safe-supervised",
+    safe: {
+      address: "0x0000000000000000000000000000000000000003",
+      chainId: 1,
+      proposalIdentity: "local:safe-proposer-main",
+    },
+  });
+  const contradicting = run([
+    "execution", "submit", predictionPath, proposalPath,
+    "--support", "FOR", "--profile", safeProfile, "--mode", "waap-autonomous",
+  ]);
   assert.notEqual(contradicting.status, 0);
   assert.match(contradicting.stderr, /does not match the profile mode/);
 
-  // A profile missing its mode's configuration block is rejected.
-  const incomplete = path.join(scratch, "incomplete.json");
-  fs.writeFileSync(incomplete, JSON.stringify({ version: 1, mode: "safe-supervised" }));
-  const rejected = run(["execution", "submit", intentPath, "--profile", incomplete]);
+  const incomplete = write("incomplete.json", { version: 1, mode: "safe-supervised" });
+  const rejected = run(["execution", "submit", predictionPath, proposalPath, "--support", "FOR", "--profile", incomplete]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /requires a 'safe' configuration block/);
+
+  // A profile using a plaintext environment key is refused for submission.
+  const development = write("development.json", {
+    version: 1,
+    mode: "safe-supervised",
+    safe: {
+      address: "0x0000000000000000000000000000000000000003",
+      chainId: 1,
+      proposalIdentity: "env:GAVEL_PROPOSER_KEY",
+    },
+  });
+  const insecure = run(["execution", "submit", predictionPath, proposalPath, "--support", "FOR", "--profile", development]);
+  assert.notEqual(insecure.status, 0);
+  assert.match(insecure.stderr, /plaintext environment keys/);
 });
 
 test("identity create makes an encrypted, scope-bound Safe proposal identity", () => {

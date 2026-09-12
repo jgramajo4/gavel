@@ -21,12 +21,13 @@
  * DAO adapter recorded.
  */
 
+const { getAddress } = require("ethers");
+
 const { assertExecutionAdapter } = require("./adapter");
 const { ExecutionEvent, NULL_EVENT_SINK, STATE_EVENTS, buildEvent } = require("./events");
 const { ExecutionState, canTransition, toExecutionState } = require("./lifecycle");
 const { getExecutionMode } = require("./modes");
 const {
-  InMemoryExecutionRecordStore,
   advanceExecutionRecord,
   createExecutionRecord,
   executionKey,
@@ -37,10 +38,13 @@ const {
   assertReplayAllowed,
   nextAttempt,
   resolveIdempotency,
+  reusablePreparedRecord,
 } = require("./replay");
 const { assertValidatedExecutionIntent } = require("../intent/validated");
 
 class ExecutionEngine {
+  #separationVerified;
+
   /**
    * @param {object} options
    * @param {Iterable<object>} [options.adapters]  execution adapters, keyed by their own `mode`
@@ -50,10 +54,23 @@ class ExecutionEngine {
    */
   constructor(options = {}) {
     this.adapters = new Map();
-    for (const adapter of options.adapters || []) this.register(adapter);
-    this.store = options.store || new InMemoryExecutionRecordStore();
+    // The store is required. Defaulting to memory meant a restart silently
+    // lost every deduplication and replay guarantee -- the failure mode of
+    // which is a duplicate governance action, not an error. Making it explicit
+    // forces the decision at construction; `InMemoryExecutionRecordStore` is
+    // still the right answer in tests, but it has to be asked for.
+    if (!options.store || typeof options.store.put !== "function") {
+      throw new TypeError(
+        "ExecutionEngine requires an explicit execution record store. Use FileExecutionRecordStore " +
+          "for a durable one, or InMemoryExecutionRecordStore in tests -- there is no default, " +
+          "because an in-memory default loses deduplication across restarts.",
+      );
+    }
+    this.store = options.store;
     this.events = options.events || NULL_EVENT_SINK;
     this.now = options.now || (() => new Date());
+    this.#separationVerified = false;
+    for (const adapter of options.adapters || []) this.register(adapter);
   }
 
   register(adapter) {
@@ -74,6 +91,42 @@ class ExecutionEngine {
       );
     }
     return adapter;
+  }
+
+  /**
+   * The identity invariant, on the execution path.
+   *
+   * The types are non-substitutable, but their constructors are public and one
+   * `SigningIdentity` can back both roles -- and two different credential
+   * references in a profile can resolve to the same key, so a string comparison
+   * there proves nothing. This resolves the actual addresses of every
+   * registered adapter's identity and refuses to run if a proposal identity and
+   * an execution identity are the same address.
+   *
+   * Verified once per engine, lazily, since resolving an address may hit a
+   * remote signer.
+   */
+  async #assertIdentitySeparation() {
+    if (this.#separationVerified) return;
+    const identities = [];
+    for (const adapter of this.adapters.values()) {
+      const role = getExecutionMode(adapter.mode).identityRole;
+      const identity = adapter.proposalIdentity || adapter.executionIdentity;
+      if (!role || !identity) continue;
+      identities.push({ role, mode: adapter.mode, address: getAddress(await identity.address()) });
+    }
+    for (const proposal of identities.filter((entry) => entry.role === "proposal")) {
+      for (const execution of identities.filter((entry) => entry.role === "execution")) {
+        if (proposal.address === execution.address) {
+          throw new Error(
+            `Identity separation violated: ${proposal.address} is configured as both the ` +
+              `${proposal.mode} proposal identity and the ${execution.mode} execution identity. ` +
+              "These must be distinct keys, because the autonomous identity has materially more authority.",
+          );
+        }
+      }
+    }
+    this.#separationVerified = true;
   }
 
   #emit(name, source, detail, mode) {
@@ -112,6 +165,7 @@ class ExecutionEngine {
     const intent = assertValidatedExecutionIntent(validated);
     const mode = getExecutionMode(options.mode).mode;
     const adapter = this.adapterFor(mode);
+    await this.#assertIdentitySeparation();
     const key = executionKey({ intentHash: intent.intentHash, mode, actor: intent.intent.actor });
 
     const existingForKey = await this.store.listByKey(key);
@@ -147,11 +201,13 @@ class ExecutionEngine {
       throw error;
     }
 
-    let record = createExecutionRecord(intent, {
-      mode,
-      now: this.now(),
-      attempt: nextAttempt(existingForKey),
-    });
+    // A prepared-but-unsubmitted attempt for this key is reused rather than
+    // superseded, so a dry run followed by a real submission is one attempt in
+    // the audit trail instead of two.
+    const reusable = reusablePreparedRecord(existingForKey);
+    let record =
+      reusable ||
+      createExecutionRecord(intent, { mode, now: this.now(), attempt: nextAttempt(existingForKey) });
     record = await this.store.put(record);
     this.#emit(
       ExecutionEvent.INTENT_VALIDATED,
@@ -211,7 +267,14 @@ class ExecutionEngine {
     // was submitted anywhere.
     const reported = toExecutionState(submission.state ?? submission.status);
     if (reported !== ExecutionState.PREPARED && !canTransition(record.state, reported)) {
-      record = await this.#advance(record, { state: ExecutionState.SUBMITTED });
+      // Marked as inferred, so the history is not mistaken for a step the
+      // provider actually reported. The submission demonstrably happened --
+      // the provider returned an outcome -- but Gavel never observed a
+      // distinct submitted state for it.
+      record = await this.#advance(record, {
+        state: ExecutionState.SUBMITTED,
+        detail: "inferred: the provider submitted and reported an outcome in one call",
+      });
     }
     record = await this.#advance(record, {
       state: reported,

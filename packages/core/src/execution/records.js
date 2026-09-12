@@ -12,6 +12,9 @@
  * portable across modes.
  */
 
+const fs = require("node:fs/promises");
+const path = require("node:path");
+
 const { z } = require("zod");
 const { getAddress } = require("ethers");
 
@@ -80,6 +83,11 @@ const executionRecordSchema = z.object({
     }),
     reason: z.string().nullable(),
     calldata: hexSchema,
+    // Every execution-critical field of the intent, so an adapter can re-verify
+    // a provider's account of the transaction after a process restart -- when
+    // the ValidatedExecutionIntent itself is long gone.
+    value: decimalStringSchema,
+    operation: z.literal("CALL"),
   }),
 });
 
@@ -131,6 +139,8 @@ function createExecutionRecord(validated, options) {
       deadline: validated.validation.deadline,
       reason: intent.source.reason,
       calldata: intent.data,
+      value: intent.value,
+      operation: intent.operation,
     },
   });
 }
@@ -210,7 +220,96 @@ class InMemoryExecutionRecordStore {
   }
 }
 
+/**
+ * A durable, file-backed record store.
+ *
+ * One JSON file per record under `<root>/<mode>/<intentHash>/<attempt>.json`,
+ * written at mode 0600. Deduplication has to survive a process restart: an
+ * in-memory store loses it, and the failure mode of losing it is a duplicate
+ * governance action rather than an error.
+ *
+ * Writes are atomic per record (write to a temporary file, then rename), so a
+ * crash mid-write leaves the previous record rather than a truncated one. This
+ * is a single-process store: it does not coordinate between concurrent Gavel
+ * processes sharing a directory, and a deployment that needs that should
+ * implement this same interface over its own database.
+ */
+class FileExecutionRecordStore {
+  constructor(root) {
+    if (!root) throw new TypeError("A record store root directory is required");
+    this.root = path.resolve(root);
+  }
+
+  #pathFor(record) {
+    return path.join(this.root, record.mode, record.intentHash.slice(2), `${record.attempt}.json`);
+  }
+
+  async #all() {
+    const records = [];
+    const walk = async (directory) => {
+      let entries;
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === "ENOENT") return;
+        throw error;
+      }
+      for (const entry of entries) {
+        const target = path.join(directory, entry.name);
+        if (entry.isDirectory()) await walk(target);
+        else if (entry.name.endsWith(".json")) {
+          records.push(executionRecordSchema.parse(JSON.parse(await fs.readFile(target, "utf8"))));
+        }
+      }
+    };
+    await walk(this.root);
+    return records;
+  }
+
+  async put(record) {
+    const parsed = executionRecordSchema.parse(record);
+    const destination = this.#pathFor(parsed);
+    await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    const temporary = `${destination}.${process.pid}.tmp`;
+    await fs.writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await fs.rename(temporary, destination);
+    return parsed;
+  }
+
+  async getById(id) {
+    return (await this.#all()).find((record) => record.id === id) || null;
+  }
+
+  async get(key) {
+    const records = (await this.#all()).filter((record) => record.key === key);
+    return records.sort((left, right) => right.attempt - left.attempt)[0] || null;
+  }
+
+  async listByKey(key) {
+    return (await this.#all()).filter((record) => record.key === key);
+  }
+
+  async listByIntentHash(intentHash) {
+    return (await this.#all()).filter((record) => record.intentHash === intentHash);
+  }
+
+  async listByProposal({ dao, proposalId, actor }) {
+    const normalizedActor = actor ? getAddress(actor) : null;
+    return (await this.#all()).filter(
+      (record) =>
+        record.dao === dao &&
+        record.proposalId === String(proposalId) &&
+        (!normalizedActor || getAddress(record.actor) === normalizedActor),
+    );
+  }
+
+  async list() {
+    return this.#all();
+  }
+}
+
 module.exports = {
+  FileExecutionRecordStore,
   InMemoryExecutionRecordStore,
   advanceExecutionRecord,
   createExecutionRecord,

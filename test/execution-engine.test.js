@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { Interface } = require("ethers");
 
 const { ExecutionEngine } = require("../packages/core/src/execution/engine");
 const { ExecutionState } = require("../packages/core/src/execution/lifecycle");
@@ -20,12 +21,22 @@ const { createVoteIntent } = require("../packages/core/src/intent/vote-intent");
 const { createExecutionIntent } = require("../packages/core/src/intent/execution-intent");
 const { validateExecutionIntent } = require("../packages/core/src/intent/validated");
 
+// Real Nouns vote calldata, so the canonical boundary can bind the encoded
+// proposal and support to the intent that claims them.
+const voteInterface = new Interface([
+  "function castRefundableVoteWithReason(uint256 proposalId,uint8 support,string reason,uint32 clientId)",
+]);
+const SELECTOR = voteInterface.getFunction("castRefundableVoteWithReason").selector;
+
+function voteCalldata({ proposalId = 42, support = "FOR", reason = "Consistent with prior votes." } = {}) {
+  const code = { AGAINST: 0, FOR: 1, ABSTAIN: 2 }[support];
+  return voteInterface.encodeFunctionData("castRefundableVoteWithReason", [proposalId, code, reason ?? "", 38]);
+}
+
 const VOTER = "0x0000000000000000000000000000000000000001";
 const SAFE = "0x0000000000000000000000000000000000000003";
 const WAAP = "0x0000000000000000000000000000000000000004";
 const GOVERNOR = "0x0000000000000000000000000000000000000010";
-const CALLDATA = "0x56781388000000000000000000000000000000000000000000000000000000000000002a";
-const SELECTOR = "0x56781388";
 const NOW = new Date("2026-09-02T00:00:00.000Z");
 
 function dao(overrides = {}) {
@@ -34,6 +45,15 @@ function dao(overrides = {}) {
     chainId: 1,
     adapterVersion: "nouns@2.0.0",
     governanceContracts: { governor: GOVERNOR },
+    governanceTargets: [GOVERNOR],
+    decodeGovernanceCall(action, data) {
+      const decoded = voteInterface.decodeFunctionData("castRefundableVoteWithReason", data);
+      return {
+        proposalId: decoded[0].toString(),
+        support: ["AGAINST", "FOR", "ABSTAIN"][Number(decoded[1])],
+        reason: decoded[2] === "" ? null : decoded[2],
+      };
+    },
     governanceSelectors: { CAST_VOTE: [SELECTOR] },
     capabilities: { prepareVote: true, safeSupervised: true, waapAutonomous: true },
     supportedActions: ["CAST_VOTE"],
@@ -56,7 +76,7 @@ function validated(overrides = {}) {
   return validateExecutionIntent({
     adapter: dao(),
     voteIntent,
-    intent: createExecutionIntent({ voteIntent, actor, target: GOVERNOR, value: 0n, data: CALLDATA }),
+    intent: createExecutionIntent({ voteIntent, actor, target: GOVERNOR, value: 0n, data: voteCalldata({ support, reason }) }),
     evidence: {
       adapterVersion: "nouns@2.0.0",
       validatedAt: NOW.toISOString(),
@@ -115,7 +135,7 @@ function engine(adapters, options = {}) {
 test("the engine walks one attempt through the lifecycle and records the audit chain", async () => {
   const events = new InMemoryEventSink();
   const safe = stubAdapter("safe-supervised", { submitProviderData: { safeTxHash: `0x${"ab".repeat(32)}`, safeNonce: "7" } });
-  const result = await engine([safe], { events }).submit(validated(), { mode: "safe-supervised" });
+  const result = await engine([safe], { events }).submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
 
   assert.equal(result.record.state, ExecutionState.SUBMITTED);
   assert.equal(result.record.mode, "safe-supervised");
@@ -135,7 +155,7 @@ test("the engine walks one attempt through the lifecycle and records the audit c
   assert.equal(result.record.audit.reason, "Consistent with prior votes.");
   assert.equal(result.record.audit.adapterVersion, "nouns@2.0.0");
   assert.equal(result.record.audit.proposalState, "ACTIVE");
-  assert.equal(result.record.audit.calldata, CALLDATA);
+  assert.equal(result.record.audit.calldata, voteCalldata());
 
   assert.deepEqual(
     result.record.history.map((entry) => entry.state),
@@ -162,9 +182,9 @@ test("a retry returns the existing attempt instead of submitting twice", async (
   const runner = engine([safe], { events });
   const intent = validated();
 
-  const first = await runner.submit(intent, { mode: "safe-supervised" });
-  const second = await runner.submit(intent, { mode: "safe-supervised" });
-  const third = await runner.submit(validated(), { mode: "safe-supervised" });
+  const first = await runner.submit(intent, { mode: "safe-supervised", blockNumber: 150 });
+  const second = await runner.submit(intent, { mode: "safe-supervised", blockNumber: 150 });
+  const third = await runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
 
   assert.equal(safe.submitted.length, 1, "the provider was called more than once");
   assert.equal(second.deduplicated, true);
@@ -187,13 +207,13 @@ test("a confirmed execution is never rebroadcast, and a dead attempt may be retr
   const confirmed = stubAdapter("waap-autonomous", { submitState: ExecutionState.EXECUTED });
   const autonomous = await engine([confirmed], { store }).submit(
     validated({ actor: WAAP, autonomyAllowed: true }),
-    { mode: "waap-autonomous" },
+    { mode: "waap-autonomous", blockNumber: 150 },
   );
   assert.equal(autonomous.record.state, ExecutionState.EXECUTED);
 
   const again = await engine([stubAdapter("waap-autonomous")], { store }).submit(
     validated({ actor: WAAP, autonomyAllowed: true }),
-    { mode: "waap-autonomous" },
+    { mode: "waap-autonomous", blockNumber: 150 },
   );
   assert.equal(again.deduplicated, true);
   assert.equal(again.reason, "ALREADY_EXECUTED");
@@ -203,12 +223,12 @@ test("a confirmed execution is never rebroadcast, and a dead attempt may be retr
   const failStore = new InMemoryExecutionRecordStore();
   const failing = stubAdapter("safe-supervised", { submitError: "Safe service unavailable" });
   await assert.rejects(
-    engine([failing], { store: failStore }).submit(validated(), { mode: "safe-supervised" }),
+    engine([failing], { store: failStore }).submit(validated(), { mode: "safe-supervised", blockNumber: 150 }),
     /Safe service unavailable/,
   );
   const recovered = await engine([stubAdapter("safe-supervised")], { store: failStore }).submit(
     validated(),
-    { mode: "safe-supervised" },
+    { mode: "safe-supervised", blockNumber: 150 },
   );
   assert.equal(recovered.deduplicated, false);
   assert.equal(recovered.record.attempt, 2);
@@ -226,11 +246,11 @@ test("replay is decided by DAO-declared semantics, not by the execution layer", 
   // hash, so idempotency lets it through and the replay rule must catch it.
   const store = new InMemoryExecutionRecordStore();
   const executed = stubAdapter("safe-supervised", { submitState: ExecutionState.EXECUTED });
-  await engine([executed], { store }).submit(validated(), { mode: "safe-supervised" });
+  await engine([executed], { store }).submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
   await assert.rejects(
     engine([stubAdapter("safe-supervised")], { store }).submit(
       validated({ support: "AGAINST" }),
-      { mode: "safe-supervised" },
+      { mode: "safe-supervised", blockNumber: 150 },
     ),
     (error) => error.code === "VOTE_REPLACEMENT_NOT_PERMITTED",
   );
@@ -239,7 +259,7 @@ test("replay is decided by DAO-declared semantics, not by the execution layer", 
   await assert.rejects(
     engine([stubAdapter("waap-autonomous")], { store }).submit(
       validated({ autonomyAllowed: true }),
-      { mode: "waap-autonomous" },
+      { mode: "waap-autonomous", blockNumber: 150 },
     ),
     (error) => error.code === "GOVERNANCE_ACTION_ALREADY_EXECUTED",
   );
@@ -249,10 +269,10 @@ test("replay is decided by DAO-declared semantics, not by the execution layer", 
   const repeatable = { canVoteMultipleTimes: true, canReplaceVote: false };
   const first = await engine([stubAdapter("safe-supervised", { submitState: ExecutionState.EXECUTED })], {
     store: railgunStore,
-  }).submit(validated({ semantics: repeatable, reason: "First tranche." }), { mode: "safe-supervised" });
+  }).submit(validated({ semantics: repeatable, reason: "First tranche." }), { mode: "safe-supervised", blockNumber: 150 });
   const second = await engine([stubAdapter("safe-supervised")], { store: railgunStore }).submit(
     validated({ semantics: repeatable, reason: "Second tranche." }),
-    { mode: "safe-supervised" },
+    { mode: "safe-supervised", blockNumber: 150 },
   );
   assert.equal(first.record.state, ExecutionState.EXECUTED);
   assert.equal(second.deduplicated, false);
@@ -263,24 +283,24 @@ test("replay is decided by DAO-declared semantics, not by the execution layer", 
   const replaceable = { canVoteMultipleTimes: false, canReplaceVote: true };
   await engine([stubAdapter("safe-supervised", { submitState: ExecutionState.EXECUTED })], {
     store: replaceStore,
-  }).submit(validated({ semantics: replaceable }), { mode: "safe-supervised" });
+  }).submit(validated({ semantics: replaceable }), { mode: "safe-supervised", blockNumber: 150 });
   const replaced = await engine([stubAdapter("safe-supervised")], { store: replaceStore }).submit(
     validated({ semantics: replaceable, support: "AGAINST" }),
-    { mode: "safe-supervised" },
+    { mode: "safe-supervised", blockNumber: 150 },
   );
   assert.equal(replaced.deduplicated, false);
 });
 
 test("two modes cannot race one vote, and a mode switch works once the first is dead", async () => {
   const store = new InMemoryExecutionRecordStore();
-  await engine([stubAdapter("safe-supervised")], { store }).submit(validated(), { mode: "safe-supervised" });
+  await engine([stubAdapter("safe-supervised")], { store }).submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
 
   // The Safe proposal is still in flight: starting an autonomous execution of
   // the same vote would double-vote if the Safe owners later signed.
   await assert.rejects(
     engine([stubAdapter("waap-autonomous")], { store }).submit(
       validated({ actor: SAFE, autonomyAllowed: true }),
-      { mode: "waap-autonomous" },
+      { mode: "waap-autonomous", blockNumber: 150 },
     ),
     (error) => error.code === "CONCURRENT_EXECUTION_IN_ANOTHER_MODE",
   );
@@ -295,7 +315,7 @@ test("two modes cannot race one vote, and a mode switch works once the first is 
   });
   const switched = await engine([stubAdapter("waap-autonomous")], { store }).submit(
     validated({ actor: SAFE, autonomyAllowed: true }),
-    { mode: "waap-autonomous" },
+    { mode: "waap-autonomous", blockNumber: 150 },
   );
   assert.equal(switched.deduplicated, false);
   assert.equal(switched.record.mode, "waap-autonomous");
@@ -339,18 +359,18 @@ test("the engine refuses unvalidated input, unknown modes, and unimplemented bac
     "0xdeadbeef",
   ]) {
     await assert.rejects(
-      runner.submit(bogus, { mode: "safe-supervised" }),
+      runner.submit(bogus, { mode: "safe-supervised", blockNumber: 150 }),
       /only a ValidatedExecutionIntent/,
     );
   }
 
-  await assert.rejects(runner.submit(validated(), { mode: "made-up" }), /Unknown execution mode/);
-  await assert.rejects(runner.submit(validated(), { mode: "erc4337" }), /not implemented/);
-  await assert.rejects(runner.submit(validated(), { mode: "waap-autonomous" }), /No execution adapter is registered/);
+  await assert.rejects(runner.submit(validated(), { mode: "made-up", blockNumber: 150 }), /Unknown execution mode/);
+  await assert.rejects(runner.submit(validated(), { mode: "erc4337", blockNumber: 150 }), /not implemented/);
+  await assert.rejects(runner.submit(validated(), { mode: "waap-autonomous", blockNumber: 150 }), /No execution adapter is registered/);
 
-  assert.throws(() => assertExecutionAdapter({ mode: "safe-supervised" }), /missing prepare\(\)/);
+  assert.throws(() => assertExecutionAdapter({ mode: "safe-supervised", blockNumber: 150 }), /missing prepare\(\)/);
   assert.throws(() => assertExecutionAdapter({ mode: "erc4337", prepare() {}, submit() {}, status() {} }), /not implemented/);
-  assert.throws(() => new ExecutionEngine({ adapters: [stubAdapter("safe-supervised"), stubAdapter("safe-supervised")] }), /already registered/);
+  assert.throws(() => new ExecutionEngine({ store: new InMemoryExecutionRecordStore(), adapters: [stubAdapter("safe-supervised"), stubAdapter("safe-supervised")] }), /already registered/);
 });
 
 test("a preparation cannot be swapped between modes or intents before submission", async () => {
@@ -366,7 +386,7 @@ test("a preparation cannot be swapped between modes or intents before submission
 
 test("prepare alone reaches PREPARED without the provider being asked to submit", async () => {
   const safe = stubAdapter("safe-supervised");
-  const prepared = await engine([safe]).prepare(validated(), { mode: "safe-supervised" });
+  const prepared = await engine([safe]).prepare(validated(), { mode: "safe-supervised", blockNumber: 150 });
   assert.equal(prepared.record.state, ExecutionState.PREPARED);
   assert.equal(safe.submitted.length, 0);
   assert.equal(prepared.preparation.payload.to, GOVERNOR);
@@ -380,7 +400,7 @@ test("status refreshes from the provider but will not accept an illegal state", 
   const store = new InMemoryExecutionRecordStore();
   const safe = stubAdapter("safe-supervised", { statusState: ExecutionState.AWAITING_AUTHORIZATION });
   const runner = engine([safe], { store });
-  const submitted = await runner.submit(validated(), { mode: "safe-supervised" });
+  const submitted = await runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
 
   const refreshed = await runner.status(submitted.record.id);
   assert.equal(refreshed.state, ExecutionState.AWAITING_AUTHORIZATION);
@@ -396,7 +416,7 @@ test("status refreshes from the provider but will not accept an illegal state", 
 
 test("events carry correlation fields and refuse to carry secrets", () => {
   const intent = validated();
-  const event = buildEvent(ExecutionEvent.SAFE_PROPOSED, intent, { safeTxHash: "0xabc", state: "SUBMITTED" }, { mode: "safe-supervised" });
+  const event = buildEvent(ExecutionEvent.SAFE_PROPOSED, intent, { safeTxHash: "0xabc", state: "SUBMITTED" }, { mode: "safe-supervised", blockNumber: 150 });
   assert.equal(event.event, "safe.proposed");
   assert.equal(event.intentHash, intent.intentHash);
   assert.equal(event.voteIntentHash, intent.intent.source.voteIntentHash);

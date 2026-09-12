@@ -204,6 +204,7 @@ async function ensIntent(overrides = {}) {
 
 function safeExecution(options = {}) {
   const proposals = [];
+  const proposed = new Map();
   const adapter = new SafeSupervisedExecutionAdapter({
     safeAddress: SAFE,
     chainId: 1,
@@ -219,13 +220,31 @@ function safeExecution(options = {}) {
       },
       async proposeTransaction(input) {
         proposals.push(input);
+        proposed.set(input.safeTxHash, input.safeTransactionData);
         return { safeTxHash: input.safeTxHash, confirmationsRequired: 2, confirmations: [] };
       },
       async getTransaction(safeTxHash) {
-        return { safeTxHash, confirmations: [], confirmationsRequired: 2, isExecuted: false };
+        const body = proposed.get(safeTxHash);
+        if (!body) return null;
+        // The adapter now requires the full field set on every read, so the
+        // double has to behave like a service that actually describes the
+        // transaction it was given.
+        return {
+          safeTxHash,
+          safe: SAFE,
+          chainId: 1,
+          to: body.to,
+          data: body.data,
+          value: body.value,
+          operation: body.operation,
+          nonce: String(body.nonce),
+          confirmations: [],
+          confirmationsRequired: 2,
+          isExecuted: false,
+        };
       },
     },
-    safeInfo: { getOwners: async () => ["0x00000000000000000000000000000000000000a1"] },
+    safeInfo: options.safeInfo || { getOwners: async () => ["0x00000000000000000000000000000000000000a1"] },
     ...options,
   });
   adapter.proposals = proposals;
@@ -257,6 +276,9 @@ function engine(adapters, store = new InMemoryExecutionRecordStore(), events = n
   return { engine: new ExecutionEngine({ adapters, store, events, now: () => NOW }), store, events };
 }
 
+/** Every submit needs a block number: a block deadline is unverifiable without one. */
+const AT_BLOCK = { blockNumber: 150 };
+
 // ------------------------------------------------------------------ tests
 
 test("every DAO adapter satisfies the canonical governance contract", () => {
@@ -277,7 +299,7 @@ test("Nouns x SafeSupervised: a validated vote becomes a Safe proposal", async (
 
   const safe = safeExecution();
   const { engine: runner, events } = engine([safe]);
-  const result = await runner.submit(validated, { mode: "safe-supervised", blockNumber: 150 });
+  const result = await runner.submit(validated, { mode: "safe-supervised", ...AT_BLOCK });
 
   assert.equal(result.record.state, ExecutionState.SUBMITTED);
   assert.equal(result.record.providerData.safeNonce, "11");
@@ -295,7 +317,7 @@ test("Nouns x WaapAutonomous: the same governance path, a different backend", as
 
   const waap = waapExecution();
   const { engine: runner } = engine([waap]);
-  const result = await runner.submit(validated, { mode: "waap-autonomous", blockNumber: 150 });
+  const result = await runner.submit(validated, { mode: "waap-autonomous", ...AT_BLOCK });
 
   assert.equal(result.record.state, ExecutionState.EXECUTED);
   assert.equal(waap.broadcasts[0].data, validated.intent.data);
@@ -317,7 +339,7 @@ test("ENS x SafeSupervised: a second DAO over the same execution adapter", async
 
   const safe = safeExecution();
   const { engine: runner } = engine([safe]);
-  const result = await runner.submit(validated, { mode: "safe-supervised", blockNumber: 150 });
+  const result = await runner.submit(validated, { mode: "safe-supervised", ...AT_BLOCK });
 
   assert.equal(result.record.state, ExecutionState.SUBMITTED);
   assert.equal(result.record.dao, "ens");
@@ -389,7 +411,7 @@ test("the matrix fails closed on every documented failure case", async () => {
   // A Safe adapter configured for a different Safe than the intent's actor.
   const otherSafe = await nounsIntent({ actor: executorWallet.address, delegatee: executorWallet.address });
   await assert.rejects(
-    engine([safeExecution()]).engine.submit(otherSafe.validated, { mode: "safe-supervised", blockNumber: 150 }),
+    engine([safeExecution()]).engine.submit(otherSafe.validated, { mode: "safe-supervised", ...AT_BLOCK }),
     /not the configured Safe/,
   );
 
@@ -404,8 +426,8 @@ test("the matrix fails closed on every documented failure case", async () => {
   // Duplicate submission returns the existing execution.
   const duplicating = safeExecution();
   const { engine: runner } = engine([duplicating]);
-  const first = await runner.submit(validated, { mode: "safe-supervised", blockNumber: 150 });
-  const second = await runner.submit(validated, { mode: "safe-supervised", blockNumber: 150 });
+  const first = await runner.submit(validated, { mode: "safe-supervised", ...AT_BLOCK });
+  const second = await runner.submit(validated, { mode: "safe-supervised", ...AT_BLOCK });
   assert.equal(duplicating.proposals.length, 1);
   assert.equal(second.deduplicated, true);
   assert.equal(second.record.id, first.record.id);
@@ -425,7 +447,7 @@ test("the matrix fails closed on every documented failure case", async () => {
     },
   });
   await assert.rejects(
-    engine([revoked]).engine.submit(validated, { mode: "safe-supervised", blockNumber: 150 }),
+    engine([revoked]).engine.submit(validated, { mode: "safe-supervised", ...AT_BLOCK }),
     /delegate is not authorized/,
   );
 
@@ -433,7 +455,7 @@ test("the matrix fails closed on every documented failure case", async () => {
   const autonomous = await nounsIntent({ actor: executorWallet.address, autonomous: true });
   const blocked = waapExecution({ policy: async () => ({ allowed: false, reason: "daily cap" }) });
   await assert.rejects(
-    engine([blocked]).engine.submit(autonomous.validated, { mode: "waap-autonomous", blockNumber: 150 }),
+    engine([blocked]).engine.submit(autonomous.validated, { mode: "waap-autonomous", ...AT_BLOCK }),
     /daily cap/,
   );
   assert.equal(blocked.broadcasts.length, 0);
@@ -442,7 +464,7 @@ test("the matrix fails closed on every documented failure case", async () => {
   const advisory = await nounsIntent({ actor: executorWallet.address });
   const advisoryWaap = waapExecution();
   await assert.rejects(
-    engine([advisoryWaap]).engine.submit(advisory.validated, { mode: "waap-autonomous", blockNumber: 150 }),
+    engine([advisoryWaap]).engine.submit(advisory.validated, { mode: "waap-autonomous", ...AT_BLOCK }),
     (error) => error.code === "AUTONOMY_NOT_AUTHORIZED",
   );
   assert.equal(advisoryWaap.broadcasts.length, 0);
@@ -453,7 +475,7 @@ test("one intent hash links the whole audit chain across both DAOs", async () =>
     const { validated } = await build();
     const safe = safeExecution();
     const { engine: runner, events } = engine([safe]);
-    const result = await runner.submit(validated, { mode: "safe-supervised", blockNumber: 150 });
+    const result = await runner.submit(validated, { mode: "safe-supervised", ...AT_BLOCK });
 
     // proposal -> recommendation -> VoteIntent -> ExecutionIntent -> validation
     // -> intentHash -> Safe proposal -> safeTxHash -> status.

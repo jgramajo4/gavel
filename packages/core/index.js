@@ -1,3 +1,7 @@
+// The deprecated single-phase execution path (transaction-binding and the
+// executors/{safe,waap,unsigned} classes) is deliberately NOT exported. It
+// stamps `validated: true` on caller-supplied calldata. It remains requirable
+// by path for the migration, gated on GAVEL_ALLOW_DEPRECATED_EXECUTORS=1.
 module.exports = {
   ...require("./src/schema/governance"),
   ...require("./src/governance/lifecycle"),
@@ -22,10 +26,6 @@ module.exports = {
   ...require("./src/execution/engine"),
   ...require("./src/execution/profile"),
   ...require("./src/execution/readiness"),
-  ...require("./src/execution/transaction-binding"),
-  ...require("./src/execution/executors/unsigned"),
-  ...require("./src/execution/executors/safe"),
-  ...require("./src/execution/executors/waap"),
   ...require("./src/execution/identity/signing"),
   ...require("./src/execution/identity/roles"),
   ...require("./src/execution/executors/safe-supervised"),

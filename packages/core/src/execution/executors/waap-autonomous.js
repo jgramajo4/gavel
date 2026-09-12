@@ -145,8 +145,30 @@ class WaapAutonomousExecutionAdapter {
 
   async submit(preparation) {
     const { payload, validated } = assertSubmittable(this, preparation);
+
+    // The broadcast request is rebuilt from `validated.intent`, never read out
+    // of the payload. The payload is deeply frozen, but a caller can hand us a
+    // look-alike preparation object carrying a genuine validated intent beside
+    // an attacker-chosen `request` -- so the payload is treated as a hint about
+    // what prepare() computed, and the intent is the authority.
+    const intent = validated.intent;
+    const actor = getAddress(await this.executionIdentity.address());
+    if (getAddress(intent.actor) !== actor) {
+      throw new Error(`The validated intent is actored by ${getAddress(intent.actor)}, not ${actor}`);
+    }
+    if (intent.chainId !== this.chainId) {
+      throw new Error(`The validated intent is for chain ${intent.chainId}, not ${this.chainId}`);
+    }
+    if (!payload.policy?.allowed) {
+      throw new Error("This preparation carries no policy approval");
+    }
+
     const broadcast = await this.executionIdentity.broadcast({
-      ...payload.request,
+      chainId: intent.chainId,
+      from: actor,
+      to: getAddress(intent.target),
+      value: intent.value,
+      data: intent.data,
       // Carried so a provider can deduplicate on its own side too.
       intentHash: validated.intentHash,
     });
