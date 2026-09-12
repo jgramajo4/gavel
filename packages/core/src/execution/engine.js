@@ -78,6 +78,7 @@ class ExecutionEngine {
     const mode = getExecutionMode(checked.mode).mode;
     if (this.adapters.has(mode)) throw new Error(`An execution adapter is already registered for ${mode}`);
     this.adapters.set(mode, checked);
+    this.#separationVerified = false;
     return checked;
   }
 

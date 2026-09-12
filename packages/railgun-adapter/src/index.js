@@ -45,6 +45,10 @@ const votingInterface = new Interface(RAILGUN_VOTING_ABI);
  */
 function decodeRailgunVoteCall(data) {
   const decoded = votingInterface.decodeFunctionData("vote", data);
+  const canonical = votingInterface.encodeFunctionData("vote", Array.from(decoded));
+  if (String(data).toLowerCase() !== canonical.toLowerCase()) {
+    throw new Error("Railgun governance calldata is not canonical");
+  }
   return {
     proposalId: decoded[0].toString(),
     amount: decoded[1].toString(),

@@ -200,6 +200,17 @@ class SafeSupervisedExecutionAdapter {
     return { domain, types: SAFE_TX_TYPES, message };
   }
 
+  #origin(validated) {
+    return {
+      source: "gavel",
+      dao: validated.intent.source.dao,
+      proposalId: validated.intent.source.proposalId,
+      support: validated.intent.source.support,
+      intentHash: validated.intentHash,
+      mode: this.mode,
+    };
+  }
+
   /**
    * Every field the Transaction Service must return, compared against the
    * validated intent.
@@ -284,17 +295,8 @@ class SafeSupervisedExecutionAdapter {
         safeTxHash,
         sender: getAddress(sender),
         signature,
-        // Metadata travels beside the transaction, never inside its calldata.
-        metadata: {
-          origin: "gavel",
-          intentHash: validated.intentHash,
-          voteIntentHash: intent.source.voteIntentHash,
-          dao: intent.source.dao,
-          proposalId: intent.source.proposalId,
-          support: intent.source.support,
-          reason: intent.source.reason,
-          adapterVersion: validated.validation.adapterVersion,
-        },
+        // Informational only; submit re-derives origin from the sealed intent.
+        metadata: this.#origin(validated),
       },
       { providerData: { safeAddress: this.safeAddress, safeNonce: nonce, safeTxHash } },
     );
@@ -349,7 +351,7 @@ class SafeSupervisedExecutionAdapter {
       // Named to say what it is. A delegate/proposer signature places the
       // transaction in the queue; it is not an owner confirmation.
       senderSignature: signature,
-      origin: JSON.stringify(payload.metadata),
+      origin: JSON.stringify(this.#origin(validated)),
     });
     if (response?.safeTxHash && String(response.safeTxHash).toLowerCase() !== safeTxHash.toLowerCase()) {
       throw new Error(

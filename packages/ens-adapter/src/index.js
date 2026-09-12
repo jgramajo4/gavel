@@ -43,6 +43,10 @@ const SUPPORT_LABELS = Object.freeze(["AGAINST", "FOR", "ABSTAIN"]);
  */
 function decodeEnsVoteCall(data) {
   const decoded = governorInterface.decodeFunctionData("castVoteWithReason", data);
+  const canonical = governorInterface.encodeFunctionData("castVoteWithReason", Array.from(decoded));
+  if (String(data).toLowerCase() !== canonical.toLowerCase()) {
+    throw new Error("ENS governance calldata is not canonical");
+  }
   const supportCode = Number(decoded[1]);
   if (!SUPPORT_LABELS[supportCode]) throw new Error(`Unknown ENS support code ${supportCode}`);
   return {

@@ -93,6 +93,10 @@ const SUPPORT_LABELS = Object.freeze(["AGAINST", "FOR", "ABSTAIN"]);
  */
 function decodeNounsVoteCall(data) {
   const decoded = voteInterface.decodeFunctionData("castRefundableVoteWithReason", data);
+  const canonical = voteInterface.encodeFunctionData("castRefundableVoteWithReason", Array.from(decoded));
+  if (String(data).toLowerCase() !== canonical.toLowerCase()) {
+    throw new Error("Nouns governance calldata is not canonical");
+  }
   const supportCode = Number(decoded[1]);
   if (!SUPPORT_LABELS[supportCode]) throw new Error(`Unknown Nouns support code ${supportCode}`);
   return {
