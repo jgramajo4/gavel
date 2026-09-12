@@ -1,4 +1,4 @@
-const { ExecutionMode } = require("../schema/execution");
+const { capabilityForMode } = require("../execution/modes");
 
 const REQUIRED_ADAPTER_METHODS = [
   "validateProposal",
@@ -20,13 +20,6 @@ function assertDaoAdapter(adapter) {
     if (typeof adapter[method] !== "function") throw new TypeError(`DAO adapter ${adapter.id} is missing ${method}()`);
   }
   return adapter;
-}
-
-function capabilityForMode(mode) {
-  if (mode === ExecutionMode.UNSIGNED) return "prepareVote";
-  if (mode === ExecutionMode.SAFE_SUPERVISED) return "safeSupervised";
-  if (mode === ExecutionMode.WAAP_AUTONOMOUS) return "waapAutonomous";
-  throw new Error(`Unsupported execution mode: ${mode}`);
 }
 
 function assertModeSupported(adapterInput, mode) {

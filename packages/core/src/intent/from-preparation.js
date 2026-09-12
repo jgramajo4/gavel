@@ -22,6 +22,7 @@
 
 const { getAddress } = require("ethers");
 
+const { CONSERVATIVE_EXECUTION_SEMANTICS } = require("../schema/intent");
 const { createVoteIntent } = require("./vote-intent");
 const { createExecutionIntent } = require("./execution-intent");
 const { validateExecutionIntent } = require("./validated");
@@ -150,6 +151,12 @@ function validationEvidenceFromPreparation(preparation, options = {}) {
     // Defaults closed. Only an explicit prediction-review decision opens it.
     autonomyAllowed: ready.predictionReview?.autonomyAllowed === true,
     deadline: options.deadline || { kind: "none", value: null },
+    // Preparation documents predate `getExecutionSemantics()`, so an adapter
+    // that declares nothing gets the conservative rule: one execution per
+    // voter per proposal, no replacement. Over-restricting a DAO that in fact
+    // permits repeat votes costs a refused retry; under-restricting one that
+    // does not costs a duplicate governance action.
+    semantics: options.semantics || CONSERVATIVE_EXECUTION_SEMANTICS,
     checks,
   };
 }
@@ -169,6 +176,13 @@ function validatedIntentFromPreparation(adapter, preparation, options = {}) {
   const evidence = validationEvidenceFromPreparation(preparation, {
     ...options,
     adapterVersion: options.adapterVersion || adapter?.adapterVersion,
+    // An adapter that has grown a `getExecutionSemantics()` is asked; one that
+    // has not falls back to the conservative rule inside the evidence builder.
+    semantics:
+      options.semantics ||
+      (typeof adapter?.getExecutionSemantics === "function"
+        ? adapter.getExecutionSemantics()
+        : undefined),
   });
   return validateExecutionIntent({ adapter, intent, evidence, voteIntent });
 }

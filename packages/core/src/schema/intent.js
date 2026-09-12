@@ -84,11 +84,34 @@ const executionIntentSchema = z.object({
 });
 
 /**
+ * The DAO's own rules about repeating or replacing a vote.
+ *
+ * Replay protection cannot be a constant in the execution layer, because the
+ * DAOs disagree. Nouns and ENS record one receipt per voter per proposal, so a
+ * second execution is a duplicate. Railgun votes by staked amount and permits
+ * successive partial votes until stake is exhausted, so the same rule would be
+ * wrong. The adapter declares which it is; the execution layer enforces what it
+ * was told.
+ */
+const executionSemanticsSchema = z.object({
+  /** Successive votes on one proposal are legitimate (Railgun's partial votes). */
+  canVoteMultipleTimes: z.boolean(),
+  /** A later vote supersedes an earlier one rather than adding to it. */
+  canReplaceVote: z.boolean(),
+});
+
+/** Fails closed: one execution per voter per proposal, no replacement. */
+const CONSERVATIVE_EXECUTION_SEMANTICS = Object.freeze({
+  canVoteMultipleTimes: false,
+  canReplaceVote: false,
+});
+
+/**
  * What a DAO adapter verified against canonical chain state.
  *
  * `checks` carries the adapter's own blocker list so the audit chain records
- * what was verified, not merely that something was. A non-empty `checks` entry
- * with `passed: false` fails validation.
+ * what was verified, not merely that something was. A `checks` entry with
+ * `passed: false` fails validation.
  *
  * `autonomyAllowed` is a governance-layer determination, not a provider one: it
  * says whether the voter model's confidence in this recommendation is high
@@ -96,6 +119,9 @@ const executionIntentSchema = z.object({
  * while being decided above the boundary, and it defaults closed -- an advisory
  * observed-behavior recommendation sets it false and the autonomous executor
  * refuses.
+ *
+ * `deadline` and `semantics` are what make replay protection possible below the
+ * boundary without the execution layer knowing any DAO's rules.
  */
 const validationEvidenceSchema = z.object({
   adapterVersion: z.string().min(1),
@@ -110,6 +136,7 @@ const validationEvidenceSchema = z.object({
     kind: z.enum(["block", "timestamp", "none"]),
     value: decimalStringSchema.nullable(),
   }),
+  semantics: executionSemanticsSchema,
   checks: z.array(
     z.object({
       code: z.string().regex(/^[A-Z0-9_]+$/),
@@ -133,6 +160,7 @@ const validatedExecutionIntentDocumentSchema = z.object({
 });
 
 module.exports = {
+  CONSERVATIVE_EXECUTION_SEMANTICS,
   VoteSupport,
   actionSchema,
   addressSchema,
@@ -140,6 +168,7 @@ module.exports = {
   daoIdSchema,
   decimalStringSchema,
   executionIntentSchema,
+  executionSemanticsSchema,
   hexSchema,
   intentHashSchema,
   selectorSchema,

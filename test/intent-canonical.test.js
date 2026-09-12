@@ -83,6 +83,7 @@ function evidence(overrides = {}) {
     actorEligible: true,
     autonomyAllowed: false,
     deadline: { kind: "block", value: "23000000" },
+    semantics: { canVoteMultipleTimes: false, canReplaceVote: false },
     checks: [{ code: "PROPOSAL_STATE_VOTABLE", passed: true, detail: "ACTIVE" }],
     ...overrides,
   };
