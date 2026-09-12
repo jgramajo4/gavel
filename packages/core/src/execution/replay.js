@@ -138,9 +138,16 @@ function assertReplayAllowed(validated, records, options = {}) {
   // An attempt still in flight under a *different* mode would race the one
   // being started: two Safe proposals, or a Safe proposal and a broadcast, for
   // one vote. Same-mode in-flight attempts are idempotency's job.
+  //
+  // The mode being started has to be named for this to mean anything. Without
+  // it every in-flight attempt would look like a different mode and be
+  // rejected, so an unnamed mode is an error rather than a silent over-rejection.
   if (options.rejectConcurrentModes !== false) {
+    if (!options.mode) {
+      throw new TypeError("assertReplayAllowed requires the execution mode being started");
+    }
     const inFlightElsewhere = relevant.find(
-      (record) => isActiveRecord(record) && record.mode !== validated.executionMode && record.mode !== options.mode,
+      (record) => isActiveRecord(record) && record.mode !== options.mode,
     );
     if (inFlightElsewhere) {
       throw new ReplayRejected(
