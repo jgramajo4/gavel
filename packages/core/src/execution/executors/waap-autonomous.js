@@ -19,9 +19,9 @@
  *   - the wallet policy must approve, and silence is not approval
  *   - the actor, chain and target must match what was configured
  *
- * Policy evaluation happens in `prepare()`, before anything can be broadcast,
- * so a rejection costs nothing and is visible in the record as a PREPARED
- * attempt that never reached SUBMITTED.
+ * Policy evaluation happens in `prepare()` and again in `submit()`. The submit
+ * decision is authoritative, so stale or forged preparation policy metadata
+ * can never authorize a broadcast.
  */
 
 const { getAddress } = require("ethers");
@@ -92,12 +92,7 @@ class WaapAutonomousExecutionAdapter {
     return this.executionIdentity.address();
   }
 
-  async prepare(validated) {
-    const intent = assertPreparable(this, validated).intent;
-
-    // The governance layer's autonomy decision comes first: an advisory
-    // recommendation is never executed without a human, whatever the policy
-    // would have said.
+  async #authorize(validated) {
     if (validated.validation.autonomyAllowed !== true) {
       throw new PolicyRejected(
         "The governance layer did not authorize autonomous execution of this intent " +
@@ -105,6 +100,17 @@ class WaapAutonomousExecutionAdapter {
         "AUTONOMY_NOT_AUTHORIZED",
       );
     }
+    try {
+      return assertPolicyApproval(await this.policy(validated));
+    } catch (error) {
+      if (error instanceof PolicyRejected) throw error;
+      throw new PolicyRejected(`The autonomous execution policy failed closed: ${error.message}`, "POLICY_ERROR");
+    }
+  }
+
+  async prepare(validated) {
+    const intent = assertPreparable(this, validated).intent;
+
     if (intent.chainId !== this.chainId) {
       throw new Error(`The validated intent is for chain ${intent.chainId}, not ${this.chainId}`);
     }
@@ -116,14 +122,7 @@ class WaapAutonomousExecutionAdapter {
     }
     if (intent.operation !== "CALL") throw new Error("Autonomous mode executes CALL operations only");
 
-    let decision;
-    try {
-      decision = assertPolicyApproval(await this.policy(validated));
-    } catch (error) {
-      // A policy that throws is a refusal, not an outage to be worked around.
-      if (error instanceof PolicyRejected) throw error;
-      throw new PolicyRejected(`The autonomous execution policy failed closed: ${error.message}`, "POLICY_ERROR");
-    }
+    const decision = await this.#authorize(validated);
 
     return executionPreparation(
       this,
@@ -144,7 +143,7 @@ class WaapAutonomousExecutionAdapter {
   }
 
   async submit(preparation) {
-    const { payload, validated } = assertSubmittable(this, preparation);
+    const { validated } = assertSubmittable(this, preparation);
 
     // The broadcast request is rebuilt from `validated.intent`, never read out
     // of the payload. The payload is deeply frozen, but a caller can hand us a
@@ -159,9 +158,7 @@ class WaapAutonomousExecutionAdapter {
     if (intent.chainId !== this.chainId) {
       throw new Error(`The validated intent is for chain ${intent.chainId}, not ${this.chainId}`);
     }
-    if (!payload.policy?.allowed) {
-      throw new Error("This preparation carries no policy approval");
-    }
+    const decision = await this.#authorize(validated);
 
     const broadcast = await this.executionIdentity.broadcast({
       chainId: intent.chainId,
@@ -182,7 +179,7 @@ class WaapAutonomousExecutionAdapter {
         providerRequestId: broadcast.requestId ? String(broadcast.requestId) : undefined,
       },
       events: [
-        { name: ExecutionEvent.WAAP_AUTHORIZED, detail: { reasonCode: payload.policy.policyId || undefined } },
+        { name: ExecutionEvent.WAAP_AUTHORIZED, detail: { reasonCode: decision.policyId || undefined } },
         { name: ExecutionEvent.WAAP_BROADCAST, detail: { transactionHash: String(transactionHash) } },
         ...(broadcast.confirmed === true
           ? [{ name: ExecutionEvent.WAAP_CONFIRMED, detail: { transactionHash: String(transactionHash) } }]

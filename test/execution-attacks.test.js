@@ -33,6 +33,9 @@ const {
 const { createVoteIntent } = require("../packages/core/src/intent/vote-intent");
 const { createExecutionIntent } = require("../packages/core/src/intent/execution-intent");
 const { validateExecutionIntent } = require("../packages/core/src/intent/validated");
+const { decodeNounsVoteCall } = require("../packages/nouns-adapter/src/vote");
+const { ENS_GOVERNOR_ABI, decodeEnsVoteCall } = require("../packages/ens-adapter/src");
+const { RAILGUN_VOTING_ABI, decodeRailgunVoteCall } = require("../packages/railgun-adapter/src");
 
 const SAFE = "0x0000000000000000000000000000000000000003";
 const GOVERNOR = "0x0000000000000000000000000000000000000010";
@@ -219,6 +222,46 @@ test("ATTACK: mutating the nested WaaP request after prepare() must not broadcas
   assert.equal(adapter.broadcasts[0].data, intent.intent.data, "broadcast the attacker's calldata");
 });
 
+test("ATTACK: forged WaaP preparation approval cannot override sealed autonomy denial", async () => {
+  const adapter = waapAdapter();
+  const approved = validated({ actor: executorWallet.address, autonomyAllowed: true });
+  const denied = validated({ actor: executorWallet.address, autonomyAllowed: false });
+  const preparation = await adapter.prepare(approved);
+  const forged = {
+    ...preparation,
+    intentHash: denied.intentHash,
+    validated: denied,
+    payload: { ...preparation.payload, policy: { allowed: true, policyId: "forged-approval" } },
+  };
+
+  await assert.rejects(
+    adapter.submit(forged),
+    (error) => error.code === "AUTONOMY_NOT_AUTHORIZED",
+  );
+  assert.equal(adapter.broadcasts.length, 0);
+});
+
+test("ATTACK: WaaP policy is re-evaluated at submit instead of trusting preparation policy", async () => {
+  let allowed = true;
+  const adapter = waapAdapter({
+    policy: async () => allowed
+      ? { allowed: true, policyId: "current-policy" }
+      : { allowed: false, reasonCode: "CURRENT_POLICY_DENIAL", reason: "authorization revoked" },
+  });
+  const intent = validated({ actor: executorWallet.address, autonomyAllowed: true });
+  const preparation = await adapter.prepare(intent);
+  allowed = false;
+
+  await assert.rejects(
+    adapter.submit({
+      ...preparation,
+      payload: { ...preparation.payload, policy: { allowed: true, policyId: "stale-approval" } },
+    }),
+    (error) => error.code === "CURRENT_POLICY_DENIAL",
+  );
+  assert.equal(adapter.broadcasts.length, 0);
+});
+
 test("ATTACK: mutating the nested Safe transaction after prepare() must not be proposed", async () => {
   const service = transactionService();
   const adapter = safeAdapter({ transactionService: service });
@@ -271,6 +314,40 @@ test("ATTACK: a valid selector with swapped arguments must not validate", () => 
   assert.equal(code({ data: calldataFor({ reason: "Bribed." }) }), "CALLDATA_DOES_NOT_MATCH_INTENT");
   // The honest case still validates.
   assert.equal(code({}), "NO_ERROR");
+});
+
+test("ATTACK: production governance decoders reject non-canonical calldata", () => {
+  const cases = [
+    {
+      name: "Nouns",
+      decode: decodeNounsVoteCall,
+      iface: voteInterface,
+      fn: "castRefundableVoteWithReason",
+      args: [42, 1, "Consistent with prior votes.", 38],
+    },
+    {
+      name: "ENS",
+      decode: decodeEnsVoteCall,
+      iface: new Interface(ENS_GOVERNOR_ABI),
+      fn: "castVoteWithReason",
+      args: [42, 1, "Consistent with prior votes."],
+    },
+    {
+      name: "Railgun",
+      decode: decodeRailgunVoteCall,
+      iface: new Interface(RAILGUN_VOTING_ABI),
+      fn: "vote",
+      args: [42, 100, true, executorWallet.address, 0],
+    },
+  ];
+
+  for (const entry of cases) {
+    const canonical = entry.iface.encodeFunctionData(entry.fn, entry.args);
+    assert.equal(entry.decode(canonical).proposalId, "42", `${entry.name} rejected canonical calldata`);
+    assert.throws(() => entry.decode(`${canonical}ff`), /canonical/i, `${entry.name} accepted a trailing byte`);
+    assert.throws(() => entry.decode(`${canonical}0000`), /canonical/i, `${entry.name} accepted trailing zero bytes`);
+    assert.throws(() => entry.decode(canonical.slice(0, 10)), undefined, `${entry.name} accepted malformed calldata`);
+  }
 });
 
 test("ATTACK: an adapter that cannot decode its own calldata cannot validate", () => {
@@ -477,6 +554,57 @@ test("ATTACK: one signer cannot back both roles on a live engine", async () => {
     }),
     /Identity separation violated/,
   );
+});
+
+test("ATTACK: register invalidates a previously verified identity separation", async () => {
+  const proposalIdentity = createProposalIdentity({
+    signer: walletSigner(proposerWallet),
+    safeAddress: SAFE,
+    chainId: 1,
+  });
+  const runner = engine([safeAdapter({ proposalIdentity })]);
+
+  await runner.prepare(validated(), { mode: "safe-supervised", blockNumber: 150 });
+
+  // A distinct identity object and signer reference resolve to the same address.
+  runner.register(new WaapAutonomousExecutionAdapter({
+    chainId: 1,
+    policy: async () => ({ allowed: true }),
+    executionIdentity: createExecutionIdentity({
+      signer: walletSigner(proposerWallet),
+      chainId: 1,
+      broadcaster: { broadcast: async () => ({ transactionHash: `0x${"cd".repeat(32)}` }) },
+    }),
+  }));
+
+  await assert.rejects(
+    runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 }),
+    /Identity separation violated/,
+  );
+});
+
+test("ATTACK: forged Safe preparation metadata cannot control submitted origin", async () => {
+  const service = transactionService();
+  const adapter = safeAdapter({ transactionService: service });
+  const intent = validated();
+  const preparation = await adapter.prepare(intent);
+
+  await adapter.submit({
+    ...preparation,
+    payload: {
+      ...preparation.payload,
+      metadata: { source: "attacker", dao: "fake-dao", proposalId: "999", secret: "do-not-send" },
+    },
+  });
+
+  assert.deepEqual(JSON.parse(service.proposals[0].origin), {
+    source: "gavel",
+    dao: "nouns",
+    proposalId: "42",
+    support: "FOR",
+    intentHash: intent.intentHash,
+    mode: "safe-supervised",
+  });
 });
 
 // ─────────────────────────── Freshness and records
