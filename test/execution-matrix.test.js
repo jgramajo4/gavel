@@ -13,7 +13,7 @@
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const test = require("node:test");
-const { Wallet, getAddress } = require("ethers");
+const { TypedDataEncoder, Wallet, getAddress } = require("ethers");
 
 const { NounsDaoAdapter } = require("../packages/nouns-adapter");
 const { ENS_GOVERNOR_ADDRESS, EnsDaoAdapter } = require("../packages/ens-adapter");
@@ -36,6 +36,21 @@ const SAFE = "0x0000000000000000000000000000000000000003";
 const NOW = new Date("2026-09-02T00:00:00.000Z");
 const proposerWallet = new Wallet(`0x${"11".repeat(32)}`);
 const executorWallet = new Wallet(`0x${"22".repeat(32)}`);
+
+const SAFE_TX_TYPES = Object.freeze({
+  SafeTx: [
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "data", type: "bytes" },
+    { name: "operation", type: "uint8" },
+    { name: "safeTxGas", type: "uint256" },
+    { name: "baseGas", type: "uint256" },
+    { name: "gasPrice", type: "uint256" },
+    { name: "gasToken", type: "address" },
+    { name: "refundReceiver", type: "address" },
+    { name: "nonce", type: "uint256" },
+  ],
+});
 
 function walletSigner(wallet) {
   return {
@@ -205,47 +220,109 @@ async function ensIntent(overrides = {}) {
 function safeExecution(options = {}) {
   const proposals = [];
   const proposed = new Map();
+  const proposalIdentity = createProposalIdentity({
+    signer: walletSigner(proposerWallet),
+    safeAddress: SAFE,
+    chainId: 1,
+    label: "safe-proposer-main",
+  });
+  const service = options.transactionService || {
+    async getNextNonce() {
+      return 11;
+    },
+    async proposeTransaction(input) {
+      proposals.push(input);
+      proposed.set(input.safeTxHash, input.safeTransactionData);
+      return { safeTxHash: input.safeTxHash, confirmationsRequired: 2, confirmations: [] };
+    },
+    async getTransaction(safeTxHash) {
+      const body = proposed.get(safeTxHash);
+      if (!body) return null;
+      return {
+        safeTxHash,
+        safe: SAFE,
+        chainId: 1,
+        to: body.to,
+        data: body.data,
+        value: body.value,
+        operation: body.operation,
+        nonce: String(body.nonce),
+        confirmations: [],
+        confirmationsRequired: 2,
+        isExecuted: false,
+      };
+    },
+  };
+  const readOwners = options.safeInfo?.getOwners
+    ? () => options.safeInfo.getOwners(SAFE)
+    : async () => ["0x00000000000000000000000000000000000000a1"];
+  const assertAuthorized = async () => {
+    const owners = await readOwners();
+    if (!Array.isArray(owners) || owners.length === 0) throw new Error("Safe owner reader returned no owners");
+    if (owners.map(getAddress).includes(getAddress(await proposalIdentity.address()))) {
+      throw new Error("Gavel must not be a Safe owner");
+    }
+  };
+  const build = async (validated, nonce) => {
+    const safeTransactionData = {
+      to: getAddress(validated.intent.target),
+      value: String(validated.intent.value),
+      data: validated.intent.data,
+      operation: 0,
+      safeTxGas: "0",
+      baseGas: "0",
+      gasPrice: "0",
+      gasToken: "0x0000000000000000000000000000000000000000",
+      refundReceiver: "0x0000000000000000000000000000000000000000",
+      nonce: String(nonce),
+    };
+    const domain = { chainId: 1, verifyingContract: SAFE };
+    const safeTxHash = TypedDataEncoder.hash(domain, SAFE_TX_TYPES, safeTransactionData);
+    return {
+      safeAddress: SAFE,
+      chainId: 1,
+      safeNonce: String(nonce),
+      safeTransactionData,
+      safeTxHash,
+      senderAddress: await proposalIdentity.address(),
+      senderSignature: await proposalIdentity.proposeSafeTransaction({ domain, types: SAFE_TX_TYPES, message: safeTransactionData }),
+    };
+  };
+  const proposalProvider = {
+    proposalIdentity,
+    async prepare(validated) {
+      await assertAuthorized();
+      return build(validated, await service.getNextNonce(SAFE));
+    },
+    async submit(validated, preparation, submitOptions = {}) {
+      await assertAuthorized();
+      const proposal = await build(validated, preparation.safeNonce);
+      if (String(preparation.safeTxHash).toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe preparation was altered between prepare and submit");
+      }
+      const response = await service.proposeTransaction({
+        safeAddress: SAFE,
+        chainId: 1,
+        safeTransactionData: proposal.safeTransactionData,
+        safeTxHash: proposal.safeTxHash,
+        senderAddress: proposal.senderAddress,
+        senderSignature: proposal.senderSignature,
+        origin: submitOptions.origin,
+      });
+      if (response?.safeTxHash && response.safeTxHash.toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe Transaction Service returned a different safeTxHash than Gavel computed");
+      }
+      const transaction = await service.getTransaction(proposal.safeTxHash);
+      if (!transaction) throw new Error("The Safe proposal could not be read back and verified");
+      return { proposal, transaction };
+    },
+    getTransaction: (safeTxHash) => service.getTransaction(safeTxHash),
+  };
   const adapter = new SafeSupervisedExecutionAdapter({
     safeAddress: SAFE,
     chainId: 1,
-    proposalIdentity: createProposalIdentity({
-      signer: walletSigner(proposerWallet),
-      safeAddress: SAFE,
-      chainId: 1,
-      label: "safe-proposer-main",
-    }),
-    transactionService: {
-      async getNextNonce() {
-        return 11;
-      },
-      async proposeTransaction(input) {
-        proposals.push(input);
-        proposed.set(input.safeTxHash, input.safeTransactionData);
-        return { safeTxHash: input.safeTxHash, confirmationsRequired: 2, confirmations: [] };
-      },
-      async getTransaction(safeTxHash) {
-        const body = proposed.get(safeTxHash);
-        if (!body) return null;
-        // The adapter now requires the full field set on every read, so the
-        // double has to behave like a service that actually describes the
-        // transaction it was given.
-        return {
-          safeTxHash,
-          safe: SAFE,
-          chainId: 1,
-          to: body.to,
-          data: body.data,
-          value: body.value,
-          operation: body.operation,
-          nonce: String(body.nonce),
-          confirmations: [],
-          confirmationsRequired: 2,
-          isExecuted: false,
-        };
-      },
-    },
-    safeInfo: options.safeInfo || { getOwners: async () => ["0x00000000000000000000000000000000000000a1"] },
-    ...options,
+    proposalIdentity,
+    proposalProvider,
   });
   adapter.proposals = proposals;
   return adapter;

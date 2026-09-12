@@ -26,6 +26,7 @@
     "test:security": "node --test test/security.test.js",
     "test:bankr-skill": "node --test test/bankr-skill.test.js",
     "test:prepare-vote": "node --test test/vote-preparation.test.js",
+    "test:safe-live": "node --test test/safe-live-integration.test.js",
     "tui": "npm run dev --workspace @gavel/tui",
     "tui:build": "npm run build --workspace @gavel/tui",
     "tui:typecheck": "npm run typecheck --workspace @gavel/tui"

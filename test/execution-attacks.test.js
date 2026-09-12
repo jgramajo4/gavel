@@ -19,7 +19,6 @@ const test = require("node:test");
 const { Interface, TypedDataEncoder, Wallet, getAddress } = require("ethers");
 
 const {
-  SAFE_TX_TYPES,
   SafeSupervisedExecutionAdapter,
 } = require("../packages/core/src/execution/executors/safe-supervised");
 const { WaapAutonomousExecutionAdapter } = require("../packages/core/src/execution/executors/waap-autonomous");
@@ -48,6 +47,21 @@ const NOW = new Date("2026-09-02T00:00:00.000Z");
 const proposerWallet = new Wallet(`0x${"11".repeat(32)}`);
 const executorWallet = new Wallet(`0x${"22".repeat(32)}`);
 
+const SAFE_TX_TYPES = Object.freeze({
+  SafeTx: [
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "data", type: "bytes" },
+    { name: "operation", type: "uint8" },
+    { name: "safeTxGas", type: "uint256" },
+    { name: "baseGas", type: "uint256" },
+    { name: "gasPrice", type: "uint256" },
+    { name: "gasToken", type: "address" },
+    { name: "refundReceiver", type: "address" },
+    { name: "nonce", type: "uint256" },
+  ],
+});
+
 const voteInterface = new Interface([
   "function castRefundableVoteWithReason(uint256 proposalId,uint8 support,string reason,uint32 clientId)",
 ]);
@@ -61,6 +75,21 @@ function walletSigner(wallet) {
   return {
     async address() {
       return wallet.address;
+    },
+    async signTypedData(domain, types, message) {
+      return wallet.signTypedData(domain, types, message);
+    },
+  };
+}
+
+function mutableAddressSigner(wallet) {
+  let address = wallet.address;
+  return {
+    setAddress(next) {
+      address = next;
+    },
+    async address() {
+      return address;
     },
     async signTypedData(domain, types, message) {
       return wallet.signTypedData(domain, types, message);
@@ -132,6 +161,9 @@ function transactionService(overrides = {}) {
       stored.set(input.safeTxHash, input.safeTransactionData);
       return overrides.proposeResponse === undefined ? { safeTxHash: input.safeTxHash } : overrides.proposeResponse;
     },
+    hasTransaction(safeTxHash) {
+      return stored.has(safeTxHash);
+    },
     async getTransaction(safeTxHash) {
       if (overrides.missing) return null;
       const body = stored.get(safeTxHash) || {};
@@ -147,8 +179,10 @@ function transactionService(overrides = {}) {
         confirmations: overrides.confirmations ?? [],
         confirmationsRequired: overrides.confirmationsRequired ?? 2,
         isExecuted: overrides.isExecuted ?? false,
-        isSuccessful: overrides.isSuccessful,
-        transactionHash: overrides.transactionHash,
+        isSuccessful: overrides.isExecuted ? (overrides.isSuccessful ?? true) : overrides.isSuccessful,
+        transactionHash: overrides.isExecuted
+          ? (overrides.transactionHash ?? `0x${"ee".repeat(32)}`)
+          : overrides.transactionHash,
       };
       for (const omitted of overrides.omit || []) delete full[omitted];
       return { ...full, ...overrides.statusOverrides };
@@ -156,15 +190,90 @@ function transactionService(overrides = {}) {
   };
 }
 
+function providerDouble(service, proposalIdentity, readOwners) {
+  if (typeof readOwners !== "function") {
+    throw new TypeError("Safe proposal provider double requires an onchain owner reader with getOwners()");
+  }
+  const assertAuthorized = async () => {
+    const owners = await readOwners();
+    if (!Array.isArray(owners) || owners.length === 0) throw new Error("Safe owner reader returned no owners");
+    if (owners.map(getAddress).includes(getAddress(await proposalIdentity.address()))) {
+      throw new Error("Gavel must not be a Safe owner");
+    }
+  };
+  const build = async (validated, nonce) => {
+    const safeTransactionData = {
+      to: getAddress(validated.intent.target),
+      value: String(validated.intent.value),
+      data: validated.intent.data,
+      operation: 0,
+      safeTxGas: "0",
+      baseGas: "0",
+      gasPrice: "0",
+      gasToken: "0x0000000000000000000000000000000000000000",
+      refundReceiver: "0x0000000000000000000000000000000000000000",
+      nonce: String(nonce),
+    };
+    const domain = { chainId: 1, verifyingContract: SAFE };
+    const safeTxHash = TypedDataEncoder.hash(domain, SAFE_TX_TYPES, safeTransactionData);
+    return {
+      safeAddress: SAFE,
+      chainId: 1,
+      safeNonce: String(nonce),
+      safeTransactionData,
+      safeTxHash,
+      senderAddress: await proposalIdentity.address(),
+      senderSignature: await proposalIdentity.proposeSafeTransaction({ domain, types: SAFE_TX_TYPES, message: safeTransactionData }),
+    };
+  };
+  return {
+    proposalIdentity,
+    async prepare(validated) {
+      await assertAuthorized();
+      return build(validated, await service.getNextNonce(SAFE));
+    },
+    async submit(validated, preparation, options = {}) {
+      await assertAuthorized();
+      const proposal = await build(validated, preparation.safeNonce);
+      if (String(preparation.safeTxHash).toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe preparation was altered between prepare and submit");
+      }
+      const response = await service.proposeTransaction({
+        safeAddress: SAFE,
+        chainId: 1,
+        safeTransactionData: proposal.safeTransactionData,
+        safeTxHash: proposal.safeTxHash,
+        senderAddress: proposal.senderAddress,
+        senderSignature: proposal.senderSignature,
+        origin: options.origin,
+      });
+      if (response?.safeTxHash && response.safeTxHash.toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe Transaction Service returned a different safeTxHash than Gavel computed");
+      }
+      const transaction = await service.getTransaction(proposal.safeTxHash);
+      if (!transaction) throw new Error("The Safe proposal could not be read back and verified");
+      return { proposal, transaction };
+    },
+    getTransaction: (safeTxHash) => service.getTransaction(safeTxHash),
+    lookupTransaction: (safeTxHash) =>
+      service.hasTransaction?.(safeTxHash) ? service.getTransaction(safeTxHash) : null,
+  };
+}
+
 function safeAdapter(options = {}) {
+  const proposalIdentity = options.proposalIdentity ||
+    createProposalIdentity({ signer: walletSigner(proposerWallet), safeAddress: SAFE, chainId: 1 });
+  const service = options.transactionService || transactionService(options.service);
+  const readOwners = options.safeInfo === null
+    ? undefined
+    : options.safeInfo?.getOwners
+      ? () => options.safeInfo.getOwners(SAFE)
+      : async () => [OWNER_A, OWNER_B];
   return new SafeSupervisedExecutionAdapter({
     safeAddress: SAFE,
     chainId: 1,
-    proposalIdentity:
-      options.proposalIdentity ||
-      createProposalIdentity({ signer: walletSigner(proposerWallet), safeAddress: SAFE, chainId: 1 }),
-    transactionService: options.transactionService || transactionService(options.service),
-    safeInfo: options.safeInfo === null ? undefined : options.safeInfo || { getOwners: async () => [OWNER_A, OWNER_B] },
+    proposalIdentity,
+    proposalProvider: options.proposalProvider || providerDouble(service, proposalIdentity, readOwners),
     ...options.extra,
   });
 }
@@ -525,14 +634,55 @@ test("ATTACK: supervised mode cannot run without an onchain owner reader", async
 
 // ─────────────────────────── Identity separation on the execution path
 
+test("ATTACK: the execution adapter registry cannot be externally mutated or replaced", () => {
+  const adapter = safeAdapter();
+  const runner = engine([adapter]);
+
+  assert.equal(runner.adapters, undefined, "the live registry is publicly reachable");
+  runner.adapters = new Map();
+  assert.strictEqual(runner.adapterFor("safe-supervised"), adapter, "the live registry was replaced");
+});
+
+test("ATTACK: mutable signer drift cannot change a pinned proposal identity", async () => {
+  const signer = mutableAddressSigner(proposerWallet);
+  const proposalIdentity = createProposalIdentity({ signer, safeAddress: SAFE, chainId: 1 });
+  const runner = engine([safeAdapter({ proposalIdentity }), waapAdapter()]);
+
+  await runner.prepare(validated(), { mode: "safe-supervised", blockNumber: 150 });
+  signer.setAddress(executorWallet.address);
+
+  await runner.prepare(validated(), { mode: "safe-supervised", blockNumber: 150 });
+  assert.equal(await proposalIdentity.address(), proposerWallet.address);
+});
+
+test("ATTACK: signer backend drift after prepare cannot change the submitted proposal address", async () => {
+  const service = transactionService();
+  const signer = mutableAddressSigner(proposerWallet);
+  const proposalIdentity = createProposalIdentity({ signer, safeAddress: SAFE, chainId: 1 });
+  const safe = safeAdapter({ proposalIdentity, transactionService: service });
+  const prepare = safe.prepare.bind(safe);
+  safe.prepare = async (...args) => {
+    const preparation = await prepare(...args);
+    signer.setAddress(executorWallet.address);
+    return preparation;
+  };
+  const runner = engine([safe, waapAdapter()]);
+
+  const result = await runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
+  assert.equal(result.record.state, ExecutionState.SUBMITTED);
+  assert.equal(service.proposals.length, 1);
+  assert.equal(service.proposals[0].senderAddress, proposerWallet.address);
+  assert.equal(await proposalIdentity.address(), proposerWallet.address);
+});
+
 test("ATTACK: one signer cannot back both roles on a live engine", async () => {
   const shared = walletSigner(executorWallet);
+  const proposalIdentity = createProposalIdentity({ signer: shared, safeAddress: SAFE, chainId: 1 });
   const safe = new SafeSupervisedExecutionAdapter({
     safeAddress: SAFE,
     chainId: 1,
-    proposalIdentity: createProposalIdentity({ signer: shared, safeAddress: SAFE, chainId: 1 }),
-    transactionService: transactionService(),
-    safeInfo: { getOwners: async () => [OWNER_A] },
+    proposalIdentity,
+    proposalProvider: providerDouble(transactionService(), proposalIdentity, async () => [OWNER_A]),
   });
   const waap = new WaapAutonomousExecutionAdapter({
     chainId: 1,

@@ -26,7 +26,7 @@ const { getAddress } = require("ethers");
 const { assertExecutionAdapter } = require("./adapter");
 const { ExecutionEvent, NULL_EVENT_SINK, STATE_EVENTS, buildEvent } = require("./events");
 const { ExecutionState, canTransition, toExecutionState } = require("./lifecycle");
-const { getExecutionMode } = require("./modes");
+const { ExecutionModeKind, getExecutionMode } = require("./modes");
 const {
   advanceExecutionRecord,
   createExecutionRecord,
@@ -43,7 +43,7 @@ const {
 const { assertValidatedExecutionIntent } = require("../intent/validated");
 
 class ExecutionEngine {
-  #separationVerified;
+  #adapters;
 
   /**
    * @param {object} options
@@ -53,13 +53,17 @@ class ExecutionEngine {
    * @param {Function} [options.now]               clock, for tests
    */
   constructor(options = {}) {
-    this.adapters = new Map();
+    this.#adapters = new Map();
     // The store is required. Defaulting to memory meant a restart silently
     // lost every deduplication and replay guarantee -- the failure mode of
     // which is a duplicate governance action, not an error. Making it explicit
     // forces the decision at construction; `InMemoryExecutionRecordStore` is
     // still the right answer in tests, but it has to be asked for.
-    if (!options.store || typeof options.store.put !== "function") {
+    if (
+      !options.store ||
+      typeof options.store.put !== "function" ||
+      typeof options.store.withLocks !== "function"
+    ) {
       throw new TypeError(
         "ExecutionEngine requires an explicit execution record store. Use FileExecutionRecordStore " +
           "for a durable one, or InMemoryExecutionRecordStore in tests -- there is no default, " +
@@ -69,22 +73,20 @@ class ExecutionEngine {
     this.store = options.store;
     this.events = options.events || NULL_EVENT_SINK;
     this.now = options.now || (() => new Date());
-    this.#separationVerified = false;
     for (const adapter of options.adapters || []) this.register(adapter);
   }
 
   register(adapter) {
     const checked = assertExecutionAdapter(adapter);
     const mode = getExecutionMode(checked.mode).mode;
-    if (this.adapters.has(mode)) throw new Error(`An execution adapter is already registered for ${mode}`);
-    this.adapters.set(mode, checked);
-    this.#separationVerified = false;
+    if (this.#adapters.has(mode)) throw new Error(`An execution adapter is already registered for ${mode}`);
+    this.#adapters.set(mode, checked);
     return checked;
   }
 
   adapterFor(mode) {
     const definition = getExecutionMode(mode);
-    const adapter = this.adapters.get(definition.mode);
+    const adapter = this.#adapters.get(definition.mode);
     if (!adapter) {
       throw new Error(
         `No execution adapter is registered for ${definition.mode}` +
@@ -104,15 +106,16 @@ class ExecutionEngine {
    * registered adapter's identity and refuses to run if a proposal identity and
    * an execution identity are the same address.
    *
-   * Verified once per engine, lazily, since resolving an address may hit a
-   * remote signer.
+   * Checked at every security-sensitive boundary because a remote signer can
+   * resolve to a different address after an earlier check.
    */
   async #assertIdentitySeparation() {
-    if (this.#separationVerified) return;
     const identities = [];
-    for (const adapter of this.adapters.values()) {
+    for (const adapter of this.#adapters.values()) {
       const role = getExecutionMode(adapter.mode).identityRole;
-      const identity = adapter.proposalIdentity || adapter.executionIdentity;
+      const identity = typeof adapter.getProposalIdentity === "function"
+        ? adapter.getProposalIdentity()
+        : adapter.proposalIdentity || adapter.executionIdentity;
       if (!role || !identity) continue;
       identities.push({ role, mode: adapter.mode, address: getAddress(await identity.address()) });
     }
@@ -127,11 +130,21 @@ class ExecutionEngine {
         }
       }
     }
-    this.#separationVerified = true;
   }
 
   #emit(name, source, detail, mode) {
     return this.events.emit(buildEvent(name, source, detail, { now: this.now(), mode }));
+  }
+
+  #lockKeys(intent, mode, adapter) {
+    const key = executionKey({ intentHash: intent.intentHash, mode, actor: intent.intent.actor });
+    const proposal = [
+      intent.dao,
+      intent.intent.source.proposalId,
+      getAddress(intent.intent.actor).toLowerCase(),
+    ].join(":");
+    const adapterKeys = typeof adapter.lockKeys === "function" ? adapter.lockKeys(intent) : [];
+    return [`idempotency:${key}`, `proposal:${proposal}`, ...adapterKeys];
   }
 
   async #advance(record, next, detail) {
@@ -166,11 +179,38 @@ class ExecutionEngine {
     const intent = assertValidatedExecutionIntent(validated);
     const mode = getExecutionMode(options.mode).mode;
     const adapter = this.adapterFor(mode);
+    return this.store.withLocks(this.#lockKeys(intent, mode, adapter), () =>
+      this.#prepareLocked(intent, options, mode, adapter));
+  }
+
+  async #prepareLocked(intent, options, mode, adapter) {
     await this.#assertIdentitySeparation();
     const key = executionKey({ intentHash: intent.intentHash, mode, actor: intent.intent.actor });
 
     const existingForKey = await this.store.listByKey(key);
-    const idempotent = resolveIdempotency(existingForKey);
+    let idempotent = resolveIdempotency(existingForKey);
+    let retryProviderData = null;
+    if (
+      idempotent?.record.providerData.providerStatus === "submission-outcome-unknown" &&
+      typeof adapter.reconcile === "function"
+    ) {
+      const reconciled = await adapter.reconcile(idempotent.record, options);
+      if (!reconciled) {
+        retryProviderData = { ...idempotent.record.providerData };
+        await this.#advance(idempotent.record, {
+          state: ExecutionState.FAILED,
+          providerData: { providerStatus: "definitely-not-submitted" },
+          detail: "the provider definitively does not contain the write-ahead transaction",
+        });
+        idempotent = null;
+      } else {
+        idempotent.record = await this.#advance(idempotent.record, {
+          state: toExecutionState(reconciled.state ?? reconciled.status),
+          providerData: reconciled.providerData || {},
+          detail: reconciled.detail ?? null,
+        });
+      }
+    }
     if (idempotent) {
       this.#emit(
         ExecutionEvent.EXECUTION_DEDUPLICATED,
@@ -179,6 +219,44 @@ class ExecutionEngine {
         mode,
       );
       return { record: idempotent.record, preparation: null, deduplicated: true, reason: idempotent.reason };
+    }
+
+    // PREPARED may mean the process died after the provider accepted the POST
+    // but before the write-ahead SUBMITTED record landed. Check its deterministic
+    // provider hash before rebuilding or posting anything.
+    const reusable = reusablePreparedRecord(existingForKey);
+    if (
+      reusable?.providerData.safeTxHash &&
+      typeof adapter.reconcile === "function"
+    ) {
+      const reconciled = await adapter.reconcile(reusable, options);
+      if (reconciled) {
+        const reported = toExecutionState(reconciled.state ?? reconciled.status);
+        let record = reusable;
+        if (reported !== record.state && !canTransition(record.state, reported)) {
+          record = await this.#advance(record, {
+            state: ExecutionState.SUBMITTED,
+            detail: "inferred: the provider already contains this prepared transaction",
+          });
+        }
+        record = await this.#advance(record, {
+          state: reported,
+          providerData: reconciled.providerData || {},
+          detail: reconciled.detail ?? null,
+        });
+        this.#emit(
+          ExecutionEvent.EXECUTION_DEDUPLICATED,
+          record,
+          { reasonCode: "existing-provider-transaction", existingExecutionId: record.id, state: record.state },
+          mode,
+        );
+        return {
+          record,
+          preparation: null,
+          deduplicated: true,
+          reason: "existing-provider-transaction",
+        };
+      }
     }
 
     try {
@@ -205,7 +283,6 @@ class ExecutionEngine {
     // A prepared-but-unsubmitted attempt for this key is reused rather than
     // superseded, so a dry run followed by a real submission is one attempt in
     // the audit trail instead of two.
-    const reusable = reusablePreparedRecord(existingForKey);
     let record =
       reusable ||
       createExecutionRecord(intent, { mode, now: this.now(), attempt: nextAttempt(existingForKey) });
@@ -226,7 +303,10 @@ class ExecutionEngine {
 
     let preparation;
     try {
-      preparation = await adapter.prepare(intent, options);
+      preparation = await adapter.prepare(intent, {
+        ...options,
+        existingProviderData: reusable?.providerData || retryProviderData || null,
+      });
     } catch (error) {
       await this.#advance(record, { state: ExecutionState.FAILED, detail: error.message }, error.message);
       throw error;
@@ -246,17 +326,47 @@ class ExecutionEngine {
    * second Safe transaction or rebroadcast a confirmed vote.
    */
   async submit(validated, options = {}) {
-    const prepared = await this.prepare(validated, options);
-    if (prepared.deduplicated) return prepared;
+    const intent = assertValidatedExecutionIntent(validated);
+    const mode = getExecutionMode(options.mode).mode;
+    const adapter = this.adapterFor(mode);
+    return this.store.withLocks(this.#lockKeys(intent, mode, adapter), async () => {
+      const prepared = await this.#prepareLocked(intent, options, mode, adapter);
+      await this.#assertIdentitySeparation();
+      if (prepared.deduplicated) return prepared;
 
-    let record = prepared.record;
-    let submission;
-    try {
-      submission = await this.adapterFor(record.mode).submit(prepared.preparation, options);
-    } catch (error) {
-      await this.#advance(record, { state: ExecutionState.FAILED, detail: error.message }, error.message);
-      throw error;
-    }
+      let record = prepared.record;
+      let submission;
+      const supportsWriteAhead =
+        getExecutionMode(record.mode).kind !== ExecutionModeKind.OFFLINE &&
+        typeof adapter.reconcile === "function" &&
+        typeof record.providerData.safeTxHash === "string";
+      let dispatched = false;
+      const beforeProviderDispatch = async () => {
+        if (!supportsWriteAhead || dispatched) return;
+        record = await this.#advance(record, {
+          state: ExecutionState.SUBMITTED,
+          providerData: { providerStatus: "submission-outcome-unknown" },
+          detail: "provider submission outcome is not yet known",
+        });
+        dispatched = true;
+      };
+      try {
+        submission = await adapter.submit(prepared.preparation, {
+          ...options,
+          beforeProviderDispatch,
+        });
+      } catch (error) {
+        if (dispatched && error?.submissionOutcome !== "definitely-not-submitted") {
+          await this.#advance(record, {
+            state: ExecutionState.SUBMITTED,
+            providerData: { providerStatus: "submission-outcome-unknown" },
+            detail: error.message,
+          }, error.message);
+        } else {
+          await this.#advance(record, { state: ExecutionState.FAILED, detail: error.message }, error.message);
+        }
+        throw error;
+      }
 
     // A provider that submits and confirms in one call (an autonomous
     // broadcaster, say) reports EXECUTED straight from PREPARED. Rather than
@@ -266,26 +376,37 @@ class ExecutionEngine {
     // fact that matters when a call times out and nobody knows whether it
     // landed. `unsigned` mode reports PREPARED and stays there, because nothing
     // was submitted anywhere.
-    const reported = toExecutionState(submission.state ?? submission.status);
-    if (reported !== ExecutionState.PREPARED && !canTransition(record.state, reported)) {
-      // Marked as inferred, so the history is not mistaken for a step the
-      // provider actually reported. The submission demonstrably happened --
-      // the provider returned an outcome -- but Gavel never observed a
-      // distinct submitted state for it.
+      const reported = toExecutionState(submission.state ?? submission.status);
+      if (
+        reported !== ExecutionState.PREPARED &&
+        reported !== record.state &&
+        !canTransition(record.state, reported)
+      ) {
+        // Marked as inferred, so the history is not mistaken for a step the
+        // provider actually reported. The submission demonstrably happened --
+        // the provider returned an outcome -- but Gavel never observed a
+        // distinct submitted state for it.
+        record = await this.#advance(record, {
+          state: ExecutionState.SUBMITTED,
+          detail: "inferred: the provider submitted and reported an outcome in one call",
+        });
+      }
+      const sameStateDetail = reported === record.state ? record.history.at(-1)?.detail ?? null : undefined;
       record = await this.#advance(record, {
-        state: ExecutionState.SUBMITTED,
-        detail: "inferred: the provider submitted and reported an outcome in one call",
+        state: reported,
+        providerData: {
+          ...(submission.providerData || {}),
+          ...(dispatched && !submission.providerData?.providerStatus
+            ? { providerStatus: "submitted" }
+            : {}),
+        },
+        detail: sameStateDetail ?? submission.detail ?? null,
       });
-    }
-    record = await this.#advance(record, {
-      state: reported,
-      providerData: submission.providerData || {},
-      detail: submission.detail ?? null,
+      for (const event of submission.events || []) {
+        this.#emit(event.name, record, event.detail || {}, record.mode);
+      }
+      return { record, preparation: prepared.preparation, submission, deduplicated: false, reason: null };
     });
-    for (const event of submission.events || []) {
-      this.#emit(event.name, record, event.detail || {}, record.mode);
-    }
-    return { record, preparation: prepared.preparation, submission, deduplicated: false, reason: null };
   }
 
   /**

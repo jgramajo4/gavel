@@ -63,9 +63,13 @@ const EXECUTION_CAPABILITIES = Object.freeze([
 class ProposalIdentity {
   #signer;
   #scope;
+  #address;
 
   constructor(signer, scope) {
     this.#signer = assertSigningIdentity(signer, "proposal signing identity");
+    // Resolve once at construction. The effective proposal address must not
+    // follow a mutable signer backend after authorization or submission.
+    this.#address = Promise.resolve(this.#signer.address()).then(getAddress);
     this.#scope = Object.freeze({
       safeAddress: getAddress(scope.safeAddress),
       chainId: Number(scope.chainId),
@@ -117,7 +121,7 @@ class ProposalIdentity {
   }
 
   async address() {
-    return getAddress(await this.#signer.address());
+    return this.#address;
   }
 
   /**
@@ -128,11 +132,17 @@ class ProposalIdentity {
    * before any network call, so a mis-wired adapter cannot borrow this
    * credential for another Safe.
    */
-  async proposeSafeTransaction(payload) {
+  async proposeSafeTransaction(payload, trustedScope = {}) {
     if (getAddress(payload?.domain?.verifyingContract ?? "") !== this.#scope.safeAddress) {
       throw new Error("Proposal identity is not scoped to this Safe");
     }
-    if (Number(payload.domain.chainId) !== this.#scope.chainId) {
+    const signedChainId = payload.domain.chainId;
+    const trustedChainId = trustedScope.chainId;
+    const chainId = signedChainId ?? trustedChainId;
+    if (
+      Number(chainId) !== this.#scope.chainId ||
+      (signedChainId !== undefined && trustedChainId !== undefined && Number(signedChainId) !== Number(trustedChainId))
+    ) {
       throw new Error("Proposal identity is not scoped to this chain");
     }
     return this.#signer.signTypedData(payload.domain, payload.types, payload.message);

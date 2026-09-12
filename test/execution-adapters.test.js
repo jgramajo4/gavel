@@ -2,10 +2,9 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { Interface, TypedDataEncoder, Wallet } = require("ethers");
+const { Interface, TypedDataEncoder, Wallet, getAddress } = require("ethers");
 
 const {
-  SAFE_TX_TYPES,
   SafeSupervisedExecutionAdapter,
   safeStateFrom,
 } = require("../packages/core/src/execution/executors/safe-supervised");
@@ -47,6 +46,21 @@ const NOW = new Date("2026-09-02T00:00:00.000Z");
 
 const proposerWallet = new Wallet(`0x${"11".repeat(32)}`);
 const executorWallet = new Wallet(`0x${"22".repeat(32)}`);
+
+const SAFE_TX_TYPES = Object.freeze({
+  SafeTx: [
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "data", type: "bytes" },
+    { name: "operation", type: "uint8" },
+    { name: "safeTxGas", type: "uint256" },
+    { name: "baseGas", type: "uint256" },
+    { name: "gasPrice", type: "uint256" },
+    { name: "gasToken", type: "address" },
+    { name: "refundReceiver", type: "address" },
+    { name: "nonce", type: "uint256" },
+  ],
+});
 
 function walletSigner(wallet) {
   return {
@@ -145,27 +159,123 @@ function transactionService(overrides = {}) {
         confirmations: overrides.statusConfirmations ?? [],
         confirmationsRequired: overrides.confirmationsRequired ?? 2,
         isExecuted: overrides.isExecuted ?? false,
-        isSuccessful: overrides.isSuccessful,
-        transactionHash: overrides.transactionHash,
+        isSuccessful: overrides.isExecuted ? (overrides.isSuccessful ?? true) : overrides.isSuccessful,
+        transactionHash: overrides.isExecuted
+          ? (overrides.transactionHash ?? `0x${"ee".repeat(32)}`)
+          : overrides.transactionHash,
       };
     },
   };
 }
 
+function providerDouble(service, proposalIdentity, readOwners) {
+  if (typeof readOwners !== "function") {
+    throw new TypeError("Safe proposal provider double requires an onchain owner reader with getOwners()");
+  }
+  const build = async (validated, nonce) => {
+    const safeTransactionData = {
+      to: getAddress(validated.intent.target),
+      value: String(validated.intent.value),
+      data: validated.intent.data,
+      operation: 0,
+      safeTxGas: "0",
+      baseGas: "0",
+      gasPrice: "0",
+      gasToken: "0x0000000000000000000000000000000000000000",
+      refundReceiver: "0x0000000000000000000000000000000000000000",
+      nonce: String(nonce),
+    };
+    const domain = { chainId: 1, verifyingContract: SAFE };
+    const safeTxHash = TypedDataEncoder.hash(domain, SAFE_TX_TYPES, safeTransactionData);
+    return {
+      safeAddress: SAFE,
+      chainId: 1,
+      safeNonce: String(nonce),
+      safeTransactionData,
+      safeTxHash,
+      senderAddress: await proposalIdentity.address(),
+      senderSignature: await proposalIdentity.proposeSafeTransaction({
+        domain,
+        types: SAFE_TX_TYPES,
+        message: safeTransactionData,
+      }),
+    };
+  };
+  const assertAuthorized = async () => {
+    const owners = await readOwners();
+    if (!Array.isArray(owners) || owners.length === 0) throw new Error("Safe owner reader returned no owners");
+    if (owners.map(getAddress).includes(getAddress(await proposalIdentity.address()))) {
+      throw new Error("Gavel must not be a Safe owner");
+    }
+  };
+  const normalize = async (transaction) => {
+    if (!transaction) return null;
+    const owners = new Set((await readOwners()).map((owner) => getAddress(owner)));
+    const confirmed = new Set(
+      (transaction.confirmations || [])
+        .map((entry) => getAddress(entry.owner))
+        .filter((owner) => owners.has(owner)),
+    );
+    return {
+      ...transaction,
+      authoritativeConfirmations: confirmed.size,
+      onchainThreshold: Math.min(2, owners.size),
+      onchainExecutionStatus: transaction.isExecuted
+        ? (transaction.isSuccessful === false ? "failed" : "success")
+        : null,
+    };
+  };
+  return {
+    proposalIdentity,
+    async prepare(validated) {
+      await assertAuthorized();
+      return build(validated, await service.getNextNonce(SAFE));
+    },
+    async submit(validated, preparation, options = {}) {
+      await assertAuthorized();
+      const proposal = await build(validated, preparation.safeNonce);
+      if (String(preparation.safeTxHash).toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe preparation was altered between prepare and submit");
+      }
+      const response = await service.proposeTransaction({
+        safeAddress: SAFE,
+        safeTransactionData: proposal.safeTransactionData,
+        safeTxHash: proposal.safeTxHash,
+        senderAddress: proposal.senderAddress,
+        senderSignature: proposal.senderSignature,
+        origin: options.origin,
+      });
+      if (response?.safeTxHash && response.safeTxHash.toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
+        throw new Error("The Safe Transaction Service returned a different safeTxHash than Gavel computed");
+      }
+      const transaction = await normalize(await service.getTransaction(proposal.safeTxHash));
+      if (!transaction) throw new Error("The Safe proposal could not be read back and verified");
+      return { proposal, transaction };
+    },
+    getTransaction: async (safeTxHash) => normalize(await service.getTransaction(safeTxHash)),
+  };
+}
+
 function safeAdapter(options = {}) {
+  const proposalIdentity =
+    options.proposalIdentity ||
+    createProposalIdentity({
+      signer: walletSigner(proposerWallet),
+      safeAddress: SAFE,
+      chainId: 1,
+      label: "safe-proposer-main",
+    });
+  const service = options.transactionService || transactionService(options.service);
+  const readOwners = options.safeInfo === null
+    ? undefined
+    : options.safeInfo?.getOwners
+      ? () => options.safeInfo.getOwners(SAFE)
+      : async () => [OWNER_A, OWNER_B];
   return new SafeSupervisedExecutionAdapter({
     safeAddress: SAFE,
     chainId: 1,
-    proposalIdentity:
-      options.proposalIdentity ||
-      createProposalIdentity({
-        signer: walletSigner(proposerWallet),
-        safeAddress: SAFE,
-        chainId: 1,
-        label: "safe-proposer-main",
-      }),
-    transactionService: options.transactionService || transactionService(options.service),
-    safeInfo: options.safeInfo === null ? undefined : options.safeInfo || { getOwners: async () => [OWNER_A, OWNER_B] },
+    proposalIdentity,
+    proposalProvider: options.proposalProvider || providerDouble(service, proposalIdentity, readOwners),
   });
 }
 
@@ -349,10 +459,18 @@ test("Safe status reports human authorization progress and re-verifies the propo
 });
 
 test("Safe mode maps provider vocabulary onto the canonical lifecycle", () => {
-  assert.equal(safeStateFrom({ isExecuted: true }), ExecutionState.EXECUTED);
-  assert.equal(safeStateFrom({ isExecuted: true, isSuccessful: false }), ExecutionState.FAILED);
-  assert.equal(safeStateFrom({ rejected: true }), ExecutionState.CANCELLED);
-  assert.equal(safeStateFrom({ confirmations: [1, 2], confirmationsRequired: 2 }), ExecutionState.AUTHORIZED);
+  assert.equal(safeStateFrom({ isExecuted: true }), ExecutionState.AWAITING_AUTHORIZATION);
+  assert.equal(safeStateFrom({ isExecuted: true, onchainExecutionStatus: "success" }), ExecutionState.EXECUTED);
+  assert.equal(safeStateFrom({ isExecuted: true, onchainExecutionStatus: "failed" }), ExecutionState.FAILED);
+  assert.equal(safeStateFrom({ nonceConsumed: true }), ExecutionState.CANCELLED);
+  assert.equal(
+    safeStateFrom({ authoritativeConfirmations: 2, onchainThreshold: 2 }),
+    ExecutionState.AUTHORIZED,
+  );
+  assert.equal(
+    safeStateFrom({ confirmations: [1, 2], confirmationsRequired: 2 }),
+    ExecutionState.AWAITING_AUTHORIZATION,
+  );
   assert.equal(safeStateFrom({ confirmations: [1], confirmationsRequired: 2 }), ExecutionState.AWAITING_AUTHORIZATION);
   assert.equal(safeStateFrom({}), ExecutionState.AWAITING_AUTHORIZATION);
 });
@@ -397,7 +515,7 @@ test("the Safe adapter refuses mismatched Safes, chains, identities, and actors"
   );
   assert.throws(
     () => new SafeSupervisedExecutionAdapter({ safeAddress: SAFE, chainId: 1, proposalIdentity: identity, transactionService: {} }),
-    /missing getNextNonce/,
+    /legacy hand-rolled Safe transactionService path is unsupported/,
   );
 
   // An intent actored by someone other than the configured Safe.

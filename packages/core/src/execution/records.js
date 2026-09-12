@@ -13,6 +13,8 @@
  */
 
 const fs = require("node:fs/promises");
+const crypto = require("node:crypto");
+const os = require("node:os");
 const path = require("node:path");
 
 const { z } = require("zod");
@@ -169,6 +171,26 @@ function isSuccessfulRecord(record) {
   return isSuccessfulExecutionState(record.state);
 }
 
+async function withMemoryLocks(lockMap, keys, callback) {
+  const releases = [];
+  try {
+    for (const key of [...new Set(keys.map(String))].sort()) {
+      const previous = lockMap.get(key) || Promise.resolve();
+      let release;
+      const current = new Promise((resolve) => { release = resolve; });
+      lockMap.set(key, current);
+      await previous;
+      releases.push(() => {
+        if (lockMap.get(key) === current) lockMap.delete(key);
+        release();
+      });
+    }
+    return await callback();
+  } finally {
+    for (const release of releases.reverse()) release();
+  }
+}
+
 /**
  * An in-memory record store.
  *
@@ -180,6 +202,11 @@ function isSuccessfulRecord(record) {
  */
 class InMemoryExecutionRecordStore {
   #byId = new Map();
+  #locks = new Map();
+
+  async withLocks(keys, callback) {
+    return withMemoryLocks(this.#locks, keys, callback);
+  }
 
   async get(key) {
     const records = [...this.#byId.values()].filter((record) => record.key === key);
@@ -229,15 +256,159 @@ class InMemoryExecutionRecordStore {
  * governance action rather than an error.
  *
  * Writes are atomic per record (write to a temporary file, then rename), so a
- * crash mid-write leaves the previous record rather than a truncated one. This
- * is a single-process store: it does not coordinate between concurrent Gavel
- * processes sharing a directory, and a deployment that needs that should
- * implement this same interface over its own database.
+ * crash mid-write leaves the previous record rather than a truncated one. Lock
+ * directories coordinate cooperating Linux processes sharing this store on one
+ * reliable local filesystem; Linux `/proc` fingerprints prevent PID-reuse
+ * reclamation mistakes. NFS and multi-host coordination are not supported.
  */
 class FileExecutionRecordStore {
-  constructor(root) {
+  #locks = new Map();
+  #processStartReader;
+
+  constructor(root, options = {}) {
     if (!root) throw new TypeError("A record store root directory is required");
     this.root = path.resolve(root);
+    this.#processStartReader = options.processStartReader || null;
+    this.lockTimeoutMs = Number(options.lockTimeoutMs ?? 10_000);
+    if (!Number.isFinite(this.lockTimeoutMs) || this.lockTimeoutMs <= 0) {
+      throw new TypeError("lockTimeoutMs must be a positive number");
+    }
+  }
+
+  async #processStart(pid) {
+    if (this.#processStartReader) return this.#processStartReader(pid);
+    try {
+      const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19] || null;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async #ownerIsDead(owner) {
+    if (!owner || owner.hostname !== os.hostname() || !Number.isSafeInteger(owner.pid) || !owner.processStart) {
+      return false;
+    }
+    const currentStart = await this.#processStart(owner.pid);
+    return currentStart === null || currentStart !== owner.processStart;
+  }
+
+  async #restoreIsolatedLock(quarantine, destination) {
+    try {
+      await fs.rename(quarantine, destination);
+    } catch (error) {
+      if (["EEXIST", "ENOTEMPTY"].includes(error.code)) {
+        throw new Error("Execution lock ownership changed while isolated; refusing to delete either lock");
+      }
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  async #acquireFileLock(key) {
+    const lockRoot = path.join(this.root, ".locks");
+    await fs.mkdir(lockRoot, { recursive: true, mode: 0o700 });
+    const digest = crypto.createHash("sha256").update(key).digest("hex");
+    const destination = path.join(lockRoot, digest);
+    const token = crypto.randomBytes(16).toString("hex");
+    const processStart = await this.#processStart(process.pid);
+    if (!processStart) {
+      throw new Error(
+        "FileExecutionRecordStore process locking requires Linux /proc on a shared local filesystem",
+      );
+    }
+    const owner = {
+      hostname: os.hostname(),
+      pid: process.pid,
+      processStart,
+      token,
+    };
+    const started = Date.now();
+    let backoff = 5;
+
+    while (true) {
+      const candidate = path.join(lockRoot, `.candidate-${digest}-${token}`);
+      try {
+        await fs.mkdir(candidate, { mode: 0o700 });
+        await fs.writeFile(path.join(candidate, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+        await fs.rename(candidate, destination);
+        return async () => {
+          const quarantine = `${destination}.release-${token}`;
+          try {
+            // Isolate first, then inspect the exact directory moved. Checking
+            // destination before rename has an ABA window that can delete a
+            // successor lock installed at the same pathname.
+            await fs.rename(destination, quarantine);
+          } catch (error) {
+            if (error.code === "ENOENT") return;
+            throw error;
+          }
+          let current;
+          try {
+            current = JSON.parse(await fs.readFile(path.join(quarantine, "owner.json"), "utf8"));
+          } catch (error) {
+            await this.#restoreIsolatedLock(quarantine, destination);
+            if (error.code === "ENOENT") return;
+            throw error;
+          }
+          if (current.token !== token) {
+            await this.#restoreIsolatedLock(quarantine, destination);
+            return;
+          }
+          await fs.rm(quarantine, { recursive: true, force: true });
+        };
+      } catch (error) {
+        await fs.rm(candidate, { recursive: true, force: true });
+        if (!["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
+      }
+
+      const quarantine = `${destination}.stale-${token}`;
+      try {
+        // As with release, isolate the exact directory before trusting its
+        // metadata. A pre-rename check could act on an ABA successor.
+        await fs.rename(destination, quarantine);
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      try {
+        const current = JSON.parse(await fs.readFile(path.join(quarantine, "owner.json"), "utf8"));
+        if (await this.#ownerIsDead(current)) {
+          await fs.rm(quarantine, { recursive: true, force: true });
+          continue;
+        }
+        await this.#restoreIsolatedLock(quarantine, destination);
+      } catch (error) {
+        // Malformed ownership is not evidence of death. Restore it rather than
+        // stealing by age or deleting an identity we could not verify.
+        try {
+          await this.#restoreIsolatedLock(quarantine, destination);
+        } catch (restoreError) {
+          throw restoreError;
+        }
+        if (error.code !== "ENOENT" && !error.message?.includes("JSON")) throw error;
+      }
+
+      if (Date.now() - started >= this.lockTimeoutMs) {
+        throw new Error(`Timed out acquiring execution lock for ${key}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+      backoff = Math.min(backoff * 2, 100);
+    }
+  }
+
+  async withLocks(keys, callback) {
+    return withMemoryLocks(this.#locks, keys, async () => {
+      const releases = [];
+      try {
+        for (const key of [...new Set(keys.map(String))].sort()) {
+          releases.push(await this.#acquireFileLock(key));
+        }
+        return await callback();
+      } finally {
+        for (const release of releases.reverse()) await release();
+      }
+    });
   }
 
   #pathFor(record) {
@@ -255,6 +426,7 @@ class FileExecutionRecordStore {
         throw error;
       }
       for (const entry of entries) {
+        if (directory === this.root && entry.name === ".locks") continue;
         const target = path.join(directory, entry.name);
         if (entry.isDirectory()) await walk(target);
         else if (entry.name.endsWith(".json")) {
