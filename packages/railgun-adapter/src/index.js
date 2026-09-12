@@ -4,6 +4,7 @@ const { Contract, Interface, getAddress } = require("ethers");
 
 const { normalizedProposalSchema, Support } = require("../../core/src/schema/governance");
 const { predictionDocumentSchema } = require("../../core/src/schema/prediction");
+const { installGovernanceContract } = require("../../core/src/dao/contract");
 const { inspectNounsProposal } = require("../../nouns-adapter/src/security");
 
 const CHAIN_ID = 1;
@@ -33,6 +34,25 @@ const RAILGUN_STAKING_ABI = [
   "function accountSnapshotAt(address account,uint256 interval,uint256 hint) view returns (uint256 snapshotInterval,uint256 votingPower)",
 ];
 const votingInterface = new Interface(RAILGUN_VOTING_ABI);
+
+/**
+ * Decode `vote(uint256,uint256,bool,address,uint256)`.
+ *
+ * Railgun votes carry no reason field, so the decoded reason is null and an
+ * execution intent claiming a reason will not validate -- which is correct: the
+ * chain would never record it. The staked `amount` and `account` are returned
+ * too, so a caller can see the partial-vote size the calldata commits to.
+ */
+function decodeRailgunVoteCall(data) {
+  const decoded = votingInterface.decodeFunctionData("vote", data);
+  return {
+    proposalId: decoded[0].toString(),
+    amount: decoded[1].toString(),
+    support: decoded[2] ? Support.FOR : Support.AGAINST,
+    account: getAddress(decoded[3]),
+    reason: null,
+  };
+}
 
 function field(value, name, index) {
   return value?.[name] ?? value?.[index];
@@ -140,6 +160,18 @@ class RailgunDaoAdapter {
       waapAutonomous: false,
     });
     this.supportedActions = Object.freeze(["CAST_VOTE"]);
+    // Railgun is the case that proves replay rules belong here rather than in
+    // the execution layer. Votes are cast by staked amount and successive
+    // partial votes are legitimate until stake is exhausted, so a second
+    // execution on one proposal is normal -- the opposite of Nouns and ENS. A
+    // cast vote still cannot be withdrawn, so replacement stays false.
+    installGovernanceContract(this, {
+      adapterVersion: "railgun-eth@1.1.0",
+      semantics: { canVoteMultipleTimes: true, canReplaceVote: false },
+      governanceTargets: [RAILGUN_VOTING_ADDRESS],
+      // vote(uint256,uint256,bool,address,uint256)
+      governanceSelectors: { CAST_VOTE: ["0x4f526875"] },
+    });
     this.provider = options.provider;
     this.voting = options.voting || new Contract(RAILGUN_VOTING_ADDRESS, RAILGUN_VOTING_ABI, options.provider);
     this.staking = options.staking || new Contract(RAILGUN_STAKING_ADDRESS, RAILGUN_STAKING_ABI, options.provider);
@@ -148,6 +180,11 @@ class RailgunDaoAdapter {
 
   validateProposal(proposal) {
     return inspectNounsProposal(proposal);
+  }
+
+  decodeGovernanceCall(action, data) {
+    if (action !== "CAST_VOTE") throw new Error(`Railgun does not decode governance action ${action}`);
+    return decodeRailgunVoteCall(data);
   }
 
   async getVotingPower(address) {
@@ -332,6 +369,7 @@ class RailgunDaoAdapter {
 
 module.exports = {
   CHAIN_ID,
+  decodeRailgunVoteCall,
   RAILGUN_VOTING_ADDRESS,
   RAILGUN_STAKING_ADDRESS,
   RAILGUN_DELEGATOR_ADDRESS,

@@ -1,8 +1,9 @@
 const { ExecutionMode, ExecutionStatus, executionResultSchema } = require("../../schema/execution");
-const { assertPreparedGovernanceTransaction } = require("../transaction-binding");
+const { assertDeprecatedPathAllowed, assertPreparedGovernanceTransaction } = require("../transaction-binding");
 
 class UnsignedExecutor {
   constructor(executionAddress) {
+    assertDeprecatedPathAllowed("UnsignedExecutor");
     this.type = ExecutionMode.UNSIGNED;
     this.executionAddress = executionAddress;
   }

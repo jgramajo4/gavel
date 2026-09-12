@@ -1,5 +1,6 @@
 const { Contract } = require("ethers");
 
+const { installGovernanceContract } = require("../../core/src/dao/contract");
 const { inspectNounsProposal } = require("./security");
 const { DEFAULT_ENDPOINT, NounsSubgraphHistoryAdapter } = require("./history");
 const {
@@ -9,6 +10,7 @@ const {
   NOUNS_TOKEN_ADDRESS,
   NOUNS_TOKEN_ABI,
   NounsVotePreparationAdapter,
+  decodeNounsVoteCall,
 } = require("./vote");
 const { NounsDelegationPreparationAdapter } = require("./delegation");
 const {
@@ -34,6 +36,17 @@ class NounsDaoAdapter {
       waapAutonomous: true,
     });
     this.supportedActions = Object.freeze(["CAST_VOTE"]);
+    // Nouns records one receipt per voter per proposal: `getReceipt().hasVoted`
+    // is decisive and the governor rejects a second vote. So neither repeat
+    // voting nor replacement is permitted, and the execution layer enforces
+    // exactly that without knowing why.
+    installGovernanceContract(this, {
+      adapterVersion: "nouns@1.1.0",
+      semantics: { canVoteMultipleTimes: false, canReplaceVote: false },
+      governanceTargets: [GOVERNANCE_ADDRESS],
+      // castRefundableVoteWithReason(uint256,uint8,string,uint32)
+      governanceSelectors: { CAST_VOTE: ["0x8136730f"] },
+    });
     this.provider = options.provider;
     this.governance = options.governance || new Contract(GOVERNANCE_ADDRESS, GOVERNANCE_ABI, options.provider);
     this.token = options.nounsToken || options.token || new Contract(NOUNS_TOKEN_ADDRESS, NOUNS_TOKEN_ABI, options.provider);
@@ -50,6 +63,20 @@ class NounsDaoAdapter {
 
   validateProposal(proposal) {
     return inspectNounsProposal(proposal);
+  }
+
+  /**
+   * Decode a Nouns vote call so core can bind the governance decision to the
+   * bytes it claims to represent.
+   *
+   * A selector alone says which function is called, not with what: the same
+   * `castRefundableVoteWithReason` selector encodes a vote FOR proposal 42 and
+   * a vote AGAINST proposal 999. Core cannot decode this without becoming
+   * Nouns-aware, so the adapter does it and core cross-checks the result.
+   */
+  decodeGovernanceCall(action, data) {
+    if (action !== "CAST_VOTE") throw new Error(`Nouns does not decode governance action ${action}`);
+    return decodeNounsVoteCall(data);
   }
 
   async getVotingPower(address, blockTag) {
@@ -81,6 +108,7 @@ class NounsDaoAdapter {
 
 module.exports = {
   NounsDaoAdapter,
+  decodeNounsVoteCall,
   NounsDelegationPreparationAdapter,
   NounsSubgraphHistoryAdapter,
   DEFAULT_ENDPOINT,

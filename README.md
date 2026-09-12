@@ -532,13 +532,24 @@ explicit unsigned delegation change with:
 gavel prepare-delegation --dao nouns --asset-owner-address 0xCOLD --to 0xNEWDELEGATE
 ```
 
-Safe execution uses a proposer-only client and preserves human approval. Gavel
+Safe execution uses a proposal-only identity and preserves human approval. Gavel
 does not create or select a Safe, and no Safe owner key is required. WaaP
 execution is available only when the registered DAO
 adapter explicitly enables autonomy, the action is allowlisted, delegation and
 address roles match, and a policy hook approves the immutable prepared intent.
 Live WaaP broadcast is intentionally left to an official deterministic client.
-See [`docs/execution/safe.md`](docs/execution/safe.md) and
+
+Governance reasoning does not know how transactions are executed, and execution
+infrastructure does not know how governance decisions are made. The single
+artifact crossing that boundary is a `ValidatedExecutionIntent`, which execution
+adapters are the only accepted input to and which nothing outside canonical
+validation can mint. The identities are separate by construction: a Safe
+proposal identity cannot become an autonomous execution identity.
+
+Start with [`docs/architecture/execution.md`](docs/architecture/execution.md) for
+the full model — canonical intents, intent hashing, the lifecycle, identity
+roles, security invariants and the threat model. Operator guides:
+[`docs/execution/safe.md`](docs/execution/safe.md) and
 [`docs/execution/waap.md`](docs/execution/waap.md).
 
 ## Proposal security
