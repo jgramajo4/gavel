@@ -227,12 +227,28 @@ whether to confirm it, and execute it through Safe if they choose.
 1. reads owners and verifies the proposer is not one;
 2. verifies owner-authorized, unexpired delegation;
 3. obtains API Kit's next available nonce (it does not use `current + 1`);
-4. constructs the transaction from the sealed validated intent;
-5. computes and signs `safeTxHash` locally;
-6. proposes through the Transaction Service;
-7. reads the transaction back by `safeTxHash`; and
-8. requires `safe`, chain, target, value, calldata, operation, nonce, and hash to
-   match before reporting submission.
+4. constructs one canonical transaction from the sealed validated intent with
+   `safeTxGas = baseGas = gasPrice = 0` and both `gasToken` and
+   `refundReceiver` equal to the zero address;
+5. supports only the explicitly reviewed Safe versions `1.3.0` and `1.4.1`,
+   requiring typed data whose domain
+   contains the configured chain id and Safe address;
+6. independently computes the EIP-712 digest of that full body and requires it
+   to equal Protocol Kit's `safeTxHash` before signing;
+7. signs and proposes that same canonical body through the Transaction Service;
+8. reads the transaction back by `safeTxHash`; and
+9. requires Safe, chain, target, value, calldata, operation, all five payment
+   fields, nonce, proposer, and hash to match before reporting submission.
+
+Safe `1.2.x` and earlier—including chainless `1.1.1` typed-data domains—and
+unknown `1.5.x` or later versions fail with `UNSUPPORTED_SAFE_VERSION`. Broadening
+that allowlist requires dedicated version-specific tests; semantic-version shape
+alone is not evidence of compatible hashing.
+
+Gavel does not support Safe gas refunds or payment tokens in supervised
+execution. A non-zero gas field or non-zero token/refund address fails with
+`UNSAFE_SAFE_PAYMENT_FIELDS` before signing or POST. A typed-data/hash split
+fails with `HASH_TYPED_DATA_MISMATCH`.
 
 Missing or mismatched service fields are errors. A provider's `isExecuted` claim
 never overrides an integrity mismatch. The proposal identity must not appear as

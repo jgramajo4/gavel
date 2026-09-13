@@ -357,11 +357,13 @@ class ExecutionEngine {
         });
       } catch (error) {
         if (dispatched && error?.submissionOutcome !== "definitely-not-submitted") {
-          await this.#advance(record, {
+          const unknownRecord = await this.#advance(record, {
             state: ExecutionState.SUBMITTED,
             providerData: { providerStatus: "submission-outcome-unknown" },
             detail: error.message,
           }, error.message);
+          error.submissionOutcome = "unknown";
+          error.executionRecord = unknownRecord;
         } else {
           await this.#advance(record, { state: ExecutionState.FAILED, detail: error.message }, error.message);
         }

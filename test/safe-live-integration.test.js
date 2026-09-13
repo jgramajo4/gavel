@@ -209,6 +209,11 @@ test("live Safe: validated reviewed intent is proposed by a non-owner delegate a
   assert.equal(String(readback.data).toLowerCase(), prepared.intent.data.toLowerCase());
   assert.equal(BigInt(readback.value), BigInt(prepared.intent.value));
   assert.equal(Number(readback.operation), 0);
+  assert.equal(BigInt(readback.safeTxGas), 0n);
+  assert.equal(BigInt(readback.baseGas), 0n);
+  assert.equal(BigInt(readback.gasPrice), 0n);
+  assert.equal(getAddress(readback.gasToken), "0x0000000000000000000000000000000000000000");
+  assert.equal(getAddress(readback.refundReceiver), "0x0000000000000000000000000000000000000000");
   assert.equal(String(readback.nonce), String(submitted.nonce));
   assert.equal(
     getAddress(readback.proposedByDelegate),

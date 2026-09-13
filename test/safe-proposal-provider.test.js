@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { Interface, Wallet } = require("ethers");
+const { Interface, TypedDataEncoder, Wallet, ZeroAddress } = require("ethers");
 
 const { ExecutionEngine } = require("../packages/core/src/execution/engine");
 const { ExecutionState } = require("../packages/core/src/execution/lifecycle");
@@ -24,6 +24,38 @@ const SAFE = "0x0000000000000000000000000000000000000003";
 const OWNER = "0x00000000000000000000000000000000000000a1";
 const TARGET = "0x0000000000000000000000000000000000000010";
 const wallet = new Wallet(`0x${"11".repeat(32)}`);
+const ATTACKER = "0x00000000000000000000000000000000000000ff";
+const ZERO_PAYMENT_FIELDS = Object.freeze({
+  safeTxGas: "0",
+  baseGas: "0",
+  gasPrice: "0",
+  gasToken: ZeroAddress,
+  refundReceiver: ZeroAddress,
+});
+const CANONICAL_BODY = Object.freeze({
+  to: TARGET,
+  value: "0",
+  data: "0x12345678",
+  operation: 0,
+  ...ZERO_PAYMENT_FIELDS,
+  nonce: 7,
+});
+const SAFE_TX_TYPES = Object.freeze({
+  SafeTx: Object.freeze([
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "data", type: "bytes" },
+    { name: "operation", type: "uint8" },
+    { name: "safeTxGas", type: "uint256" },
+    { name: "baseGas", type: "uint256" },
+    { name: "gasPrice", type: "uint256" },
+    { name: "gasToken", type: "address" },
+    { name: "refundReceiver", type: "address" },
+    { name: "nonce", type: "uint256" },
+  ]),
+});
+const CANONICAL_DOMAIN = Object.freeze({ verifyingContract: SAFE, chainId: 1n });
+const CANONICAL_HASH = TypedDataEncoder.hash(CANONICAL_DOMAIN, SAFE_TX_TYPES, CANONICAL_BODY);
 const safeEvents = new Interface([
   "event ExecutionSuccess(bytes32 txHash, uint256 payment)",
   "event ExecutionFailure(bytes32 txHash, uint256 payment)",
@@ -34,33 +66,37 @@ function executionLog(name, safeTxHash) {
   return { address: SAFE, topics: encoded.topics, data: encoded.data };
 }
 
-function identity(address = wallet.address) {
+function identity(address = wallet.address, signingCalls = null) {
   return createProposalIdentity({
     safeAddress: SAFE,
     chainId: 1,
     signer: {
       address: async () => address,
-      signTypedData: (...args) => wallet.signTypedData(...args),
+      signTypedData: (...args) => {
+        signingCalls?.push(args);
+        return wallet.signTypedData(...args);
+      },
     },
   });
 }
 
+function serviceTransaction(hash, overrides = {}) {
+  return {
+    safeTxHash: hash,
+    proposedByDelegate: wallet.address,
+    safe: SAFE,
+    ...CANONICAL_BODY,
+    nonce: "7",
+    confirmations: [],
+    confirmationsRequired: 2,
+    isExecuted: false,
+    ...overrides,
+  };
+}
+
 function kits({ owners = [OWNER], delegates, delegateError, transaction, proposeError } = {}) {
   const calls = { created: [], proposed: [] };
-  const safeTransaction = transaction || {
-    data: {
-      to: TARGET,
-      value: "0",
-      data: "0x12345678",
-      operation: 0,
-      safeTxGas: "0",
-      baseGas: "0",
-      gasPrice: "0",
-      gasToken: "0x0000000000000000000000000000000000000000",
-      refundReceiver: "0x0000000000000000000000000000000000000000",
-      nonce: 7,
-    },
-  };
+  const safeTransaction = transaction || { data: { ...CANONICAL_BODY } };
   const protocolKit = {
     getOwners: async () => owners,
     getThreshold: async () => Math.min(2, owners.length),
@@ -77,7 +113,7 @@ function kits({ owners = [OWNER], delegates, delegateError, transaction, propose
       calls.created.push(input);
       return safeTransaction;
     },
-    getTransactionHash: async () => `0x${"ab".repeat(32)}`,
+    getTransactionHash: async () => CANONICAL_HASH,
   };
   const apiKit = {
     getSafeDelegates: async () => {
@@ -94,19 +130,14 @@ function kits({ owners = [OWNER], delegates, delegateError, transaction, propose
       calls.proposed.push(input);
       if (proposeError) throw new Error(proposeError);
     },
-    getTransaction: async (hash) => ({
-      safeTxHash: hash,
-      proposedByDelegate: wallet.address,
-      safe: SAFE,
-      to: TARGET,
-      data: "0x12345678",
-      value: "0",
-      operation: 0,
-      nonce: "7",
-      confirmations: [],
-      confirmationsRequired: 2,
-      isExecuted: false,
-    }),
+    getTransaction: async (hash) => {
+      if (!calls.proposed.some((proposal) => proposal.safeTxHash.toLowerCase() === String(hash).toLowerCase())) {
+        const error = new Error("not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      return serviceTransaction(hash);
+    },
   };
   return { protocolKit, apiKit, calls };
 }
@@ -121,6 +152,7 @@ function provider(overrides = {}) {
       proposalIdentity: overrides.proposalIdentity || identity(),
       protocolKit: dependencies.protocolKit,
       apiKit: dependencies.apiKit,
+      generateTypedData: overrides.generateTypedData,
     }),
   };
 }
@@ -263,7 +295,7 @@ test("ProposalIdentity pins its normalized signer address at construction", asyn
   assert.notEqual(await proposalIdentity.address(), currentAddress);
 });
 
-test("ProposalIdentity accepts a legacy Safe domain only with explicit trusted chain scope", async () => {
+test("ProposalIdentity rejects chainless Safe typed-data domains even with trusted scope", async () => {
   const signed = [];
   const proposalIdentity = createProposalIdentity({
     safeAddress: SAFE,
@@ -284,10 +316,9 @@ test("ProposalIdentity accepts a legacy Safe domain only with explicit trusted c
 
   await assert.rejects(proposalIdentity.proposeSafeTransaction(payload), /scoped to this chain/i);
   await assert.rejects(proposalIdentity.proposeSafeTransaction(payload, { chainId: 8453 }), /scoped to this chain/i);
-  await proposalIdentity.proposeSafeTransaction(payload, { chainId: 1 });
+  await assert.rejects(proposalIdentity.proposeSafeTransaction(payload, { chainId: 1 }), /scoped to this chain/i);
 
-  assert.deepEqual(signed[0].domain, { verifyingContract: SAFE });
-  assert.equal("chainId" in signed[0].domain, false);
+  assert.equal(signed.length, 0);
 });
 
 test("prepare accepts only a validated intent and builds and signs through Protocol Kit", async () => {
@@ -296,7 +327,7 @@ test("prepare accepts only a validated intent and builds and signs through Proto
 
   const prepared = await setup.provider.prepare(validated());
 
-  assert.equal(prepared.safeTxHash, `0x${"ab".repeat(32)}`);
+  assert.equal(prepared.safeTxHash, CANONICAL_HASH);
   assert.equal(prepared.safeNonce, "7");
   assert.equal(prepared.safeTransactionData.to, TARGET);
   assert.equal(prepared.safeTransactionData.nonce, 7);
@@ -304,7 +335,7 @@ test("prepare accepts only a validated intent and builds and signs through Proto
   assert.match(prepared.senderSignature, /^0x[0-9a-f]+$/i);
   assert.deepEqual(setup.dependencies.calls.created, [{
     transactions: [{ to: TARGET, value: "0", data: "0x12345678", operation: 0 }],
-    options: { nonce: 7 },
+    options: { nonce: 7, ...ZERO_PAYMENT_FIELDS },
   }]);
 });
 
@@ -320,9 +351,121 @@ test("prepare fails closed before transaction construction for every non-authori
   }
 });
 
+test("production provider rejects every non-zero Safe payment field before signing or POST", async () => {
+  const cases = [
+    ["gasPrice", "1"],
+    ["refundReceiver", ATTACKER],
+    ["gasToken", ATTACKER],
+    ["safeTxGas", "1"],
+    ["baseGas", "1"],
+  ];
+  for (const [field, value] of cases) {
+    const signingCalls = [];
+    const setup = provider({
+      proposalIdentity: identity(wallet.address, signingCalls),
+      transaction: { data: { ...CANONICAL_BODY, [field]: value } },
+    });
+    await assert.rejects(
+      setup.provider.prepare(validated()),
+      (error) => error.code === "UNSAFE_SAFE_PAYMENT_FIELDS" && error.message.includes(field),
+      field,
+    );
+    assert.equal(signingCalls.length, 0, `${field} reached signing`);
+    assert.equal(setup.dependencies.calls.proposed.length, 0, `${field} reached proposal POST`);
+  }
+});
+
+test("production provider binds the SDK hash to the independently encoded typed-data digest", async () => {
+  const signingCalls = [];
+  const setup = provider({ proposalIdentity: identity(wallet.address, signingCalls) });
+  setup.dependencies.protocolKit.getTransactionHash = async () => `0x${"ab".repeat(32)}`;
+
+  await assert.rejects(
+    setup.provider.prepare(validated()),
+    (error) => error.code === "HASH_TYPED_DATA_MISMATCH",
+  );
+  assert.equal(signingCalls.length, 0);
+  assert.equal(setup.dependencies.calls.proposed.length, 0);
+});
+
+test("production provider rejects legacy, unknown, and unreviewed patch Safe versions before typed-data signing", async () => {
+  for (const version of ["1.1.1", "1.2.0", "1.3.1", "1.3.999", "1.4.0", "1.4.999", "1.5.0", "2.0.0", "99.0.0"]) {
+    const signingCalls = [];
+    const setup = provider({ proposalIdentity: identity(wallet.address, signingCalls) });
+    setup.dependencies.protocolKit.getContractVersion = () => version;
+    await assert.rejects(
+      setup.provider.prepare(validated()),
+      (error) => error.code === "UNSUPPORTED_SAFE_VERSION",
+      version,
+    );
+    assert.equal(signingCalls.length, 0, `${version} reached signing`);
+    assert.equal(setup.dependencies.calls.proposed.length, 0, `${version} reached POST`);
+  }
+});
+
+test("production provider rejects missing or mismatched typed-data domain scope before signing", async () => {
+  const domains = [
+    ["missing-chain", { verifyingContract: SAFE }],
+    ["wrong-chain", { verifyingContract: SAFE, chainId: 8453n }],
+    ["wrong-safe", { verifyingContract: ATTACKER, chainId: 1n }],
+  ];
+  for (const [name, domain] of domains) {
+    const signingCalls = [];
+    const setup = provider({
+      proposalIdentity: identity(wallet.address, signingCalls),
+      generateTypedData: () => ({ domain, types: SAFE_TX_TYPES, message: { ...CANONICAL_BODY } }),
+    });
+    await assert.rejects(setup.provider.prepare(validated()), /SAFE_TYPED_DATA_DOMAIN_MISMATCH/);
+    assert.equal(signingCalls.length, 0, `${name} reached signing`);
+    assert.equal(setup.dependencies.calls.proposed.length, 0, `${name} reached POST`);
+  }
+});
+
+test("production provider accepts only explicitly reviewed Safe versions with one canonical body", async () => {
+  for (const version of ["1.3.0", "1.4.1"]) {
+    const signingCalls = [];
+    const setup = provider({ proposalIdentity: identity(wallet.address, signingCalls) });
+    setup.dependencies.protocolKit.getContractVersion = () => version;
+    const intent = validated();
+    const prepared = await setup.provider.prepare(intent);
+    const submitted = await setup.provider.submit(intent, prepared);
+    assert.equal(signingCalls.length, 2);
+    assert.equal(setup.dependencies.calls.proposed.length, 1);
+    assert.deepEqual(prepared.safeTransactionData, CANONICAL_BODY);
+    assert.deepEqual(setup.dependencies.calls.proposed[0].safeTransactionData, CANONICAL_BODY);
+    assert.equal(prepared.safeTxHash, CANONICAL_HASH);
+    assert.deepEqual(
+      Object.fromEntries(Object.keys(CANONICAL_BODY).map((field) => [field, submitted.transaction[field]])),
+      CANONICAL_BODY,
+    );
+  }
+});
+
+test("production readback requires and verifies every Safe payment field before status", async () => {
+  for (const field of Object.keys(ZERO_PAYMENT_FIELDS)) {
+    for (const mode of ["missing", "mismatch"]) {
+      const setup = provider();
+      setup.dependencies.apiKit.getTransaction = async (hash) => {
+        const transaction = serviceTransaction(hash);
+        if (mode === "missing") delete transaction[field];
+        else transaction[field] = ["gasToken", "refundReceiver"].includes(field) ? ATTACKER : "1";
+        transaction.isExecuted = true;
+        transaction.isSuccessful = true;
+        transaction.transactionHash = `0x${"cd".repeat(32)}`;
+        return transaction;
+      };
+      await assert.rejects(
+        setup.provider.getTransaction(CANONICAL_HASH),
+        /malformed Safe service transaction|UNSAFE_SAFE_PAYMENT_FIELDS/,
+        `${field}:${mode}`,
+      );
+    }
+  }
+});
+
 test("prepare rejects malformed SDK transaction and hash output", async () => {
   const malformedTransaction = provider({ transaction: { data: { to: TARGET } } });
-  await assert.rejects(malformedTransaction.provider.prepare(validated()), /malformed Safe transaction/i);
+  await assert.rejects(malformedTransaction.provider.prepare(validated()), /SAFE_TRANSACTION_BODY_MALFORMED/);
 
   const malformedHash = provider();
   malformedHash.dependencies.protocolKit.getTransactionHash = async () => "not-a-hash";
@@ -335,6 +478,7 @@ test("getTransaction rejects readback with omitted confirmations", async () => {
     safeTxHash: hash,
     proposedByDelegate: wallet.address,
     safe: SAFE,
+    ...ZERO_PAYMENT_FIELDS,
     to: TARGET,
     data: "0x12345678",
     value: "0",
@@ -380,7 +524,7 @@ test("status counts only unique confirmations from fresh onchain owners and uses
   const setup = provider({ owners: [OWNER, "0x00000000000000000000000000000000000000a2"] });
   setup.dependencies.protocolKit.getThreshold = async () => 2;
   setup.dependencies.apiKit.getTransaction = async (hash) => ({
-    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
+    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
     confirmations: [{ owner: OWNER }, { owner: OWNER }], confirmationsRequired: 1, isExecuted: false,
   });
 
@@ -392,7 +536,7 @@ test("status counts only unique confirmations from fresh onchain owners and uses
 test("status rejects confirmations attributed to addresses outside the fresh onchain owner set", async () => {
   const setup = provider();
   setup.dependencies.apiKit.getTransaction = async (hash) => ({
-    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
+    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
     confirmations: [{ owner: "0x00000000000000000000000000000000000000ff" }],
     confirmationsRequired: 1, isExecuted: false,
   });
@@ -408,7 +552,7 @@ test("provider fails closed when the configured chain differs from Protocol Kit"
 test("executed status requires an onchain receipt for a transaction sent to the Safe", async () => {
   const setup = provider();
   setup.dependencies.apiKit.getTransaction = async (hash) => ({
-    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
+    safeTxHash: hash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET, data: "0x12345678", value: "0", operation: 0, nonce: "7",
     confirmations: [{ owner: OWNER }], confirmationsRequired: 1, isExecuted: true,
     isSuccessful: true, transactionHash: `0x${"cd".repeat(32)}`,
   });
@@ -425,7 +569,7 @@ test("executed status rejects a successful unrelated Safe transaction without th
   const setup = provider();
   const expectedHash = `0x${"ab".repeat(32)}`;
   setup.dependencies.apiKit.getTransaction = async () => ({
-    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET,
+    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET,
     data: "0x12345678", value: "0", operation: 0, nonce: "7",
     confirmations: [{ owner: OWNER }], confirmationsRequired: 1, isExecuted: true,
     isSuccessful: true, transactionHash: `0x${"cd".repeat(32)}`,
@@ -442,7 +586,7 @@ test("executed status accepts only a Safe execution event for the expected hash"
   const setup = provider();
   const expectedHash = `0x${"ab".repeat(32)}`;
   setup.dependencies.apiKit.getTransaction = async () => ({
-    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET,
+    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET,
     data: "0x12345678", value: "0", operation: 0, nonce: "7",
     confirmations: [{ owner: OWNER }], confirmationsRequired: 1, isExecuted: true,
     isSuccessful: true, transactionHash: `0x${"cd".repeat(32)}`,
@@ -461,7 +605,7 @@ test("status ignores injected rejection fields and cancels only after the onchai
   const setup = provider();
   const expectedHash = `0x${"ab".repeat(32)}`;
   setup.dependencies.apiKit.getTransaction = async () => ({
-    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, to: TARGET,
+    safeTxHash: expectedHash, proposedByDelegate: wallet.address, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET,
     data: "0x12345678", value: "0", operation: 0, nonce: "7", rejected: true,
     confirmations: [], confirmationsRequired: 2, isExecuted: false,
   });
@@ -475,7 +619,7 @@ test("readback requires attribution to the configured proposal delegate", async 
   const setup = provider();
   const expectedHash = `0x${"ab".repeat(32)}`;
   setup.dependencies.apiKit.getTransaction = async () => ({
-    safeTxHash: expectedHash, safe: SAFE, to: TARGET, data: "0x12345678", value: "0",
+    safeTxHash: expectedHash, safe: SAFE, ...ZERO_PAYMENT_FIELDS, to: TARGET, data: "0x12345678", value: "0",
     operation: 0, nonce: "7", confirmations: [], confirmationsRequired: 2, isExecuted: false,
   });
   await assert.rejects(setup.provider.getTransaction(expectedHash), /proposal delegate/i);
@@ -490,6 +634,7 @@ test("provider getTransaction and submit bind readback to the expected Safe tran
     safeTxHash: wrongHash,
     proposedByDelegate: wallet.address,
     safe: SAFE,
+    ...ZERO_PAYMENT_FIELDS,
     to: TARGET,
     data: "0x12345678",
     value: "0",
@@ -508,6 +653,7 @@ test("provider getTransaction and submit bind readback to the expected Safe tran
     safeTxHash: hash,
     proposedByDelegate: wallet.address,
     safe: SAFE,
+    ...ZERO_PAYMENT_FIELDS,
     to: "0x00000000000000000000000000000000000000ff",
     data: "0x12345678",
     value: "0",
@@ -592,9 +738,20 @@ test("submit rejects altered preparations and malformed service readback", async
   const prepared = await altered.provider.prepare(intent);
   await assert.rejects(
     altered.provider.submit(intent, { ...prepared, safeTxHash: `0x${"cd".repeat(32)}` }),
-    /altered/i,
+    /SAFE_PREPARATION_INTEGRITY_MISMATCH/,
   );
   assert.equal(altered.dependencies.calls.proposed.length, 0);
+
+  const alteredBody = provider();
+  const bodyPrepared = await alteredBody.provider.prepare(intent);
+  await assert.rejects(
+    alteredBody.provider.submit(intent, {
+      ...bodyPrepared,
+      safeTransactionData: { ...bodyPrepared.safeTransactionData, gasPrice: "1" },
+    }),
+    /SAFE_PREPARATION_INTEGRITY_MISMATCH/,
+  );
+  assert.equal(alteredBody.dependencies.calls.proposed.length, 0);
 
   const malformed = provider();
   const malformedPrepared = await malformed.provider.prepare(intent);
@@ -666,12 +823,12 @@ test("SafeSupervisedExecutionAdapter consumes SafeProposalProvider without legac
   const preparation = await adapter.prepare(validated());
   const submitted = await adapter.submit(preparation);
 
-  assert.equal(preparation.payload.safeTxHash, `0x${"ab".repeat(32)}`);
+  assert.equal(preparation.payload.safeTxHash, CANONICAL_HASH);
   assert.equal(submitted.providerData.safeNonce, "7");
   assert.equal(setup.dependencies.calls.proposed.length, 1);
 });
 
-test("a PREPARED record is reconciled before any Safe proposal POST", async () => {
+test("a PREPARED record reconciles a definite miss before posting the persisted canonical transaction", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-safe-prepared-"));
   const setup = provider();
   const makeEngine = () => new ExecutionEngine({
@@ -687,9 +844,10 @@ test("a PREPARED record is reconciled before any Safe proposal POST", async () =
   await makeEngine().prepare(validated(), { mode: "safe-supervised", blockNumber: 50 });
   const retried = await makeEngine().submit(validated(), { mode: "safe-supervised", blockNumber: 50 });
 
-  assert.equal(setup.dependencies.calls.proposed.length, 0);
-  assert.equal(retried.deduplicated, true);
-  assert.equal(retried.record.state, ExecutionState.AWAITING_AUTHORIZATION);
+  assert.equal(setup.dependencies.calls.proposed.length, 1);
+  assert.equal(retried.deduplicated, false);
+  assert.equal(retried.record.state, ExecutionState.SUBMITTED);
+  assert.deepEqual(setup.dependencies.calls.proposed[0].safeTransactionData, CANONICAL_BODY);
 });
 
 test("a definite service miss reuses the PREPARED Safe nonce instead of allocating another", async () => {

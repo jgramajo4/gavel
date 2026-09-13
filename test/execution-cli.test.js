@@ -12,7 +12,6 @@ const { ACTION_TARGET, VOTER, prediction, proposal } = require("./helpers/nouns-
 
 const CLI = path.resolve(__dirname, "..", "packages", "cli", "bin", "gavel.js");
 const PROPOSER = "0x3333333333333333333333333333333333333333";
-const SAFE_TX_HASH = `0x${"ab".repeat(32)}`;
 const EXECUTION_SAFE = "0x0000000000000000000000000000000000000003";
 
 /**
@@ -62,7 +61,15 @@ function safeSdkHook(directory) {
   fs.writeFileSync(hook, `
 const Module = require("node:module");
 const fs = require("node:fs");
+const { TypedDataEncoder } = require(${JSON.stringify(require.resolve("ethers"))});
 const originalLoad = Module._load;
+const SAFE_TX_TYPES = { SafeTx: [
+  { name: "to", type: "address" }, { name: "value", type: "uint256" },
+  { name: "data", type: "bytes" }, { name: "operation", type: "uint8" },
+  { name: "safeTxGas", type: "uint256" }, { name: "baseGas", type: "uint256" },
+  { name: "gasPrice", type: "uint256" }, { name: "gasToken", type: "address" },
+  { name: "refundReceiver", type: "address" }, { name: "nonce", type: "uint256" },
+] };
 let proposed = null;
 const protocolKit = {
   getOwners: async () => process.env.GAVEL_TEST_SAFE_STATUS === "owner-conflict"
@@ -83,7 +90,11 @@ const protocolKit = {
     gasToken: "0x0000000000000000000000000000000000000000",
     refundReceiver: "0x0000000000000000000000000000000000000000", nonce: options.nonce,
   } }),
-  getTransactionHash: async () => "${SAFE_TX_HASH}",
+  getTransactionHash: async (transaction) => TypedDataEncoder.hash(
+    { verifyingContract: process.env.GAVEL_TEST_SAFE_ADDRESS, chainId: 1n },
+    SAFE_TX_TYPES,
+    transaction.data,
+  ),
 };
 class ApiKit {
   async getSafeDelegates(query) {
@@ -99,6 +110,7 @@ class ApiKit {
   async proposeTransaction(input) {
     proposed = input;
     if (process.env.GAVEL_TEST_PROPOSAL_LOG) fs.appendFileSync(process.env.GAVEL_TEST_PROPOSAL_LOG, "proposed\\n");
+    if (process.env.GAVEL_TEST_POST_TIMEOUT === "1") throw new Error("response lost after POST");
   }
   async getTransaction(hash) {
     const input = proposed;
@@ -106,7 +118,11 @@ class ApiKit {
     return {
       safeTxHash: hash, proposedByDelegate: input.senderAddress, safe: input.safeAddress, to: input.safeTransactionData.to,
       data: input.safeTransactionData.data, value: input.safeTransactionData.value,
-      operation: input.safeTransactionData.operation, nonce: String(input.safeTransactionData.nonce),
+      operation: input.safeTransactionData.operation,
+      safeTxGas: input.safeTransactionData.safeTxGas, baseGas: input.safeTransactionData.baseGas,
+      gasPrice: input.safeTransactionData.gasPrice, gasToken: input.safeTransactionData.gasToken,
+      refundReceiver: input.safeTransactionData.refundReceiver,
+      nonce: String(input.safeTransactionData.nonce),
       confirmations: [], confirmationsRequired: 2, isExecuted: false,
     };
   }
@@ -116,8 +132,8 @@ Module._load = function(request, parent, isMain) {
     default: { init: async () => protocolKit },
     generateTypedData: ({ safeAddress, chainId, data }) => ({
       domain: { verifyingContract: safeAddress, chainId },
-      types: { EIP712Domain: [], SafeTx: [{ name: "nonce", type: "uint256" }] },
-      message: { nonce: data.nonce },
+      types: { EIP712Domain: [], ...SAFE_TX_TYPES },
+      message: { ...data },
     }),
   };
   if (request === "@safe-global/api-kit") return { default: ApiKit };
@@ -396,6 +412,7 @@ test("identity create makes an encrypted, scope-bound Safe proposal identity", (
   assert.equal(stored.keystore.version, 3);
   assert.ok(stored.keystore.crypto || stored.keystore.Crypto);
   assert.equal(fs.statSync(summary.output).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(summary.output)).mode & 0o777, 0o700);
 
   const serialized = fs.readFileSync(summary.output, "utf8");
   assert.doesNotMatch(serialized, /"privateKey"/);
@@ -491,6 +508,7 @@ test("execution submit resolves the encrypted local identity, submits through th
   const env = {
     GAVEL_IDENTITY_PASSPHRASE: passphrase,
     GAVEL_TEST_PROPOSER: proposer,
+    GAVEL_TEST_SAFE_ADDRESS: EXECUTION_SAFE,
     GAVEL_TEST_PROPOSAL_LOG: proposalLog,
     NODE_OPTIONS: `--require=${hook}`,
   };
@@ -501,17 +519,70 @@ test("execution submit resolves the encrypted local identity, submits through th
     assert.equal(summary.mode, "safe-supervised");
     assert.equal(summary.status, "awaiting-authorization");
     assert.equal(summary.safe, EXECUTION_SAFE);
-    assert.equal(summary.safeTxHash, SAFE_TX_HASH);
+    assert.match(summary.safeTxHash, /^0x[0-9a-f]{64}$/i);
     assert.equal(summary.nonce, "7");
     assert.match(summary.nextStep, /Review and sign in Safe/);
 
     const retried = await runAsync(args, { dataDir, env });
     assert.equal(retried.status, 0, retried.stderr);
-    assert.equal(JSON.parse(retried.stdout).safeTxHash, SAFE_TX_HASH);
+    assert.equal(JSON.parse(retried.stdout).safeTxHash, summary.safeTxHash);
     assert.equal(fs.readFileSync(proposalLog, "utf8").trim().split("\n").length, 1);
 
     const records = fs.readdirSync(path.join(dataDir, "executions", "safe-supervised"), { recursive: true });
     assert.ok(records.some((entry) => String(entry).endsWith("1.json")));
+  } finally {
+    await stub.stop();
+  }
+});
+
+test("execution submit reports an ambiguous POST as a reconcilable unknown outcome", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-safe-timeout-cli-"));
+  const passphrase = "a-long-enough-passphrase";
+  const created = run([
+    "identity", "create", "--type", "safe-proposer", "--safe", EXECUTION_SAFE,
+    "--label", "safe-proposer-main",
+  ], { GAVEL_IDENTITY_PASSPHRASE: passphrase }, dataDir);
+  assert.equal(created.status, 0, created.stderr);
+  const proposer = JSON.parse(created.stdout).address;
+  const profilePath = path.join(dataDir, "safe-profile.json");
+  fs.writeFileSync(profilePath, JSON.stringify({
+    version: 1,
+    mode: "safe-supervised",
+    safe: {
+      address: EXECUTION_SAFE,
+      chainId: 1,
+      proposalIdentity: "local:safe-proposer-main",
+      transactionServiceUrl: "https://safe.test/api",
+    },
+  }));
+  const hook = safeSdkHook(dataDir);
+  const proposalLog = path.join(dataDir, "proposal.log");
+  const { predictionPath, proposalPath } = governanceInputs();
+  const stub = stubProvider({
+    voter: EXECUTION_SAFE, delegatee: EXECUTION_SAFE, actionTarget: ACTION_TARGET, proposer: PROPOSER,
+  });
+  const rpc = await stub.start();
+  try {
+    const result = await runAsync([
+      "execution", "submit", predictionPath, proposalPath, "--support", "FOR",
+      "--profile", profilePath, "--asset-owner", VOTER,
+      "--acknowledge-security-review", "--acknowledge-prediction-review", "--rpc", rpc,
+    ], { dataDir, env: {
+      GAVEL_IDENTITY_PASSPHRASE: passphrase,
+      GAVEL_TEST_PROPOSER: proposer,
+      GAVEL_TEST_SAFE_ADDRESS: EXECUTION_SAFE,
+      GAVEL_TEST_PROPOSAL_LOG: proposalLog,
+      GAVEL_TEST_POST_TIMEOUT: "1",
+      NODE_OPTIONS: `--require=${hook}`,
+    } });
+    assert.equal(result.status, 2, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.ok, false);
+    assert.equal(summary.status, "submission-unknown");
+    assert.match(summary.message, /Retry the same command to reconcile/);
+    assert.match(summary.safeTxHash, /^0x[0-9a-f]{64}$/i);
+    assert.doesNotMatch(result.stderr, /at .*\.js:\d+|Error:/);
+    assert.equal(fs.readFileSync(proposalLog, "utf8").trim().split("\n").length, 1);
   } finally {
     await stub.stop();
   }

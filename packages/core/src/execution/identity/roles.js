@@ -138,10 +138,10 @@ class ProposalIdentity {
     }
     const signedChainId = payload.domain.chainId;
     const trustedChainId = trustedScope.chainId;
-    const chainId = signedChainId ?? trustedChainId;
     if (
-      Number(chainId) !== this.#scope.chainId ||
-      (signedChainId !== undefined && trustedChainId !== undefined && Number(signedChainId) !== Number(trustedChainId))
+      signedChainId === undefined ||
+      Number(signedChainId) !== this.#scope.chainId ||
+      (trustedChainId !== undefined && Number(signedChainId) !== Number(trustedChainId))
     ) {
       throw new Error("Proposal identity is not scoped to this chain");
     }

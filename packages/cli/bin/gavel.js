@@ -142,13 +142,16 @@ Privacy:
 `;
 }
 
-async function writePrivateJson(filePath, document) {
+async function writePrivateJson(filePath, document, { secureDirectory = false } = {}) {
   const absolutePath = path.resolve(filePath);
-  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  const directory = path.dirname(absolutePath);
+  await fs.mkdir(directory, { recursive: true, mode: secureDirectory ? 0o700 : 0o755 });
+  if (secureDirectory) await fs.chmod(directory, 0o700);
   await fs.writeFile(absolutePath, `${JSON.stringify(document, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fs.chmod(absolutePath, 0o600);
   return absolutePath;
 }
 
@@ -1069,7 +1072,27 @@ async function executionSubmitCommand(argv) {
     store: new FileExecutionRecordStore(defaultPrivatePath("executions")),
   });
   const blockNumber = await provider.getBlockNumber();
-  const result = await engine.submit(validated, { mode, blockNumber });
+  let result;
+  try {
+    result = await engine.submit(validated, { mode, blockNumber });
+  } catch (error) {
+    if (error?.submissionOutcome !== "unknown" || !error.executionRecord) throw error;
+    const record = error.executionRecord;
+    process.stdout.write(`${JSON.stringify({
+      ok: false,
+      mode,
+      status: "submission-unknown",
+      message: "Submission outcome unknown. Retry the same command to reconcile.",
+      safe: profile.safe.address,
+      safeTxHash: record.providerData.safeTxHash,
+      nonce: record.providerData.safeNonce,
+      executionRecord: record.id,
+      deduplicated: false,
+      nextStep: "Retry the same command to reconcile this hash. Do not create another Safe proposal.",
+    }, null, 2)}\n`);
+    process.exitCode = 2;
+    return;
+  }
   if (result.reason === "submission-outcome-unknown") {
     process.stdout.write(`${JSON.stringify({
       ok: false,
@@ -1247,7 +1270,7 @@ async function identityCreateCommand(argv) {
     passphraseEnv: passphraseVariable,
     createdAt: new Date().toISOString(),
     keystore: JSON.parse(keystore),
-  });
+  }, { secureDirectory: true });
 
   process.stdout.write(
     `${JSON.stringify(

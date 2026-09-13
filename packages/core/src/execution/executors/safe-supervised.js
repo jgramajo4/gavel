@@ -169,6 +169,7 @@ class SafeSupervisedExecutionAdapter {
     // conditional check.
     const required = [
       "safeTxHash", "safe", "to", "data", "value", "operation", "nonce", "chainId",
+      "safeTxGas", "baseGas", "gasPrice", "gasToken", "refundReceiver",
       "confirmations", "confirmationsRequired", "isExecuted",
     ];
     const missing = required.filter((field) => transaction[field] === undefined || transaction[field] === null);
@@ -198,6 +199,12 @@ class SafeSupervisedExecutionAdapter {
     if (BigInt(transaction.value) !== BigInt(intent.value)) mismatches.push("value");
     if (Number(transaction.operation) !== OPERATION_CALL) mismatches.push("operation");
     if (String(transaction.nonce) !== String(nonce)) mismatches.push("nonce");
+    for (const field of ["safeTxGas", "baseGas", "gasPrice"]) {
+      if (BigInt(transaction[field]) !== 0n) mismatches.push(field);
+    }
+    for (const field of ["gasToken", "refundReceiver"]) {
+      if (getAddress(transaction[field]) !== "0x0000000000000000000000000000000000000000") mismatches.push(field);
+    }
     if (Number(transaction.chainId) !== this.chainId) mismatches.push("chainId");
     if (mismatches.length > 0) {
       throw new Error(
@@ -287,7 +294,7 @@ class SafeSupervisedExecutionAdapter {
     const origin = JSON.stringify(this.#origin(validated));
     const { proposal, transaction } = await this.proposalProvider.submit(
       validated,
-      { safeNonce: nonce, safeTxHash: payload.safeTxHash },
+      { safeNonce: nonce, safeTxHash: payload.safeTxHash, safeTransactionData: payload.safeTransaction },
       { origin, beforeProviderDispatch: options.beforeProviderDispatch },
     );
     this.#assertServiceDescribesIntent(transaction, {

@@ -1,6 +1,6 @@
 "use strict";
 
-const { getAddress, Interface } = require("ethers");
+const { getAddress, Interface, TypedDataEncoder, ZeroAddress } = require("ethers");
 const Safe = require("@safe-global/protocol-kit").default;
 const { generateTypedData } = require("@safe-global/protocol-kit");
 const SafeApiKit = require("@safe-global/api-kit").default;
@@ -12,6 +12,70 @@ const SAFE_EXECUTION_EVENTS = new Interface([
 
 const { assertProposalIdentity } = require("../identity/roles");
 const { assertValidatedExecutionIntent } = require("../../intent/validated");
+
+const SUPPORTED_SAFE_VERSIONS = new Set(["1.3.0", "1.4.1"]);
+const SAFE_BODY_FIELDS = Object.freeze([
+  "to", "value", "data", "operation", "safeTxGas", "baseGas", "gasPrice", "gasToken", "refundReceiver", "nonce",
+]);
+
+function securityError(code, detail) {
+  const error = new Error(`${code}: ${detail}`);
+  error.code = code;
+  return error;
+}
+
+function assertCanonicalSafeTransaction(data, intent, nonce, source = "Safe transaction") {
+  if (!data || SAFE_BODY_FIELDS.some((field) => data[field] === undefined || data[field] === null)) {
+    throw securityError("SAFE_TRANSACTION_BODY_MALFORMED", `${source} is missing required fields`);
+  }
+  let canonical;
+  try {
+    canonical = {
+      to: getAddress(data.to),
+      value: BigInt(data.value).toString(),
+      data: String(data.data).toLowerCase(),
+      operation: Number(data.operation),
+      safeTxGas: BigInt(data.safeTxGas).toString(),
+      baseGas: BigInt(data.baseGas).toString(),
+      gasPrice: BigInt(data.gasPrice).toString(),
+      gasToken: getAddress(data.gasToken),
+      refundReceiver: getAddress(data.refundReceiver),
+      nonce: Number(data.nonce),
+    };
+  } catch {
+    throw securityError("SAFE_TRANSACTION_BODY_MALFORMED", `${source} contains malformed fields`);
+  }
+  if (!Number.isSafeInteger(canonical.nonce) || canonical.nonce < 0) {
+    throw securityError("SAFE_TRANSACTION_BODY_MALFORMED", `${source} contains an unusable nonce`);
+  }
+  const unsafePayments = [];
+  for (const field of ["safeTxGas", "baseGas", "gasPrice"]) {
+    if (canonical[field] !== "0") unsafePayments.push(field);
+  }
+  for (const field of ["gasToken", "refundReceiver"]) {
+    if (canonical[field] !== ZeroAddress) unsafePayments.push(field);
+  }
+  if (unsafePayments.length > 0) {
+    throw securityError(
+      "UNSAFE_SAFE_PAYMENT_FIELDS",
+      `${source} enables unsupported Safe payment/refund fields: ${unsafePayments.join(", ")}`,
+    );
+  }
+  if (
+    canonical.to !== getAddress(intent.target) ||
+    canonical.value !== BigInt(intent.value).toString() ||
+    canonical.data !== String(intent.data).toLowerCase() ||
+    canonical.operation !== 0 ||
+    canonical.nonce !== nonce
+  ) {
+    throw securityError("SAFE_TRANSACTION_BODY_MISMATCH", `${source} differs from the validated intent`);
+  }
+  return Object.freeze(canonical);
+}
+
+function sameCanonicalBody(left, right) {
+  return SAFE_BODY_FIELDS.every((field) => String(left[field]).toLowerCase() === String(right[field]).toLowerCase());
+}
 
 const SafeProposalAuthorization = Object.freeze({
   AUTHORIZED: "authorized",
@@ -25,6 +89,7 @@ class SafeProposalProvider {
   #protocolKitPromise;
   #apiKit;
   #proposalIdentity;
+  #generateTypedData;
 
   constructor(options = {}) {
     this.safeAddress = getAddress(options.safeAddress);
@@ -33,6 +98,8 @@ class SafeProposalProvider {
       throw new TypeError("SafeProposalProvider requires a chain id");
     }
     this.#proposalIdentity = assertProposalIdentity(options.proposalIdentity);
+    this.#generateTypedData = options.generateTypedData || generateTypedData;
+    if (typeof this.#generateTypedData !== "function") throw new TypeError("SafeProposalProvider requires a typed-data generator");
     if (this.#proposalIdentity.scope.safeAddress !== this.safeAddress) {
       throw new Error("The proposal identity is scoped to a different Safe");
     }
@@ -165,27 +232,8 @@ class SafeProposalProvider {
     return intent;
   }
 
-  #assertSafeTransactionData(data, intent, nonce) {
-    const required = [
-      "to", "value", "data", "operation", "safeTxGas", "baseGas", "gasPrice", "gasToken", "refundReceiver", "nonce",
-    ];
-    if (!data || required.some((field) => data[field] === undefined || data[field] === null)) {
-      throw new Error("Protocol Kit returned a malformed Safe transaction");
-    }
-    try {
-      if (
-        getAddress(data.to) !== getAddress(intent.target) ||
-        BigInt(data.value) !== BigInt(intent.value) ||
-        String(data.data).toLowerCase() !== String(intent.data).toLowerCase() ||
-        Number(data.operation) !== 0 ||
-        Number(data.nonce) !== nonce
-      ) {
-        throw new Error("mismatch");
-      }
-    } catch {
-      throw new Error("Protocol Kit returned a malformed Safe transaction");
-    }
-    return data;
+  #assertSafeTransactionData(data, intent, nonce, source) {
+    return assertCanonicalSafeTransaction(data, intent, nonce, source);
   }
 
   async #build(validated, nonce) {
@@ -198,27 +246,63 @@ class SafeProposalProvider {
         data: intent.data,
         operation: 0,
       }],
-      options: { nonce },
+      options: {
+        nonce,
+        safeTxGas: "0",
+        baseGas: "0",
+        gasPrice: "0",
+        gasToken: ZeroAddress,
+        refundReceiver: ZeroAddress,
+      },
     });
-    const safeTransactionData = this.#assertSafeTransactionData(safeTransaction?.data, intent, nonce);
-    const safeTxHash = await safe.getTransactionHash(safeTransaction);
-    if (!/^0x[0-9a-fA-F]{64}$/.test(String(safeTxHash))) {
-      throw new Error("Protocol Kit returned a malformed Safe transaction hash");
+    const safeTransactionData = this.#assertSafeTransactionData(
+      safeTransaction?.data,
+      intent,
+      nonce,
+      "Protocol Kit transaction",
+    );
+    const safeTxHash = String(await safe.getTransactionHash(safeTransaction));
+    if (!/^0x[0-9a-fA-F]{64}$/.test(safeTxHash)) {
+      throw securityError("SAFE_TRANSACTION_HASH_MALFORMED", "Protocol Kit returned a malformed Safe transaction hash");
     }
     const safeVersion = safe.getContractVersion();
-    if (typeof safeVersion !== "string" || !/^\d+\.\d+\.\d+/.test(safeVersion)) {
-      throw new Error("Protocol Kit returned a malformed Safe version");
+    if (typeof safeVersion !== "string" || !SUPPORTED_SAFE_VERSIONS.has(safeVersion)) {
+      throw securityError("UNSUPPORTED_SAFE_VERSION", `Safe ${safeVersion || "unknown"} is not supported; expected 1.3.0 or 1.4.1`);
     }
-    const typedData = generateTypedData({
+    const typedData = this.#generateTypedData({
       safeAddress: this.safeAddress,
       safeVersion,
       chainId: BigInt(this.chainId),
       data: safeTransactionData,
     });
     if (!typedData?.domain || !typedData?.types || !typedData?.message) {
-      throw new Error("Protocol Kit returned malformed Safe typed data");
+      throw securityError("SAFE_TYPED_DATA_MALFORMED", "Protocol Kit returned malformed Safe typed data");
+    }
+    let typedDomainSafe;
+    let typedDomainChain;
+    try {
+      typedDomainSafe = getAddress(typedData.domain.verifyingContract);
+      typedDomainChain = BigInt(typedData.domain.chainId);
+    } catch {
+      throw securityError("SAFE_TYPED_DATA_DOMAIN_MISMATCH", "typed-data domain must contain the configured Safe and chain id");
+    }
+    if (typedDomainSafe !== this.safeAddress || typedDomainChain !== BigInt(this.chainId)) {
+      throw securityError("SAFE_TYPED_DATA_DOMAIN_MISMATCH", "typed-data domain does not match the configured Safe and chain id");
+    }
+    const typedBody = this.#assertSafeTransactionData(typedData.message, intent, nonce, "Safe typed-data message");
+    if (!sameCanonicalBody(typedBody, safeTransactionData)) {
+      throw securityError("SAFE_TYPED_DATA_BODY_MISMATCH", "typed-data message differs from the canonical Safe transaction body");
     }
     const { EIP712Domain: _domainType, ...types } = typedData.types;
+    let typedDataDigest;
+    try {
+      typedDataDigest = TypedDataEncoder.hash(typedData.domain, types, typedData.message);
+    } catch {
+      throw securityError("SAFE_TYPED_DATA_MALFORMED", "Safe typed data cannot be independently encoded");
+    }
+    if (typedDataDigest.toLowerCase() !== safeTxHash.toLowerCase()) {
+      throw securityError("HASH_TYPED_DATA_MISMATCH", "typed-data digest does not equal the Protocol Kit Safe transaction hash");
+    }
     const signature = await this.proposalIdentity.proposeSafeTransaction({
       domain: typedData.domain,
       types,
@@ -250,7 +334,7 @@ class SafeProposalProvider {
 
   async #normalizeTransaction(transaction) {
     const required = [
-      "safeTxHash", "safe", "to", "data", "value", "operation", "nonce", "confirmations", "confirmationsRequired", "isExecuted",
+      "safeTxHash", "safe", ...SAFE_BODY_FIELDS, "confirmations", "confirmationsRequired", "isExecuted",
     ];
     if (!transaction || required.some((field) => transaction[field] === undefined || transaction[field] === null)) {
       throw new Error("Safe API Kit returned a malformed Safe service transaction");
@@ -266,6 +350,12 @@ class SafeProposalProvider {
       if (!/^\d+$/.test(nonce)) throw new Error("nonce");
       const operation = Number(transaction.operation);
       if (!Number.isInteger(operation)) throw new Error("operation");
+      const canonicalBody = this.#assertSafeTransactionData(
+        transaction,
+        { target: transaction.to, value: transaction.value, data: transaction.data },
+        Number(nonce),
+        "Safe Transaction Service readback",
+      );
       const confirmationsRequired = Number(transaction.confirmationsRequired);
       if (!Number.isSafeInteger(confirmationsRequired) || confirmationsRequired <= 0) throw new Error("threshold");
       if (typeof transaction.isExecuted !== "boolean") throw new Error("execution status");
@@ -327,13 +417,9 @@ class SafeProposalProvider {
       }
       return {
         ...transaction,
+        ...canonicalBody,
         safeTxHash,
         safe: getAddress(transaction.safe),
-        to: getAddress(transaction.to),
-        data,
-        value,
-        operation,
-        nonce,
         confirmations,
         confirmationsRequired,
         proposedByDelegate: proposer,
@@ -357,7 +443,8 @@ class SafeProposalProvider {
       if (
         transaction.safeTxHash.toLowerCase() !== String(safeTxHash).toLowerCase() ||
         transaction.safe !== this.safeAddress ||
-        (expected.nonce !== undefined && transaction.nonce !== String(expected.nonce)) ||
+        (expected.nonce !== undefined && transaction.nonce !== Number(expected.nonce)) ||
+        (expected.safeTransactionData && !sameCanonicalBody(transaction, expected.safeTransactionData)) ||
         (intent && (
           transaction.to !== getAddress(intent.target) ||
           transaction.data.toLowerCase() !== String(intent.data).toLowerCase() ||
@@ -400,8 +487,12 @@ class SafeProposalProvider {
     const nonce = Number(rawNonce);
     if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("The Safe preparation has no usable nonce");
     const proposal = await this.#build(validated, nonce);
-    if (String(preparation?.safeTxHash).toLowerCase() !== proposal.safeTxHash.toLowerCase()) {
-      throw new Error("The Safe preparation was altered between prepare and submit");
+    if (
+      String(preparation?.safeTxHash).toLowerCase() !== proposal.safeTxHash.toLowerCase() ||
+      !preparation?.safeTransactionData ||
+      !sameCanonicalBody(preparation.safeTransactionData, proposal.safeTransactionData)
+    ) {
+      throw securityError("SAFE_PREPARATION_INTEGRITY_MISMATCH", "Safe preparation body or hash changed between prepare and submit");
     }
     await options.beforeProviderDispatch?.();
     try {
@@ -423,6 +514,7 @@ class SafeProposalProvider {
     const transaction = await this.getTransaction(proposal.safeTxHash, {
       intent: this.#assertIntent(validated),
       nonce: proposal.safeNonce,
+      safeTransactionData: proposal.safeTransactionData,
     });
     return { proposal, transaction };
   }
