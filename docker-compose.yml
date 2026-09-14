@@ -8,9 +8,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       GAVEL_INDEXER_DB_PASSWORD: ${GAVEL_INDEXER_DB_PASSWORD:?set GAVEL_INDEXER_DB_PASSWORD}
       GAVEL_API_DB_PASSWORD: ${GAVEL_API_DB_PASSWORD:?set GAVEL_API_DB_PASSWORD}
+      GAVEL_GATE_DB_PASSWORD: ${GAVEL_GATE_DB_PASSWORD:?set GAVEL_GATE_DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./packages/governance-index/docker/init-db.sh:/docker-entrypoint-initdb.d/10-gavel-roles.sh:ro
+      - ./packages/governance-index/docker/init-db.sh:/docker-entrypoint-initdb.d/10-gavel-index-roles.sh:ro
+      - ./packages/server/docker/init-db.sh:/docker-entrypoint-initdb.d/20-gavel-gate-role.sh:ro
     networks: [database]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gavel -d gavel"]
@@ -34,6 +36,7 @@ services:
       # redeploy converges on the same least-privilege state without wiping data.
       GAVEL_INDEXER_DB_PASSWORD: ${GAVEL_INDEXER_DB_PASSWORD:?set GAVEL_INDEXER_DB_PASSWORD}
       GAVEL_API_DB_PASSWORD: ${GAVEL_API_DB_PASSWORD:?set GAVEL_API_DB_PASSWORD}
+      GAVEL_GATE_DB_PASSWORD: ${GAVEL_GATE_DB_PASSWORD:?set GAVEL_GATE_DB_PASSWORD}
     networks: [database]
     depends_on:
       postgres:

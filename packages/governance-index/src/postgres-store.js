@@ -10,7 +10,7 @@ const {
   encodeProposalCursor,
 } = require("./memory-store");
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
-const { APPLICATION_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
+const { PROVISIONED_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
 
 const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
@@ -363,11 +363,11 @@ class PostgresGovernanceStore {
     // what creates them without destroying data.
     const ensured = options.ensureRoles === false
       ? { state: "present", created: [], missing: [] }
-      : await ensureRoles(this.pool, options);
-    const roles = await presentRoles(this.pool);
-    const missingRoles = APPLICATION_ROLES.filter((role) => !roles.includes(role));
+      : await ensureRoles(this.pool, { ...options, roles: PROVISIONED_ROLES });
+    const roles = await presentRoles(this.pool, PROVISIONED_ROLES);
+    const missingRoles = PROVISIONED_ROLES.filter((role) => !roles.includes(role));
 
-    if (missingRoles.length) {
+    if (missingRoles.length || ensured.state === "skipped") {
       // Never fail silently: an ungranted API role is a deployment fault, not a
       // detail. `verify-permissions` is the gate that must pass before serving.
       return {
@@ -385,6 +385,12 @@ class PostgresGovernanceStore {
     await this.pool.query(await fs.readFile(path.join(dir, "002_roles.sql"), "utf8"));
     versions.push("002_roles");
 
+    // The root image copies all packages, so the sibling Gate migration is
+    // available to this migrate command. Roles are reconciled first; the Gate
+    // version is reported only after the effective cross-schema audit passes.
+    const gateMigration = path.join(__dirname, "..", "..", "server", "migrations", "001_gate.sql");
+    await this.pool.query(await fs.readFile(gateMigration, "utf8"));
+
     // The grants ran without error, which is not the same as the roles now
     // being correct. Prove it by exercising them.
     const audit = await auditRoles(this.pool);
@@ -400,6 +406,7 @@ class PostgresGovernanceStore {
         warning: "Role grants were applied but the resulting privileges are wrong. Do not serve traffic until `gavel-indexer verify-permissions --role gavel_api` passes.",
       };
     }
+    versions.push("gate/001_gate-v3");
     const unproven = Object.entries(audit.summary).filter(([, row]) => row.method !== "effective").map(([role]) => role);
     return {
       ok: true,
@@ -417,13 +424,13 @@ class PostgresGovernanceStore {
   // Creates any missing application role without touching indexed data, so a
   // redeploy onto an existing PostgreSQL volume does not require wiping it.
   async ensureRoles(options = {}) {
-    return ensureRoles(this.pool, options);
+    return ensureRoles(this.pool, { ...options, roles: PROVISIONED_ROLES });
   }
 
-  // Which application roles the database currently has.
+  // Which provisioned runtime roles the database currently has.
   async rolesStatus() {
     const present = await presentRoles(this.pool);
-    return { present, missing: APPLICATION_ROLES.filter((role) => !present.includes(role)) };
+    return { present, missing: PROVISIONED_ROLES.filter((role) => !present.includes(role)) };
   }
 
   // Proves what the role can and cannot do by acting as it, rather than by
