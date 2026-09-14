@@ -11,6 +11,7 @@ interface Vm {
     function chainId(uint256 newChainId) external;
     function expectRevert() external;
     function expectRevert(bytes4 selector) external;
+    function expectRevert(bytes calldata revertData) external;
     function expectEmit(bool, bool, bool, bool, address emitter) external;
     function prank(address sender) external;
     function readFile(string calldata path) external view returns (string memory);
@@ -217,6 +218,60 @@ contract GavelGateSplitterTest {
         a.validBefore++;
         _expectInvalidAuthorization(quote, signature, a);
         _assertEq(token.receiveCallCount(), 0);
+    }
+
+    function testAuthorizationSignedByWrongKeyFailsAtUsdcAndRollsBack() public {
+        GavelGateSplitter.Quote memory quote = _quote(keccak256("wrong-authorization-signer"));
+        bytes memory quoteSignature = _signQuote(quote, SIGNER_KEY);
+        GavelGateSplitter.ReceiveAuthorization memory authorization = _authorization(quote, OTHER_PAYER_KEY);
+        uint256 payerBalance = token.balanceOf(payer);
+
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", "invalid signature"));
+        splitter.settle(quote, quoteSignature, authorization);
+
+        _assertFalse(splitter.usedQuoteIds(quote.quoteId));
+        _assertFalse(token.authorizationState(payer, quote.quoteId));
+        _assertEq(token.receiveCallCount(), 0);
+        _assertEq(token.transferCallCount(), 0);
+        _assertEq(token.balanceOf(payer), payerBalance);
+        _assertEq(token.balanceOf(VOTER), 0);
+        _assertEq(token.balanceOf(GAVEL), 0);
+        _assertEq(token.balanceOf(address(splitter)), 0);
+    }
+
+    function testFreshAuthorizationNonceDifferentFromQuoteIdFailsBeforeUsdc() public {
+        GavelGateSplitter.Quote memory quote = _quote(keccak256("nonce-binding"));
+        bytes memory quoteSignature = _signQuote(quote, SIGNER_KEY);
+        GavelGateSplitter.ReceiveAuthorization memory authorization = _authorization(quote, PAYER_KEY);
+        bytes32 freshNonce = keccak256("fresh-nonce-not-quote-id");
+        authorization.nonce = freshNonce;
+        bytes32 authorizationHash = keccak256(
+            abi.encode(
+                token.RECEIVE_TYPEHASH(),
+                authorization.from,
+                authorization.to,
+                authorization.value,
+                authorization.validAfter,
+                authorization.validBefore,
+                authorization.nonce
+            )
+        );
+        (authorization.v, authorization.r, authorization.s) =
+            vm.sign(PAYER_KEY, keccak256(abi.encodePacked("\x19\x01", token.DOMAIN_SEPARATOR(), authorizationHash)));
+        uint256 payerBalance = token.balanceOf(payer);
+
+        _assertFalse(token.authorizationState(payer, freshNonce));
+        vm.expectRevert(GavelGateSplitter.InvalidAuthorization.selector);
+        splitter.settle(quote, quoteSignature, authorization);
+
+        _assertEq(token.receiveCallCount(), 0);
+        _assertEq(token.transferCallCount(), 0);
+        _assertFalse(token.authorizationState(payer, freshNonce));
+        _assertFalse(splitter.usedQuoteIds(quote.quoteId));
+        _assertEq(token.balanceOf(payer), payerBalance);
+        _assertEq(token.balanceOf(VOTER), 0);
+        _assertEq(token.balanceOf(GAVEL), 0);
+        _assertEq(token.balanceOf(address(splitter)), 0);
     }
 
     function testEqualValueCrossQuoteAuthorizationSubstitutionFails() public {

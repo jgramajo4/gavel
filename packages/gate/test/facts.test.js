@@ -217,6 +217,16 @@ test('fails closed when the decoder USDC option is not canonical Base USDC', () 
   );
 });
 
+test('keeps Ethereum USDC transfers raw under the fixed Base allowlist', () => {
+  const ethereumUsdc = '0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+  const fact = decodeAction(usdcAction({ target: ethereumUsdc }), decoderOptions);
+
+  assert.equal(fact.kind, 'raw_action');
+  assert.equal(fact.source, 'canonical');
+  assert.equal(fact.target, '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
+  assert.equal(fact.calldata, TRANSFER_CALLDATA);
+});
+
 test('keeps selector-prefixed USDC calldata with a nonempty signature raw', () => {
   const fact = decodeAction(
     usdcAction({ signature: 'transfer(address,uint256)' }),
@@ -268,6 +278,26 @@ test('permits strict raw and decoded facts as verification material', () => {
     'canonical',
   );
   assert.equal(requireVerificationFact(decodeAction(action(), decoderOptions)).source, 'decoded');
+});
+
+test('rejects decoded and canonical-shaped extras on enriched facts', () => {
+  const enrichment = {
+    source: 'enriched',
+    displayLabel: 'Example ENS label',
+    value: 'example.eth',
+  };
+
+  for (const [field, extra] of Object.entries({
+    kind: 'raw_action',
+    actionIndex: 0,
+    canonicalEvidence: {},
+    decoderVersion: 'gate-facts/1',
+    target: RECIPIENT,
+    calldata: '0x',
+  })) {
+    assert.throws(() => validateFact({ ...enrichment, [field]: extra }), new RegExp(field));
+    assert.throws(() => requireVerificationFact({ ...enrichment, [field]: extra }), new RegExp(field));
+  }
 });
 
 test('rejects enriched facts when marked or requested as verifiable', () => {

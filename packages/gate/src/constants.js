@@ -1,5 +1,6 @@
 const AVAILABILITY = Object.freeze(['accepting_now', 'paused', 'closed']);
 const NORMALIZED_LIFECYCLES = Object.freeze(['PRE_VOTE', 'VOTING', 'CLOSED']);
+const NOUNS_QUOTE_ISSUANCE_STAGES = Object.freeze(['VOTING']);
 const PUBLIC_RECEIPT_STATES = Object.freeze([
   'payment_required',
   'pending_settlement',
@@ -23,6 +24,7 @@ const MAX_EVIDENCE_URLS = 5;
 module.exports = {
   AVAILABILITY,
   NORMALIZED_LIFECYCLES,
+  NOUNS_QUOTE_ISSUANCE_STAGES,
   PUBLIC_RECEIPT_STATES,
   FACT_SOURCES,
   CANONICAL_BASE_USDC_ADDRESS,

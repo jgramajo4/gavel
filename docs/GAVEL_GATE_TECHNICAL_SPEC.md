@@ -102,22 +102,22 @@ The server never receives, stores, approves, refunds, forwards, or sweeps USDC. 
 
 ## 4. Exact lifecycle state machines
 
-State names in code and persistence use the uppercase internal names below. Public serializers use only the lowercase receipt states in section 4.5.
+Availability values in code, persistence, APIs, and EIP-712 payloads are exactly `accepting_now | paused | closed`. Uppercase availability words may appear only as prose or diagram labels; they are never serialized values. Public receipt serializers use only the lowercase receipt states in section 4.5.
 
 ### 4.1 Gate availability
 
 ```text
-ACCEPTING_NOW <------> PAUSED
+accepting_now <------> paused
       |                  |
-      +-------> CLOSED <-+
+      +-------> closed <-+
 
-PAUSED and CLOSED may return to ACCEPTING_NOW only through a valid policy update.
-For a contract wallet, every transition to ACCEPTING_NOW also requires a fresh
+`paused` and `closed` may return to `accepting_now` only through a valid policy update.
+For a contract-wallet voter, every transition to `accepting_now` also requires a fresh
 BasePayoutControl ERC-1271 proof.
 ```
 
 - Direct profiles remain public in all three states.
-- Only `ACCEPTING_NOW` permits a **new** quote.
+- Only `accepting_now` permits a **new** quote.
 - An already issued, valid, unexpired quote remains payable after any later availability or policy change.
 
 ### 4.2 Submission, quote, settlement, and inbox
@@ -261,7 +261,13 @@ All timestamps are `timestamptz`. Amounts use `numeric(78,0)` or an equivalent l
 | `settlement_cursors` | One durable row per chain/splitter with deployment block, next range, canonical block hash/checkpoint, and reconciliation metadata; cursor advancement is atomic with recording all logs in its processed range or equivalently crash-safe. |
 | `settlement_reorg_monitors` | Durable accepted-settlement queue, uniquely upserted by `chainId + splitter + quoteId` inside the acceptance transaction, with receipt block/hash and exact transaction/log identity, next-check/progress metadata, and completion time; bounded batches revalidate every scanner cycle through a final check at 64 canonical confirmations. |
 
-`submission_hash` is globally unique across persisted Gate submissions. Its canonical preimage includes `payer` (the signed sender in MVP), target `voter`, DAO, proposal, stage, position, exact pitch, exact disclosures, and ordered evidence URLs. MVP requires `payer == authenticated signed sender` before hashing. This identity binding makes a natural cross-wallet exact-hash match unreachable absent a cryptographic hash collision or forged authentication. Public `duplicate` is possible only when an earlier successfully quoted submission exists and the authenticated original sender causes the server to compute the same hash from canonical input. It returns/reuses that row and issues no new quote.
+`submission_hash` is globally unique across persisted Gate submissions. Its algorithm is frozen. Canonicalize `payer` and `voter` with ethers `getAddress` to EIP-55 form; require `proposalId` as a base-10 unsigned decimal string matching `0|[1-9][0-9]*` so leading-zero variants are impossible; then serialize this exact ordered JSON array with JavaScript `JSON.stringify`:
+
+```text
+["gavel-gate-submission-v1", payer, voter, dao, proposalId, stage, position, pitch, disclosures, evidenceUrls]
+```
+
+The literal domain tag is exactly `gavel-gate-submission-v1`; there are no omitted, additional, or reordered fields. Hash `keccak256(UTF8(serializedArray))`, concretely ethers `keccak256(toUtf8Bytes(serializedArray))`. `pitch` and `disclosures` are the exact JavaScript string bytes represented after `JSON.stringify` escaping: never trim or normalize spaces, tabs, Unicode, line endings, trailing newlines, or other whitespace. `evidenceUrls` is the validated array in supplied order, and URL order is hash-significant. MVP requires `payer == authenticated signed sender` before hashing. Every later quote, server, client, or test implementation MUST import `hashSubmission` from `@gavel/gate`; reimplementation of this serialization or hash is forbidden. This identity binding makes a natural cross-wallet exact-hash match unreachable absent a cryptographic hash collision or forged authentication. Public `duplicate` is possible only when an earlier successfully quoted submission exists and the authenticated original sender causes the server to compute the same hash from canonical input. It returns/reuses that row and issues no new quote.
 
 A repeated exact hash from the same authenticated signed sender returns HTTP `409` with `state: duplicate` and `existing: { publicId, state, resumeUrl }`. `existing.state` is only the current coarse receipt state. `resumeUrl` contains only the opaque path `/v1/submissions/:publicId/resume`, with no query/body bearer capability, and requires the original sender's short-lived wallet-bound session. The lookup happens after syntactic/content validation, authentication, and payer/sender equality but before every mutable block, rate, profile, policy, canonical-index, lifecycle, limit, or capacity check. It does not mutate, refresh, or revalidate the existing quote or submission. The resume endpoint returns the original quote/payment payload only for unexpired `payment_required`, pending status for `pending_settlement`, and accepted status for `accepted`; `expired` is payment-terminal but retains the reconciliation qualification in section 4.2. Rejected content has no row and may be retried unchanged. Malformed or unauthenticated requests never reach duplicate lookup. A guessed `publicId` never authorizes request, resume, or quote access; public status exposes only its frozen coarse projection. A deliberate direct-store/hash-collision condition fails closed without revealing owner or state.
 
@@ -368,6 +374,7 @@ For every type, nonces are cryptographically random, short-lived, one-use, persi
 - **Fresh Base code check for every new contract-wallet quote:** after acquiring the voter/profile-scoped advisory/row lock and rereading availability, policy, `profile_version`, wallet kind, and stored `base_payout_code_hash`, the injected bounded-time Base RPC MUST call `eth_getCode` while the same database transaction/lock remains open, require nonempty current runtime code, and require `keccak256(currentCode) == stored base_payout_code_hash`. Every profile/policy update takes the same lock and increments `profile_version`. Missing or empty code, RPC failure/timeout, hash mismatch, or transaction failure rolls back and releases the lock before any Gate-owned snapshot, submission, quote, or reservation persistence, using only coarse `rejected_by_policy` or service-unavailable semantics that reveal no code details. EOAs skip the RPC but use the same final locked rereads. It applies only to new quote issuance; already-issued valid quotes remain payable after later code drift. Bytecode-hash equality is only the frozen MVP drift check and does not prove unchanged owners/controllers for an upgradeable wallet; the explicit `BasePayoutControl` proof remains required at enrollment and every transition to `accepting_now`.
 - **Wallet session:** for an EOA, recover the exact signer and require equality with `WalletSession.wallet`; for an ERC-1271 wallet, call `isValidSignature` on the server-derived role chain. The proof domain chain and verifier MUST match that role exactly. The same address authenticated on another chain grants no authority, including when bytecode or ERC-1271 controllers differ across chains.
 - **Payout identity:** `wallet == voter == payout wallet`. There is no payout override.
+- **MVP payer identity:** the advocate/payer MUST be an EOA for the Base native-USDC EIP-3009 `v,r,s` authorization path. ERC-1271 support applies to Gate enrollment/governance authority and the voter payout identity; it does not make contract-wallet payers valid. Base-sender session/checkout and quote issuance MUST reject a contract-wallet payer before creating or returning a quote. Safe or other contract-wallet payer support is post-MVP; do not change the splitter ABI or add an alternate payer path.
 
 ### 7.3 Challenge verification and nonce consumption
 
@@ -380,11 +387,13 @@ For every type, nonces are cryptographically random, short-lived, one-use, persi
 
 The Gate adapter output vocabulary is `PRE_VOTE | VOTING | CLOSED`, but labels are not permission to invent a native state.
 
+The Nouns adapter consumes only upstream canonical labeled native states such as `ACTIVE`. Raw Governor numeric state codes MUST be normalized to those labels upstream of `@gavel/gate`; the adapter never interprets numeric codes itself. In particular, numeric `1` and string `"1"` both fail closed to `CLOSED`.
+
 The currently established Nouns canonical vote-preparation mapping is:
 
 | Nouns Governor native state | Gate state available in MVP | Rule |
 | --- | --- | --- |
-| state code `1`, `ACTIVE` | `VOTING` | Supported only when the canonical voting window and fresh index data agree. |
+| `ACTIVE` | `VOTING` | Supported only when the canonical voting window and fresh index data agree. |
 | every non-`ACTIVE` or unknown state | `CLOSED` | Fail closed unless a future tested Gate adapter explicitly adds another native mapping. |
 
 Although the Governor vocabulary includes `PENDING`, PR 0 does not assert that it is an actionable Gate pre-vote lane. Therefore **Nouns `PRE_VOTE` is not exposed by the MVP until an adapter maps a real native Nouns state from available canonical data and tests that mapping.** Public policies and enrollment responses must expose only supported mappings; they must not advertise or accept `PRE_VOTE` merely because the normalized vocabulary contains it. Mapping expansion is post-MVP unless separately reviewed and frozen.
@@ -549,7 +558,7 @@ Every failure before successful completion of step 8—including malformed, bloc
 
 Allowed nodes are paragraphs/line breaks, headings, bold, italic, ordered/unordered lists, blockquotes, inline code, fenced code, and HTTPS links. Links render with an external indicator and `rel="noopener noreferrer"`.
 
-Raw HTML, images, embeds, CSS, iframes, scripts, Mermaid, unsafe protocols, and every other disallowed AST node or URL make the submission `malformed`. Validation rejects the submission; it never silently strips or rewrites disallowed content. Allowed CommonMark survives validation unchanged and is rendered safely, preserving the semantics of the immutable accepted content. Autolink previews and fetched metadata are never generated. Use an AST-based parser/validator and safe renderer; regex-only Markdown sanitation is not acceptable.
+Raw HTML, images, embeds, CSS, iframes, scripts, Mermaid, unsafe protocols, and every other disallowed AST node or URL make the submission `malformed`. Validation rejects the submission; it never silently strips or rewrites disallowed content. The rendering parser MUST run with `html: false`, and rendering MUST consume that same validated token stream rather than reparsing the source. A separate HTML-enabled parser may be used only as a detector that rejects raw HTML; its tokens MUST NOT be rendered. Allowed CommonMark survives validation unchanged and is rendered safely, preserving the semantics of the immutable accepted content. Autolink previews and fetched metadata are never generated. Use an AST-based parser/validator and safe renderer; regex-only sanitization is forbidden.
 
 ### 12.3 Facts and decoding
 
@@ -557,15 +566,15 @@ Every displayed fact carries `source: canonical | decoded | enriched`, display l
 
 - `canonical`: exact index/chain-owned proposal data.
 - `decoded`: deterministic output from a versioned, tested allowlist decoder. Only canonical and tested decoded facts may be verification material.
-- `enriched`: display-only metadata such as ENS/token labels. It is never verification material.
+- `enriched`: display-only metadata such as ENS/token labels. Its schema is strict and permits only the explicitly declared enrichment fields (`source`, `displayLabel`, `value`, and optional literal `verifiable: false`); canonical/decoded fields and unknown extras are rejected. It is never verification material, and every verification serializer/consumer rejects it even when otherwise schema-valid.
 - Unknown actions remain raw and visibly unknown.
 
 Decode only:
 
 1. native ETH when canonical `valueWei > 0`; and
-2. exact `transfer(address,uint256)` selector/signature when the action target equals a configured canonical USDC address for the DAO/Base context and calldata shape is exact.
+2. exact `transfer(address,uint256)` selector/signature only when the action target equals the configured allowlisted canonical Base native-USDC address and calldata shape is exact.
 
-Proxy, delegatecall, multicall, unknown token, malformed data, and arbitrary ABI-looking calldata remain raw. ENS always displays with its address. Estimated block times are labeled **estimated** and shown in Pacific Time.
+The MVP decoder is fixed to that Base allowlist even when canonical proposal actions come from Ethereum/Nouns. Ethereum mainnet USDC (`0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48`) and every other Nouns-chain token action remain raw until a separately designed chain-aware decoder exists post-MVP. Proxy, delegatecall, multicall, unknown token, malformed data, and arbitrary ABI-looking calldata remain raw. ENS always displays with its address. Estimated block times are labeled **estimated** and shown in Pacific Time. Evidence URLs are display-only HTTPS references and no server component fetches them.
 
 There is no prose claim extraction, omission detection, contradiction scoring, rhetoric classification, or persuasion verdict in MVP.
 
@@ -810,6 +819,8 @@ All deployments remain labeled **experimental**. Base Sepolia or a mock EIP-3009
 - Signer rotation is a deployment migration with draining, not completion after a ten-minute wait. Pause issuance on the old splitter; retain its splitter address, signer/token configuration, deployment block, scanner cursor, and RPC access in the read-only draining registry; wait for its quotes to expire; deploy the new splitter; switch only new quote issuance to it; and resume issuance. Continue canonical scans for the old splitter until every old quote is reconciled and every accepted old-splitter reorg monitor has completed its final 64-confirmation check. Only then may its scanner configuration be retired. The old immutable contract and on-chain state remain in place; no funds or state migrate. This is multiple historical deployments on the one configured Base chain, not multi-chain payment settlement.
 
 ### 15.2 Hard acceptance checklist
+
+The following payment tests are explicitly deferred to PR 9 and are nonblocking for PR 3: Base-mainnet USDC fork/integration; actual USDC EIP-712 domain compatibility; USDC pause/blacklist behavior; canceled EIP-3009 authorization; and a stronger adversarial invariant handler if one has not already been added. PR 9 MUST preserve and execute each item rather than treating mock-token or local unit results as equivalent evidence.
 
 **Contract/payment**
 

@@ -1,6 +1,8 @@
 const { getAddress, keccak256, toUtf8Bytes } = require('ethers');
 const { submissionSchema } = require('./schema');
 
+const SUBMISSION_HASH_DOMAIN_TAG = 'gavel-gate-submission-v1';
+
 function canonicalizeSubmission(input) {
   const parsed = submissionSchema.parse(input);
   const payer = getAddress(parsed.payer);
@@ -28,7 +30,7 @@ function canonicalizeSubmission(input) {
 function serializeCanonicalSubmission(input) {
   const value = canonicalizeSubmission(input);
   return JSON.stringify([
-    'gavel-gate-submission-v1',
+    SUBMISSION_HASH_DOMAIN_TAG,
     value.payer,
     value.voter,
     value.dao,
@@ -46,6 +48,7 @@ function hashSubmission(input) {
 }
 
 module.exports = {
+  SUBMISSION_HASH_DOMAIN_TAG,
   canonicalizeSubmission,
   serializeCanonicalSubmission,
   hashSubmission,

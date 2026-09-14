@@ -2,6 +2,7 @@ const constants = require('./constants');
 const schema = require('./schema');
 const submissionHash = require('./submission-hash');
 const {
+  NOUNS_CANONICAL_NATIVE_STATES,
   NOUNS_LIFECYCLE_MAPPING,
   NOUNS_LIFECYCLE_MAPPING_VERSION,
   mapNativeLifecycle,
@@ -17,12 +18,14 @@ const markdown = require('./markdown');
 
 module.exports = {
   ...constants,
+  SUBMISSION_HASH_DOMAIN_TAG: submissionHash.SUBMISSION_HASH_DOMAIN_TAG,
   createDaoPolicySchema: schema.createDaoPolicySchema,
   validateDaoPolicy: schema.validateDaoPolicy,
   serializeDaoPolicy: schema.serializeDaoPolicy,
   canonicalizeSubmission: submissionHash.canonicalizeSubmission,
   serializeCanonicalSubmission: submissionHash.serializeCanonicalSubmission,
   hashSubmission: submissionHash.hashSubmission,
+  NOUNS_CANONICAL_NATIVE_STATES,
   NOUNS_LIFECYCLE_MAPPING,
   NOUNS_LIFECYCLE_MAPPING_VERSION,
   mapNativeLifecycle,

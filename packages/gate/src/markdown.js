@@ -5,6 +5,11 @@ const {
 } = require('./constants');
 
 const parser = new MarkdownIt('commonmark', {
+  html: false,
+  linkify: false,
+  typographer: false,
+});
+const htmlDetector = new MarkdownIt('commonmark', {
   html: true,
   linkify: false,
   typographer: false,
@@ -80,37 +85,37 @@ function validateToken(token) {
     malformed('autolinks are not allowed; use an explicit HTTPS link', { tokenType: token.type });
   }
 
-  const safe = {
-    type: token.type,
-    tag: token.tag,
-    nesting: token.nesting,
-  };
-  if (token.content) safe.content = token.content;
-  if (token.markup) safe.markup = token.markup;
-  if (token.info) safe.info = token.info;
-  if (token.type === 'link_open') safe.link = safeHttpsLink(token.attrGet('href'));
-  if (token.children) safe.children = token.children.map(validateToken);
-  return safe;
+  if (token.type === 'link_open') token.link = safeHttpsLink(token.attrGet('href'));
+  if (token.children) token.children.forEach(validateToken);
+  return token;
+}
+
+function containsHtmlToken(tokens) {
+  return tokens.some((token) => (
+    token.type === 'html_block'
+    || token.type === 'html_inline'
+    || (token.children && containsHtmlToken(token.children))
+  ));
 }
 
 function validateMarkdown(source) {
   if (typeof source !== 'string') {
     malformed('Markdown source must be a string');
   }
+  if (containsHtmlToken(htmlDetector.parse(source, {}))) {
+    malformed('raw HTML is not allowed', { tokenType: 'html' });
+  }
   const tokens = parser.parse(source, {});
-  const safeTokens = tokens.flatMap((token) => {
-    const safe = validateToken(token);
-    return safe.type === 'inline' ? (safe.children || []) : [safe];
-  });
+  tokens.forEach(validateToken);
   return {
     source,
-    tokens: safeTokens,
+    tokens,
   };
 }
 
 function renderMarkdown(source) {
-  validateMarkdown(source);
-  return parser.render(source);
+  const validated = validateMarkdown(source);
+  return parser.renderer.render(validated.tokens, parser.options, {});
 }
 
 function validateLimitedMarkdown(source, maximum, label) {

@@ -2,6 +2,7 @@ const { z } = require('zod');
 const {
   AVAILABILITY,
   NORMALIZED_LIFECYCLES,
+  NOUNS_QUOTE_ISSUANCE_STAGES,
   MIN_ATTENTION_AMOUNT,
   MAX_PITCH_CODE_POINTS,
   MAX_DISCLOSURE_CODE_POINTS,
@@ -56,7 +57,7 @@ const daoPolicySchema = z.object({
     (amount) => amount >= MIN_ATTENTION_AMOUNT,
     `attentionAmount must be at least ${MIN_ATTENTION_AMOUNT}`,
   ),
-  acceptedStages: z.array(z.literal('VOTING')).nonempty(),
+  acceptedStages: z.array(z.enum(NOUNS_QUOTE_ISSUANCE_STAGES)).nonempty(),
 }).strict();
 
 function createDaoPolicySchema() {

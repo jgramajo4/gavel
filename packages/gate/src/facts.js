@@ -76,8 +76,9 @@ const factSchema = z.union([
   z.object({
     source: z.literal('enriched'),
     displayLabel: z.string().min(1),
+    value: z.string(),
     verifiable: z.literal(false).optional(),
-  }).passthrough(),
+  }).strict(),
 ]).superRefine((fact, context) => {
   if (fact.source === 'canonical' && fact.kind === 'raw_action') {
     const actionIndexResult = safeActionIndexSchema.safeParse(fact.actionIndex);
@@ -218,7 +219,7 @@ function canonicalizeAction(input) {
   const parsed = canonicalActionSchema.parse(input);
   return {
     ...parsed,
-    target: getAddress(parsed.target),
+    target: getAddress(parsed.target.toLowerCase()),
     valueWei: parsed.valueWei.toString(10),
   };
 }

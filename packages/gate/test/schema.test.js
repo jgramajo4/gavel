@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   AVAILABILITY,
   NORMALIZED_LIFECYCLES,
+  NOUNS_QUOTE_ISSUANCE_STAGES,
   PUBLIC_RECEIPT_STATES,
   MIN_ATTENTION_AMOUNT,
   GAVEL_FEE_AMOUNT,
@@ -50,6 +51,20 @@ test('validates a supported Nouns VOTING policy without integer loss', () => {
 
   assert.equal(policy.attentionAmount, BigInt(amount));
   assert.equal(serializeDaoPolicy(policy).attentionAmount, amount);
+});
+
+test('quote-issuance policy boundary rejects unsupported Nouns PRE_VOTE', () => {
+  assert.ok(NORMALIZED_LIFECYCLES.includes('PRE_VOTE'));
+  assert.deepEqual(NOUNS_QUOTE_ISSUANCE_STAGES, ['VOTING']);
+  assert.equal(Object.isFrozen(NOUNS_QUOTE_ISSUANCE_STAGES), true);
+  assert.throws(() => validateDaoPolicy({
+    dao: 'nouns',
+    daoChainId: 1,
+    enabled: true,
+    availability: 'accepting_now',
+    attentionAmount: '1000000',
+    acceptedStages: ['PRE_VOTE'],
+  }), /VOTING|acceptedStages/);
 });
 
 test('validates policy again and emits only deterministic material during serialization', () => {

@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  SUBMISSION_HASH_DOMAIN_TAG,
   canonicalizeSubmission,
   serializeCanonicalSubmission,
   hashSubmission,
@@ -25,6 +26,15 @@ function submission(overrides = {}) {
     ...overrides,
   };
 }
+
+test('uses the frozen domain tag, exact documented preimage, and UTF-8 keccak256', () => {
+  const expectedPreimage = '["gavel-gate-submission-v1","0x00000000000000000000000000000000000000AA","0x00000000000000000000000000000000000000bb","nouns","123456789012345678901234567890","VOTING","FOR","  Keep exact spacing\\n🙂  ","line one\\r\\nline two",["https://example.com/a","https://example.org/b"]]';
+  const expectedHash = '0x8905f9119834a73d15c515f067cfd32b08d330599a67d7ef8d917af06753cff6';
+
+  assert.equal(SUBMISSION_HASH_DOMAIN_TAG, 'gavel-gate-submission-v1');
+  assert.equal(serializeCanonicalSubmission(submission()), expectedPreimage);
+  assert.equal(hashSubmission(submission()), expectedHash);
+});
 
 test('canonicalizes addresses and hashes deterministically with keccak256', () => {
   const first = canonicalizeSubmission(submission());
@@ -84,6 +94,7 @@ test('rejects payer and signed sender mismatch before hashing', () => {
 
 test('rejects invalid addresses, unsafe proposal numbers, and invalid evidence', () => {
   assert.throws(() => hashSubmission(submission({ voter: 'not-an-address' })));
+  assert.throws(() => hashSubmission(submission({ proposalId: '0123' })));
   assert.throws(() => hashSubmission(submission({ proposalId: Number.MAX_SAFE_INTEGER + 1 })));
   assert.throws(() => hashSubmission(submission({ evidenceUrls: ['http://example.com'] })));
 });

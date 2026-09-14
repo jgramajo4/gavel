@@ -31,12 +31,32 @@ test('preserves allowed CommonMark and returns a safe token representation', () 
   assert.equal(result.source, allowed);
   assert.ok(result.tokens.some((token) => token.type === 'heading_open'));
   assert.ok(result.tokens.some((token) => token.type === 'fence'));
-  const link = result.tokens.find((token) => token.type === 'link_open');
+  const inline = result.tokens.find((token) => token.type === 'inline');
+  assert.ok(inline, 'validated render stream retains its inline container');
+  const link = result.tokens
+    .flatMap((token) => token.children || [])
+    .find((token) => token.type === 'link_open');
   assert.deepEqual(link.link, {
     href: 'https://example.com/path?q=1',
     external: true,
     rel: 'noopener noreferrer',
   });
+});
+
+test('raw HTML remains malformed when the safe parser tokenizes it as text', () => {
+  for (const source of ['<b>raw</b>', 'before <span>raw</span> after']) {
+    assert.throws(() => validateMarkdown(source), (error) => error.code === 'malformed');
+    assert.throws(() => renderMarkdown(source), (error) => error.code === 'malformed');
+  }
+});
+
+test('a disallowed token cannot enter the validated render stream', () => {
+  for (const source of [
+    'allowed paragraph\n\n![image](https://example.com/image.png)',
+    'allowed paragraph\n\n---',
+  ]) {
+    assert.throws(() => renderMarkdown(source), (error) => error.code === 'malformed');
+  }
 });
 
 test('renders validated CommonMark with escaped code and hardened HTTPS links', () => {
