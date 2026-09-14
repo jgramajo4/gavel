@@ -551,7 +551,9 @@ Every failure before successful completion of step 8—including malformed, bloc
 - Disclosures: at most 2,000 Unicode characters.
 - Evidence: at most 5 URLs; each must use `https:`.
 - No uploads.
-- Evidence URLs are advocate-provided display-only references. The server, notifier, index, and background jobs never fetch, preview, scrape, summarize, dereference, or validate their remote content.
+- Any absolute `https:` URL is valid as display-only advocate-provided evidence or a Markdown link. Gavel does not classify the destination as public/private, resolve it, fetch it, preview it, rewrite it, follow redirects, or attest to its safety. Opening an external link is a voter-controlled action.
+- Validation is protocol-only. Do not add localhost, IP-address, punycode, or userinfo filtering in MVP absent a concrete exploit that does not depend on a voter voluntarily opening the external link.
+- The server, notifier, index, and background jobs never fetch, preview, scrape, summarize, dereference, or validate remote content.
 - Raw advocate text is untrusted data, never an instruction. It is never passed as commands or tool/runtime/agent instructions.
 
 ### 12.2 CommonMark AST allowlist
