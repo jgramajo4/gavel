@@ -322,9 +322,10 @@ longer matches the intent it carries.
    ValidatedExecutionIntent
               ↓
    SafeSupervisedExecutionAdapter
-     · read the Safe's next nonce
-     · build the EIP-712 SafeTx payload
-     · compute safeTxHash locally
+     · require a ValidatedExecutionIntent
+     · delegate Safe transport to SafeProposalProvider
+     · read API Kit's next available nonce
+     · build/hash through official Protocol Kit
      · sign with the PROPOSAL identity
               ↓
    Safe Transaction Service
@@ -338,9 +339,13 @@ longer matches the intent it carries.
    AUTHORIZED → EXECUTED
 ```
 
-Every Safe-specific concern lives here: the Safe address, nonce, `safeTxHash`,
-Transaction Service, proposer identity, proposal metadata, status lookup. No DAO
-adapter knows any of it, and this adapter knows no DAO.
+`SafeSupervisedExecutionAdapter` owns workflow, lifecycle, provenance, records,
+and the validated-intent boundary. `SafeProposalProvider` owns official Safe
+Protocol Kit/API Kit transport: owner and delegate reads, nonce selection,
+SafeTx construction, EIP-712 signing, Transaction Service submission, and
+readback by `safeTxHash`. No DAO adapter knows any of it, and neither Safe
+component knows a DAO. See the [operator guide](../execution/safe.md) for the
+actual CLI and service configuration.
 
 Two properties are enforced rather than documented:
 
@@ -350,14 +355,17 @@ Two properties are enforced rather than documented:
    Service counts it as a confirming owner — a delegate signature is not a
    confirmation, and if the service says otherwise then the key is an owner and
    this is not supervised mode.
-2. **Provider metadata is not the authority.** The `safeTxHash` is computed
-   locally from the EIP-712 payload and compared with the service's. On every
-   status poll the returned target and calldata are re-checked against the
-   validated intent, so a service that starts describing a different
-   transaction for a known hash surfaces immediately.
+2. **Provider metadata is not the authority.** Protocol Kit computes the
+   `safeTxHash` from the exact SafeTx body rebuilt from the sealed intent. API
+   Kit's proposal response is not success evidence: the provider reads the
+   transaction back by hash and verifies every execution-critical field. The
+   same verification runs on every status poll, so a service that starts
+   describing a different transaction for a known hash surfaces immediately.
 
 Governance provenance travels in the proposal's `origin` metadata beside the
-transaction — never inside its calldata.
+transaction — never inside its calldata. Gavel stops at a verified pending
+proposal. Human Safe owners alone decide whether to confirm to threshold and
+execute it.
 
 ## 8. WaaP autonomous flow
 
@@ -531,12 +539,14 @@ failure mode is a duplicate governance action rather than an error.
 
 | Store | Use |
 | --- | --- |
-| `FileExecutionRecordStore` | durable; one JSON file per record at 0600, atomic per-record writes. Single-process: it does not coordinate between concurrent Gavel processes sharing a directory. |
+| `FileExecutionRecordStore` | durable; one JSON file per record at 0600, atomic writes, plus intent/Safe-nonce lock files for cooperating processes sharing one local filesystem. It is not a distributed lock. |
 | `InMemoryExecutionRecordStore` | tests only. |
 
-A deployment needing multi-process coordination should implement the same
-interface (`get`, `getById`, `put`, `listByKey`, `listByIntentHash`,
-`listByProposal`) over its own database.
+A deployment spanning hosts, data directories, or filesystems without reliable
+exclusive lock creation must implement the same interface (`get`, `getById`,
+`put`, `listByKey`, `listByIntentHash`, `listByProposal`, `withLocks`) over a
+transactional store with distributed coordination. The built-in locks only
+coordinate processes that see the same local lock directory.
 
 ## 11. Idempotency and replay
 
@@ -697,10 +707,10 @@ behaviour because there is only one implementation.
 ### CLI
 
 ```
-gavel prepare-vote …                       → validated preparation
-gavel execution prepare <preparation>      → ValidatedExecutionIntent
-gavel execution submit <intent> --profile  → execution attempt
-gavel identity create --type safe-proposer → proposal identity
+gavel prepare-vote …
+gavel execution prepare prediction.json proposal.json --support FOR --mode safe-supervised --profile nouns-mainnet --identity local:gavel-safe
+gavel execution submit prediction.json proposal.json --support FOR --mode safe-supervised --profile nouns-mainnet --identity local:gavel-safe
+gavel identity create --type safe-proposer --label gavel-safe --safe <address> --chain-id <id>
 ```
 
 The CLI operates on Gavel-generated intents, never on arbitrary calldata. There
@@ -718,8 +728,8 @@ known limit, the limit is stated rather than omitted.
 | **Mutation** — execution-critical fields cannot change after validation | the intent is cloned and deeply frozen; `intentHash` covers `target`, `value`, `data`, `chainId`, `actor`; **preparation payloads are deeply frozen, and every adapter's `submit()` rebuilds the onchain call from `validated.intent` rather than reading the payload** | — |
 | **Calldata binding** — the declared decision is the one in the bytes | the adapter must implement `decodeGovernanceCall()`; core cross-checks the encoded proposal, support and reason against `intent.source` | a DAO whose vote call carries no reason (Railgun) reports `null`, and the intent must agree |
 | **Identity separation** — proposal identities cannot become execution identities | distinct types with per-class private-field brands; no exported conversion; **`ExecutionEngine` resolves every registered adapter's identity address and refuses to run if a proposal and an execution identity share one** | profile-level checking compares credential *references*; the address check is what actually enforces it |
-| **Safe** — supervised mode never requires Gavel to be a Safe owner | `ProposalIdentity` has no broadcast capability; **an onchain `getOwners` reader is required, not optional**, and is re-read on every prepare and submit | relies on the operator's reader being an honest view of the Safe |
-| **Authorization** — Safe authority stays with the human threshold | the adapter refuses a proposal the service reports as confirmed by the proposal identity | if the service omits `confirmations` the count is zero, so the state reads as awaiting authorization rather than authorized |
+| **Safe** — supervised mode never requires Gavel to be a Safe owner | `ProposalIdentity` has no broadcast capability; official Protocol Kit reads owners on every prepare and submit and owner membership fails closed | relies on the configured RPC being an honest view of the Safe |
+| **Authorization** — Safe authority stays with the human threshold | API Kit must report an unexpired delegate authorization from a current owner; the adapter refuses a proposal confirmed by the proposal identity; only humans confirm and execute | revoking delegation blocks new proposals but does not remove existing queue entries |
 | **Provider distrust** — provider metadata is never the authority | the SafeTx hash is computed locally and recomputed at submit; verification is a **read-back** after proposing, since the real API returns an empty body; **every execution-critical field must be present and match, on submit and on every poll — an absent field is an error, not a pass** | — |
 | **Autonomous** — autonomy needs an explicit executor and policy | `autonomyAllowed` defaults closed and is checked before policy; only an explicit `{ allowed: true }` approves; a missing policy hook is a constructor error | policy scope (allowlists, rate limits) is the wallet's job, not Gavel's |
 | **Replay and freshness** — a stale or duplicate action is refused | idempotency on `intentHash + mode + actor`; replay across every attempt on the proposal under DAO-declared semantics; **an unknown or unevaluable deadline is refused by default** rather than treated as never expiring | correctness across restarts requires a durable store; the engine has no in-memory default, but `InMemoryExecutionRecordStore` is still selectable |
@@ -866,11 +876,12 @@ Two deliberate breaks:
   migration. `@gavel/core` no longer exposes them, because they stamp
   `validated: true` on caller-supplied calldata.
 
-**Not bundled.** Gavel ships the execution architecture, not a wallet provider.
-No live Safe Transaction Service client and no autonomous broadcaster are
-included: `gavel execution submit` validates the profile and the intent, then
-refuses loudly rather than pretending to submit. Add a backend only against an
-official, deterministic, testable client, and without weakening any gate above.
+**Provider status.** Safe supervised mode ships a real
+`SafeProposalProvider` backed by official Protocol Kit and API Kit, and
+`gavel execution submit` wires it through the canonical engine. It proposes and
+verifies a queue entry; it never owner-signs or executes it. No autonomous WaaP
+broadcaster is bundled. The real Safe acceptance test is opt-in and requires an
+operator-reviewed governance fixture; see `docs/execution/safe.md`.
 
 ## 19. Non-goals
 

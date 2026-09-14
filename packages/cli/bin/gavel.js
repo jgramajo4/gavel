@@ -11,6 +11,7 @@ const {
   NounsDaoAdapter,
   NounsSubgraphHistoryAdapter,
   createEthereumProvider,
+  resolveEthereumRpcUrl,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
 const { EnsDaoAdapter } = require("../../ens-adapter");
@@ -18,10 +19,16 @@ const { RailgunDaoAdapter } = require("../../railgun-adapter");
 const { IndexApiClient } = require("../../governance-index");
 const {
   ExecutionMode,
+  ExecutionEngine,
+  FileExecutionRecordStore,
+  KeystoreSigningIdentity,
+  SafeProposalProvider,
+  SafeSupervisedExecutionAdapter,
   Support,
   assertCanonicalGovernanceAdapter,
   assertProductionReady,
   profileIdentityReferences,
+  createProposalIdentity,
   ONBOARDING_QUESTIONS,
   applyBacktestEvaluationToPrediction,
   applyCalibrationToPrediction,
@@ -96,6 +103,10 @@ Usage:
                          [--expect-intent <hash|intent.json>] [--rpc <url>]
   gavel identity create --type safe-proposer --safe <address> [--chain-id <id>]
                         [--label <name>] [--passphrase-env <VAR>]
+  gavel safe delegate status --safe <address> [--chain-id <id>] [--identity <local:label>]
+                             [--rpc <url>] [--safe-api-url <url>]
+  gavel safe delegate setup --safe <address> [--chain-id <id>] [--identity <local:label>]
+                            [--rpc <url>] [--safe-api-url <url>]
 
 Commands:
   history   Fetch indexed governance history (Nouns defaults to its subgraph when no index is configured).
@@ -131,13 +142,16 @@ Privacy:
 `;
 }
 
-async function writePrivateJson(filePath, document) {
+async function writePrivateJson(filePath, document, { secureDirectory = false } = {}) {
   const absolutePath = path.resolve(filePath);
-  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  const directory = path.dirname(absolutePath);
+  await fs.mkdir(directory, { recursive: true, mode: secureDirectory ? 0o700 : 0o755 });
+  if (secureDirectory) await fs.chmod(directory, 0o700);
   await fs.writeFile(absolutePath, `${JSON.stringify(document, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fs.chmod(absolutePath, 0o600);
   return absolutePath;
 }
 
@@ -875,6 +889,67 @@ async function executionPrepareCommand(argv) {
   );
 }
 
+async function resolveLocalProposalIdentity(reference, expectedScope) {
+  const match = /^local:([A-Za-z0-9._-]+)$/.exec(String(reference || ""));
+  if (!match) {
+    throw new Error("This CLI currently resolves Safe proposal identities only from local:<label> encrypted keystores");
+  }
+  const label = match[1];
+  const document = await readJson(defaultPrivatePath("identities", `${label}.json`));
+  if (
+    document.version !== 1 ||
+    document.kind !== "GAVEL_PROPOSAL_IDENTITY" ||
+    document.role !== "proposal" ||
+    document.label !== label ||
+    !Array.isArray(document.capabilities) ||
+    !document.capabilities.includes("proposeSafeTransaction") ||
+    !document.keystore ||
+    !document.passphraseEnv
+  ) {
+    throw new Error(`The local identity ${reference} is not a valid Gavel Safe proposal identity`);
+  }
+
+  const safeAddress = getAddress(expectedScope.safeAddress);
+  const chainId = Number(expectedScope.chainId);
+  if (getAddress(document.scope?.safeAddress || "") !== safeAddress) {
+    throw new Error(`The local identity ${reference} is scoped to a different Safe`);
+  }
+  if (Number(document.scope?.chainId) !== chainId) {
+    throw new Error(`The local identity ${reference} is scoped to a different chain`);
+  }
+
+  const passphrase = process.env[document.passphraseEnv];
+  if (!passphrase) throw new Error(`Set ${document.passphraseEnv} to unlock ${reference}`);
+  const encryptedJson = JSON.stringify(document.keystore);
+  const unlocked = await Wallet.fromEncryptedJson(encryptedJson, passphrase);
+  if (getAddress(unlocked.address) !== getAddress(document.address)) {
+    throw new Error(`The encrypted key for ${reference} does not match its stored address`);
+  }
+
+  const signer = new KeystoreSigningIdentity({
+    keystore: document.keystore,
+    address: document.address,
+    passphrase: async () => {
+      const current = process.env[document.passphraseEnv];
+      if (!current) throw new Error(`Set ${document.passphraseEnv} to unlock ${reference}`);
+      return current;
+    },
+    decrypt: (keystore, secret) => Wallet.fromEncryptedJson(JSON.stringify(keystore), secret),
+  });
+  return createProposalIdentity({ safeAddress, chainId, label, signer });
+}
+
+function createSafeProposalProvider(options) {
+  return new SafeProposalProvider({
+    safeAddress: options.safeAddress,
+    chainId: options.chainId,
+    proposalIdentity: options.proposalIdentity,
+    provider: resolveEthereumRpcUrl({ rpcUrl: options.rpc }),
+    txServiceUrl: options.transactionServiceUrl || process.env.GAVEL_SAFE_API_URL,
+    apiKey: process.env.GAVEL_SAFE_API_KEY,
+  });
+}
+
 /**
  * `gavel execution submit` -- re-validate live, then hand the intent to a
  * configured execution backend.
@@ -886,8 +961,8 @@ async function executionPrepareCommand(argv) {
  * which is how a human approval is carried forward without the document itself
  * becoming the authorization.
  *
- * No live Safe Transaction Service or autonomous broadcaster is bundled, so
- * this stops at the point where a backend would be invoked.
+ * Safe supervised mode is wired to the official Safe SDK provider. Other live
+ * execution backends remain deliberately unavailable in this build.
  */
 async function executionSubmitCommand(argv) {
   const { values, positionals } = parseArgs({
@@ -935,12 +1010,16 @@ async function executionSubmitCommand(argv) {
   ]);
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
   const adapter = assertCanonicalGovernanceAdapter(createDaoAdapter(prediction.dao, provider));
+  const executionAddress =
+    values["execution-address"] ||
+    values.from ||
+    (mode === ExecutionMode.SAFE_SUPERVISED ? profile.safe.address : undefined);
   const { validated, blockers } = await adapter.prepareValidatedIntent({
     prediction,
     proposal: proposalInput.proposal || proposalInput,
     selectedSupport: values.support,
-    votingAddress: values["execution-address"] || values.from,
-    executionAddress: values["execution-address"] || values.from,
+    votingAddress: executionAddress,
+    executionAddress,
     assetOwnerAddress: values["asset-owner"],
     reason: values.reason,
     acknowledgeSecurityReview: values["acknowledge-security-review"],
@@ -964,13 +1043,165 @@ async function executionSubmitCommand(argv) {
     }
   }
 
-  throw new Error(
-    `No execution backend is registered for ${mode} in this build. Live validation passed ` +
-      `(intent ${validated.intentHash}, identities: ` +
-      `${profileIdentityReferences(profile).map((entry) => `${entry.role}=${entry.reference}`).join(", ") || "none"}). ` +
-      `Register a ${mode} adapter with the ExecutionEngine to submit, or use \`gavel prepare-vote\` ` +
-      "output for out-of-band signing.",
-  );
+  if (mode !== ExecutionMode.SAFE_SUPERVISED) {
+    throw new Error(
+      `No execution backend is registered for ${mode} in this build (identities: ` +
+        `${profileIdentityReferences(profile).map((entry) => `${entry.role}=${entry.reference}`).join(", ") || "none"}).`,
+    );
+  }
+
+  const proposalIdentity = await resolveLocalProposalIdentity(profile.safe.proposalIdentity, {
+    safeAddress: profile.safe.address,
+    chainId: profile.safe.chainId,
+  });
+  const proposalProvider = createSafeProposalProvider({
+    safeAddress: profile.safe.address,
+    chainId: profile.safe.chainId,
+    proposalIdentity,
+    rpc: values.rpc,
+    transactionServiceUrl: profile.safe.transactionServiceUrl,
+  });
+  const safeAdapter = new SafeSupervisedExecutionAdapter({
+    safeAddress: profile.safe.address,
+    chainId: profile.safe.chainId,
+    proposalIdentity,
+    proposalProvider,
+  });
+  const engine = new ExecutionEngine({
+    adapters: [safeAdapter],
+    store: new FileExecutionRecordStore(defaultPrivatePath("executions")),
+  });
+  const blockNumber = await provider.getBlockNumber();
+  let result;
+  try {
+    result = await engine.submit(validated, { mode, blockNumber });
+  } catch (error) {
+    if (error?.submissionOutcome !== "unknown" || !error.executionRecord) throw error;
+    const record = error.executionRecord;
+    process.stdout.write(`${JSON.stringify({
+      ok: false,
+      mode,
+      status: "submission-unknown",
+      message: "Submission outcome unknown. Retry the same command to reconcile.",
+      safe: profile.safe.address,
+      safeTxHash: record.providerData.safeTxHash,
+      nonce: record.providerData.safeNonce,
+      executionRecord: record.id,
+      deduplicated: false,
+      nextStep: "Retry the same command to reconcile this hash. Do not create another Safe proposal.",
+    }, null, 2)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (result.reason === "submission-outcome-unknown") {
+    process.stdout.write(`${JSON.stringify({
+      ok: false,
+      mode,
+      status: "submission-unknown",
+      safe: profile.safe.address,
+      safeTxHash: result.record.providerData.safeTxHash,
+      nonce: result.record.providerData.safeNonce,
+      executionRecord: result.record.id,
+      deduplicated: true,
+      nextStep: "Retry later to reconcile this hash. Do not create another Safe proposal.",
+    }, null, 2)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  let record = result.record;
+  if (!result.deduplicated && record.state === "SUBMITTED") {
+    record = await engine.status(record.id);
+  }
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    mode,
+    status: record.state.toLowerCase().replaceAll("_", "-"),
+    safe: profile.safe.address,
+    safeTxHash: record.providerData.safeTxHash,
+    nonce: record.providerData.safeNonce,
+    executionRecord: record.id,
+    deduplicated: result.deduplicated,
+    nextStep: "Review and sign in Safe. Human owners retain the execution threshold.",
+  }, null, 2)}\n`);
+}
+
+async function safeDelegateCommand(action, argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      safe: { type: "string" },
+      "chain-id": { type: "string", default: "1" },
+      identity: { type: "string", default: "local:safe-proposer-main" },
+      rpc: { type: "string" },
+      "safe-api-url": { type: "string" },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 0) throw new Error(`safe delegate ${action} accepts no positional arguments`);
+  if (!values.safe) throw new Error(`safe delegate ${action} requires --safe`);
+  const safeAddress = getAddress(values.safe);
+  const chainId = Number(values["chain-id"]);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) throw new Error("--chain-id must be a positive integer");
+  const proposalIdentity = await resolveLocalProposalIdentity(values.identity, { safeAddress, chainId });
+  const provider = createSafeProposalProvider({
+    safeAddress,
+    chainId,
+    proposalIdentity,
+    rpc: values.rpc,
+    transactionServiceUrl: values["safe-api-url"],
+  });
+  const authorization = await provider.authorization();
+
+  if (action === "status") {
+    process.stdout.write(`${authorization.status}\n`);
+    return;
+  }
+
+  const guidance = {
+    authorized: [
+      "The proposal identity is already authorized as a Safe Transaction Service delegate.",
+      "No Safe owner authorization action is needed.",
+    ],
+    "not-authorized": [
+      `An existing owner must connect their wallet to official Safe API Kit and call addSafeDelegate({ safeAddress: "${safeAddress}", delegateAddress: "${authorization.proposer}", delegatorAddress: "<connected-owner-address>", label: "gavel", signer: <connected-owner-signer> }).`,
+      "The signer and delegatorAddress must be the same current Safe owner; Gavel never receives that signer or owner credential.",
+      `Authorize ${authorization.proposer} as a Transaction Service delegate, never as a Safe owner.`,
+      "Run this setup command again to verify authorization before submitting an execution.",
+    ],
+    "owner-conflict": [
+      `Remove ${authorization.proposer} from the Safe owner set before using supervised mode.`,
+      "Create or select a separate proposal identity, authorize it only as a Transaction Service delegate, then verify again.",
+    ],
+    "service-unavailable": [
+      "Check the RPC and Safe Transaction Service URL, then run this setup command again.",
+      "Authorization was not verified; do not submit until status is authorized.",
+    ],
+  }[authorization.status];
+  if (authorization.status === "authorized") {
+    await writePrivateJson(defaultPrivatePath("safe", "delegates", `${chainId}-${safeAddress.toLowerCase()}.json`), {
+      version: 1,
+      safeAddress,
+      chainId,
+      proposalIdentity: values.identity,
+      proposalIdentityAddress: authorization.proposer,
+      status: authorization.status,
+      verifiedAt: new Date().toISOString(),
+    });
+  }
+  process.stdout.write(`${JSON.stringify({
+    safe: safeAddress,
+    chainId,
+    proposalIdentity: values.identity,
+    proposalIdentityAddress: authorization.proposer,
+    status: authorization.status,
+    completed: authorization.status === "authorized",
+    guidance,
+  }, null, 2)}\n`);
 }
 
 /**
@@ -996,7 +1227,6 @@ async function identityCreateCommand(argv) {
       "chain-id": { type: "string" },
       label: { type: "string" },
       "passphrase-env": { type: "string" },
-      output: { type: "string", short: "o" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -1011,6 +1241,9 @@ async function identityCreateCommand(argv) {
   if (!values.safe) throw new Error("identity create requires --safe with the Safe address to propose into");
   const safeAddress = getAddress(values.safe);
   const chainId = Number(values["chain-id"] || 1);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+    throw new Error("identity create --chain-id must be a positive safe integer");
+  }
   const label = values.label || "safe-proposer-main";
   if (!/^[A-Za-z0-9._-]+$/.test(label)) throw new Error("identity label must be alphanumeric with . _ or -");
 
@@ -1025,7 +1258,7 @@ async function identityCreateCommand(argv) {
 
   const wallet = Wallet.createRandom();
   const keystore = await wallet.encrypt(passphrase);
-  const destination = values.output || defaultPrivatePath("identities", `${label}.json`);
+  const destination = defaultPrivatePath("identities", `${label}.json`);
   const absolutePath = await writePrivateJson(destination, {
     version: 1,
     kind: "GAVEL_PROPOSAL_IDENTITY",
@@ -1037,7 +1270,7 @@ async function identityCreateCommand(argv) {
     passphraseEnv: passphraseVariable,
     createdAt: new Date().toISOString(),
     keystore: JSON.parse(keystore),
-  });
+  }, { secureDirectory: true });
 
   process.stdout.write(
     `${JSON.stringify(
@@ -1089,6 +1322,13 @@ async function main() {
     const [subcommand, ...rest] = argv;
     if (subcommand === "create") return identityCreateCommand(rest);
     throw new Error("identity accepts the subcommand create");
+  }
+  if (command === "safe") {
+    const [namespace, subcommand, ...rest] = argv;
+    if (namespace !== "delegate" || !["status", "setup"].includes(subcommand)) {
+      throw new Error("safe accepts the subcommands delegate status and delegate setup");
+    }
+    return safeDelegateCommand(subcommand, rest);
   }
   throw new Error(`Unknown command: ${command}`);
 }

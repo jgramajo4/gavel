@@ -35,6 +35,26 @@ test("CLI runs without Bankr and writes JSON state beneath custom GAVEL_DATA_DIR
   assert.equal(fs.existsSync(output.output), true);
 });
 
+test("custom output does not change permissions on its existing parent directory", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-cli-mode-"));
+  const shared = path.join(temporary, "existing-shared");
+  const answersPath = path.join(temporary, "answers.json");
+  const outputPath = path.join(shared, "preferences.json");
+  fs.mkdirSync(shared, { mode: 0o755 });
+  fs.chmodSync(shared, 0o755);
+  fs.writeFileSync(answersPath, JSON.stringify({ answers: [{ questionId: "public-goods", answer: "FOR" }] }));
+
+  const result = spawnSync(process.execPath, [cli, "onboard", VOTER, "--answers", answersPath, "--output", outputPath], {
+    cwd: temporary,
+    encoding: "utf8",
+    env: { ...process.env },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.statSync(shared).mode & 0o777, 0o755);
+  assert.equal(fs.statSync(outputPath).mode & 0o777, 0o600);
+});
+
 test("legacy and canonical CLI entry points expose the same machine-readable contract", () => {
   for (const entry of [cli, path.join(root, "bin", "gavel.js")]) {
     const result = spawnSync(process.execPath, [entry, "onboard", VOTER, "--questions"], { encoding: "utf8" });

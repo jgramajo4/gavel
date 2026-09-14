@@ -28,6 +28,7 @@ module.exports = {
   ...require("./src/execution/readiness"),
   ...require("./src/execution/identity/signing"),
   ...require("./src/execution/identity/roles"),
+  ...require("./src/execution/providers/safe-proposal"),
   ...require("./src/execution/executors/safe-supervised"),
   ...require("./src/execution/executors/waap-autonomous"),
   ...require("./src/dao/registry"),

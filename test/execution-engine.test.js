@@ -99,16 +99,27 @@ function stubAdapter(mode, overrides = {}) {
   const adapter = {
     mode,
     submitted: [],
-    async prepare(intent) {
+    submitCalls: 0,
+    preparedWith: [],
+    async prepare(intent, prepareOptions = {}) {
+      this.preparedWith.push(prepareOptions);
       assertPreparable(this, intent);
       if (overrides.prepareError) throw new Error(overrides.prepareError);
       return executionPreparation(this, intent, { to: intent.intent.target, data: intent.intent.data }, {
         providerData: overrides.prepareProviderData || {},
       });
     },
-    async submit(preparation) {
+    async submit(preparation, submitOptions = {}) {
       assertSubmittable(this, preparation);
-      if (overrides.submitError) throw new Error(overrides.submitError);
+      this.submitCalls += 1;
+      if (overrides.preDispatchError) throw new Error(overrides.preDispatchError);
+      if (overrides.dispatches) await submitOptions.beforeProviderDispatch?.();
+      if (overrides.submitDelay) await new Promise((resolve) => setTimeout(resolve, overrides.submitDelay));
+      if (overrides.submitError && (!overrides.submitErrorOnce || this.submitCalls === 1)) {
+        const error = new Error(overrides.submitError);
+        if (overrides.submissionOutcome) error.submissionOutcome = overrides.submissionOutcome;
+        throw error;
+      }
       this.submitted.push(preparation.intentHash);
       return {
         state: overrides.submitState || ExecutionState.SUBMITTED,
@@ -120,6 +131,7 @@ function stubAdapter(mode, overrides = {}) {
       return { state: overrides.statusState || ExecutionState.AWAITING_AUTHORIZATION, providerData: {} };
     },
   };
+  if (overrides.reconcile) adapter.reconcile = overrides.reconcile;
   return adapter;
 }
 
@@ -200,6 +212,71 @@ test("a retry returns the existing attempt instead of submitting twice", async (
     first.record.key,
     executionKey({ intentHash: intent.intentHash, mode: "safe-supervised", actor: SAFE }),
   );
+});
+
+test("concurrent submissions of the same idempotency key reach the provider once", async () => {
+  const safe = stubAdapter("safe-supervised", { submitDelay: 40 });
+  const runner = engine([safe]);
+  const intent = validated();
+
+  const results = await Promise.all([
+    runner.submit(intent, { mode: "safe-supervised", blockNumber: 150 }),
+    runner.submit(intent, { mode: "safe-supervised", blockNumber: 150 }),
+  ]);
+
+  assert.equal(safe.submitted.length, 1);
+  assert.equal(results.filter((result) => result.deduplicated).length, 1);
+  assert.equal(results[0].record.id, results[1].record.id);
+});
+
+test("a pre-dispatch submit error is durably FAILED and remains retryable", async () => {
+  const store = new InMemoryExecutionRecordStore();
+  const failing = stubAdapter("safe-supervised", {
+    prepareProviderData: { safeTxHash: `0x${"ab".repeat(32)}`, safeNonce: "7", safeAddress: SAFE },
+    preDispatchError: "owner changed before POST",
+    reconcile: async () => null,
+  });
+  const runner = engine([failing], { store });
+
+  await assert.rejects(
+    runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 }),
+    /owner changed before POST/,
+  );
+  assert.equal((await store.list())[0].state, ExecutionState.FAILED);
+
+  const recovered = await engine([stubAdapter("safe-supervised")], { store }).submit(
+    validated(),
+    { mode: "safe-supervised", blockNumber: 150 },
+  );
+  assert.equal(recovered.deduplicated, false);
+  assert.equal(recovered.record.attempt, 2);
+});
+
+test("a post-dispatch network error remains durably SUBMITTED with an unknown outcome", async () => {
+  const store = new InMemoryExecutionRecordStore();
+  const safe = stubAdapter("safe-supervised", {
+    prepareProviderData: { safeTxHash: `0x${"ab".repeat(32)}`, safeNonce: "7", safeAddress: SAFE },
+    dispatches: true,
+    submitError: "timeout after POST",
+    submitErrorOnce: true,
+    reconcile: async () => null,
+  });
+  const runner = engine([safe], { store });
+
+  await assert.rejects(
+    runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 }),
+    /timeout after POST/,
+  );
+
+  const [record] = await store.list();
+  assert.equal(record.state, ExecutionState.SUBMITTED);
+  assert.equal(record.providerData.providerStatus, "submission-outcome-unknown");
+  const retry = await runner.submit(validated(), { mode: "safe-supervised", blockNumber: 150 });
+  assert.equal(retry.deduplicated, false);
+  assert.equal(retry.record.attempt, 2);
+  assert.equal(safe.submitCalls, 2);
+  assert.equal(safe.preparedWith[1].existingProviderData.safeNonce, "7");
+  assert.equal(safe.preparedWith[1].existingProviderData.safeTxHash, `0x${"ab".repeat(32)}`);
 });
 
 test("a confirmed execution is never rebroadcast, and a dead attempt may be retried", async () => {
