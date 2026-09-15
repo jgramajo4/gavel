@@ -15,11 +15,15 @@ const {
   serializeVerificationFact,
 } = require('./facts');
 const markdown = require('./markdown');
+const quote = require('./quote');
+const submissionPolicy = require('./submission-policy');
 const enrollment = require('./enrollment');
 const nounsGateAdapter = require('./nouns-gate-adapter');
 
 module.exports = {
   ...constants,
+  ...quote,
+  ...submissionPolicy,
   ...enrollment,
   ...nounsGateAdapter,
   SUBMISSION_HASH_DOMAIN_TAG: submissionHash.SUBMISSION_HASH_DOMAIN_TAG,
@@ -29,6 +33,7 @@ module.exports = {
   canonicalizeSubmission: submissionHash.canonicalizeSubmission,
   serializeCanonicalSubmission: submissionHash.serializeCanonicalSubmission,
   hashSubmission: submissionHash.hashSubmission,
+  submissionSchema: schema.submissionSchema,
   NOUNS_CANONICAL_NATIVE_STATES,
   NOUNS_LIFECYCLE_MAPPING,
   NOUNS_LIFECYCLE_MAPPING_VERSION,

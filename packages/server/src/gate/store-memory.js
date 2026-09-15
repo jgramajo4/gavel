@@ -7,7 +7,6 @@ const {
   NOUNS_ISSUANCE_STAGE,
   QUOTE_SETTLED_EVENT_FIELDS,
   SETTLED_CAPACITY_WINDOW_MS,
-  assertExactQuoteExpiry,
   assertExactKeys,
   notificationTransition,
   normalizeCapacityPolicy,
@@ -15,6 +14,14 @@ const {
   publicSubmissionProjection,
   requireNounsIssuanceLifecycle,
 } = require("./semantic-contract");
+const {
+  assertSignerDeploymentBinding,
+  assertStoreOwnedQuoteMaterial,
+  buildIssuedQuoteMessage,
+  issuedQuotePayload,
+  quoteExpiryFrom,
+  signIssuedQuote,
+} = require("./quote-issuance");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
@@ -350,6 +357,45 @@ class MemoryGateStore {
     return pending < policy.pendingReservationCapacity && settled < policy.settledCapacity;
   }
 
+  // Owner-bound global exact-hash lookup. It runs before every mutable check,
+  // so it consults nothing but the immutable submission row.
+  async getOwnedSubmissionByHash({ submissionHash, payer } = {}) {
+    const hash = bytes32(submissionHash, "submissionHash");
+    const owner = address(payer, "payer");
+    const submission = [...this.#submissions.values()].find((row) => row.submissionHash === hash);
+    if (!submission) return null;
+    if (submission.payer !== owner) throw new Error("submission is unavailable");
+    return { publicId: submission.publicId, state: publicState(submission.status) };
+  }
+
+  // Private owner-bound resume. It is read-only: it never refreshes a quote,
+  // extends an expiry, or touches a reservation.
+  async getOwnedResume({ publicId, payer } = {}) {
+    const owner = address(payer, "payer");
+    const submission = [...this.#submissions.values()].find((row) => row.publicId === publicId);
+    if (!submission || submission.payer !== owner) return null;
+    const inbox = [...this.#inboxItems.values()].find((row) => row.submissionId === submission.id);
+    const projection = clone(publicSubmissionProjection(submission, inbox));
+    const quote = [...this.#quotes.values()].find((row) => row.submissionId === submission.id);
+    if (!quote || submission.status !== "QUOTED") return projection;
+    // Wall-clock expiry disables payment even before the expiry sweep runs.
+    if (quote.state !== "quoted" || quote.expiresAt <= instant(this.#clock(), "clock")) {
+      return { publicId: submission.publicId, state: "expired", updatedAt: clone(submission.publicStateChangedAt) };
+    }
+    return {
+      ...projection,
+      quote: issuedQuotePayload({
+        domain: { chainId: quote.baseChainId, verifyingContract: quote.splitter },
+        message: buildIssuedQuoteMessage({
+          quoteId: quote.quoteId, payer: quote.payer, voter: quote.voter, attentionAmount: quote.attentionAmount,
+          feeAmount: quote.feeAmount, submissionHash: submission.submissionHash, token: quote.token,
+          expiresAt: quote.expiresAt,
+        }),
+        signature: quote.signature,
+      }),
+    };
+  }
+
   async getSubmission(publicId) {
     const submission = [...this.#submissions.values()].find((row) => row.publicId === publicId);
     if (!submission) return null;
@@ -400,8 +446,9 @@ class MemoryGateStore {
     });
   }
 
-  async issue({ context, snapshot, submission, quote, reservation } = {}) {
+  async issue({ context, snapshot, submission, quote, reservation, signer } = {}) {
     if (!snapshot || !submission || !quote || !reservation) throw new TypeError("complete issuance material is required");
+    assertStoreOwnedQuoteMaterial(quote, reservation);
     if (context?.authPassed !== true || context?.parsePassed !== true) {
       throw new TypeError("authenticated and parsed issuance context is required");
     }
@@ -449,10 +496,10 @@ class MemoryGateStore {
     if (submission.status !== undefined && submission.status !== "QUOTED") throw new TypeError("invalid initial submission state");
     if (quote.state !== undefined && (!QUOTE_STATES.has(quote.state) || quote.state !== "quoted")) throw new TypeError("invalid initial quote state");
     if (reservation.state !== undefined && (!RESERVATION_STATES.has(reservation.state) || reservation.state !== "active")) throw new TypeError("invalid initial reservation state");
-    const expiresAt = instant(quote.expiresAt, "quote expiry");
-    const reservationExpiresAt = instant(reservation.expiresAt, "reservation expiry");
-    if (expiresAt.getTime() !== reservationExpiresAt.getTime()) throw new Error("reservation expiry must equal quote expiry");
     if (reservation.profileId !== submission.profileId) throw new Error("reservation profile must equal submission profile");
+    if (!signer || typeof signer.signQuote !== "function") {
+      throw new TypeError("an injected quote signer is required for issuance");
+    }
 
     return this.#serialized(() => this.#withProfileLock(submission.profileId, async () => {
       const duplicate = [...this.#submissions.values()].find((row) => row.submissionHash === submissionHash);
@@ -460,8 +507,10 @@ class MemoryGateStore {
         if (duplicate.payer !== payer) throw new Error("submission is unavailable");
         return { resumed: true, publicId: duplicate.publicId, state: publicState(duplicate.status) };
       }
+      // The store reads its clock exactly once per issuance and owns the
+      // authoritative expiry; no caller-supplied instant participates.
       const issuanceNow = instant(this.#clock(), "clock");
-      const authoritativeExpiry = assertExactQuoteExpiry(expiresAt, issuanceNow);
+      const authoritativeExpiry = quoteExpiryFrom(issuanceNow);
       const profile = this.#profiles.get(submission.profileId);
       if (!profile) throw new Error("issuance unavailable");
       if (profile.availability !== "accepting_now" || voter !== profile.wallet) throw new Error("issuance unavailable");
@@ -504,6 +553,14 @@ class MemoryGateStore {
       if (this.#quotes.has(quote.id)) throw new Error("duplicate internal quote id");
       if (this.#snapshots.has(snapshot.id)) throw new Error("duplicate snapshot id");
       if (this.#reservations.has(reservation.id)) throw new Error("duplicate reservation id");
+      assertSignerDeploymentBinding(signer, { chainId: deployment.chainId, splitter: deployment.splitter });
+      const quoteMessage = buildIssuedQuoteMessage({
+        quoteId: publicQuoteId, payer: quotePayer, voter, attentionAmount, feeAmount,
+        submissionHash, token, expiresAt: authoritativeExpiry,
+      });
+      // Signing precedes every write, so a signer failure leaves no submission,
+      // snapshot, quote, or reservation behind.
+      const signed = await signIssuedQuote(signer, quoteMessage);
       const publicId = this.#allocatePublicIdUnsafe();
       const now = issuanceNow;
       const normalizedSnapshot = { ...clone(snapshot), dao: normalizedDao, proposalId, contentHash, sourceBlockHash };
@@ -515,6 +572,7 @@ class MemoryGateStore {
         ...clone(quote), quoteId: publicQuoteId, submissionId: submission.id, state: "quoted", reservationState: "reserved",
         payer: quotePayer, voter, attentionAmount, feeAmount, token, splitter,
         baseChainId: deployment.chainId, quoteVersion: 1, expiresAt: authoritativeExpiry,
+        signature: signed.signature,
       };
       const normalizedReservation = {
         ...clone(reservation), quoteId: publicQuoteId, amount: reservationAmount, expiresAt: authoritativeExpiry,
@@ -530,7 +588,7 @@ class MemoryGateStore {
         resumed: false,
         publicId,
         submission: { id: normalizedSubmission.id, publicId, status: normalizedSubmission.status },
-        quote: clone(normalizedQuote),
+        quote: { ...clone(normalizedQuote), ...issuedQuotePayload(signed) },
       };
     }));
   }

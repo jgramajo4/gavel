@@ -2,7 +2,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { Wallet } = require("ethers");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
+const { createQuoteSigner } = require("../src/gate/quote-signer");
 
 const A = `0x${"a".repeat(40)}`;
 const B = `0x${"b".repeat(40)}`;
@@ -15,8 +17,12 @@ function noConnectStore() {
   }});
 }
 
+const SIGNER_KEY = `0x${"7".repeat(64)}`;
+const gateSigner = (splitter = A) => createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter });
+
 function issuanceCommand() {
   return {
+    signer: gateSigner(),
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: A,
       expectedProfileVersion: "1", walletKind: "eoa", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "s", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE",
@@ -26,6 +32,7 @@ function issuanceCommand() {
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
       token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
     reservation: { id: "r", profileId: "p", amount: "1000000" },
+    signer: gateSigner(),
   };
 }
 
@@ -95,13 +102,14 @@ test("Postgres issuance and settlement reject stale or incomplete evidence befor
       mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: `0x${"3".repeat(64)}`, canonicalActions: [] },
     submission: { id: "sub", submissionHash: `0x${"4".repeat(64)}`, profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: `0x${"5".repeat(64)}`, payer: A, voter: A, attentionAmount: "1000000",
-      feeAmount: "250000", token: A, baseChainId: "1", splitter: A, quoteVersion: 1, expiresAt: future },
-    reservation: { id: "r", profileId: "p", amount: "1000000", expiresAt: future },
+      feeAmount: "250000", token: A, baseChainId: "1", splitter: A, quoteVersion: 1 },
+    reservation: { id: "r", profileId: "p", amount: "1000000" },
   };
-  const payerKindUnknown = structuredClone(command);
+  const signer = gateSigner();
+  const payerKindUnknown = { ...structuredClone(command), signer };
   delete payerKindUnknown.context.payerIsEoa;
   await assert.rejects(store.issue(payerKindUnknown), /payer.*EOA/i);
-  const senderUnknown = structuredClone(command);
+  const senderUnknown = { ...structuredClone(command), signer };
   delete senderUnknown.context.authenticatedSender;
   await assert.rejects(store.issue(senderUnknown), /authenticatedSender/i);
   await assert.rejects(store.settle({
@@ -177,44 +185,104 @@ test("issuance uses independent DAO/Base chains, exact database-clock lifetime, 
     release() { calls.push({ sql: "RELEASE" }); },
   };
   const signerCalls = [];
+  const { Wallet } = require("ethers");
+  const signingWallet = new Wallet(`0x${"7".repeat(64)}`);
+  const signer = Object.freeze({
+    address: signingWallet.address,
+    domain: { name: "GavelGateSplitter", version: "1", chainId: 8453, verifyingContract: A },
+    async signQuote(message) {
+      signerCalls.push(structuredClone(message));
+      calls.push({ sql: "SIGN" });
+      const { createQuoteTypedData } = require("@gavel/gate");
+      const typed = createQuoteTypedData(message, { chainId: 8453, verifyingContract: A });
+      return signingWallet.signTypedData(typed.domain, typed.types, typed.message);
+    },
+  });
   const store = new PostgresGateStore({
     pool: { connect: async () => client },
     baseCodeReader: async ({ wallet, chainId }) => { calls.push({ sql: "ETH_GET_CODE", wallet, chainId }); return code; },
-    quoteSigner: async (unsigned) => { signerCalls.push(structuredClone(unsigned)); calls.push({ sql: "SIGN" }); return "0xsigned"; },
   });
   const command = {
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: B, expectedProfileVersion: "7", walletKind: "contract", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "snap", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: B, signedSender: B, material: {} },
-    quote: { id: "q", quoteId: H("5"), payer: B, voter: A, attentionAmount: "1000000", feeAmount: "250000", token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1, expiresAt: callerExpiry },
-    reservation: { id: "r", profileId: "p", amount: "1000000", expiresAt: callerExpiry },
+    quote: { id: "q", quoteId: H("5"), payer: B, voter: A, attentionAmount: "1000000", feeAmount: "250000", token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
+    reservation: { id: "r", profileId: "p", amount: "1000000" },
   };
-  const issued = await store.issue(command);
-  assert.equal(issued.quote.signature, "0xsigned");
+  const issued = await store.issue({ ...command, signer });
   assert.equal(issued.quote.expiresAt.valueOf(), trustedExpiry.valueOf());
   assert.equal(signerCalls.length, 1);
-  assert.equal(signerCalls[0].expiry, Math.floor(trustedExpiry.valueOf() / 1000));
+  assert.equal(signerCalls[0].expiry, String(Math.floor(trustedExpiry.valueOf() / 1000)));
+  assert.equal(signerCalls[0].submissionHash, H("4"));
   assert.equal(Object.hasOwn(signerCalls[0], "signature"), false);
-  assert.equal(calls.find((x) => /INSERT INTO gate\.quotes/.test(x.sql)).values.at(-1).valueOf(), trustedExpiry.valueOf());
+  assert.deepEqual(issued.quote.message, signerCalls[0]);
+  const quoteInsert = calls.find((x) => /INSERT INTO gate\.quotes/.test(x.sql));
+  assert.equal(quoteInsert.values.at(-1), issued.quote.signature);
+  assert.equal(quoteInsert.values.at(-2).valueOf(), trustedExpiry.valueOf());
   assert.equal(calls.find((x) => /INSERT INTO gate\.capacity_reservations/.test(x.sql)).values.at(-1).valueOf(), trustedExpiry.valueOf());
   assert.ok(calls.findIndex((x) => /pg_advisory_xact_lock/.test(x.sql)) < calls.findIndex((x) => x.sql === "ETH_GET_CODE"));
-  assert.ok(calls.findIndex((x) => /INSERT INTO gate\.capacity_reservations/.test(x.sql)) < calls.findIndex((x) => x.sql === "SIGN"));
-  assert.ok(calls.findIndex((x) => x.sql === "SIGN") < calls.findIndex((x) => /UPDATE gate\.quotes SET quote_signature/.test(x.sql)));
+  // Signing happens before either row is written, and the signature is part of
+  // the quote INSERT rather than a later UPDATE.
+  assert.ok(calls.findIndex((x) => x.sql === "SIGN") < calls.findIndex((x) => /INSERT INTO gate\.quotes/.test(x.sql)));
+  assert.ok(calls.findIndex((x) => /INSERT INTO gate\.quotes/.test(x.sql))
+    < calls.findIndex((x) => /INSERT INTO gate\.capacity_reservations/.test(x.sql)));
+  assert.equal(calls.some((x) => /UPDATE gate\.quotes SET quote_signature/.test(x.sql)), false);
 
-  const unsignedStore = new PostgresGateStore({
-    pool: { connect: async () => client },
-    baseCodeReader: async () => code,
-  });
-  const callerSigned = structuredClone(command);
+  await assert.rejects(store.issue(structuredClone(command)), /signer/i);
+  const callerSigned = { ...structuredClone(command), signer };
   callerSigned.quote.signature = "0xcaller-supplied";
-  await assert.rejects(unsignedStore.issue(callerSigned), /quote signer unavailable/i);
+  await assert.rejects(store.issue(callerSigned), /store owns signing/i);
+  const callerExpired = { ...structuredClone(command), signer };
+  callerExpired.quote.expiresAt = callerExpiry;
+  await assert.rejects(store.issue(callerExpired), /store owns issuance time/i);
 
-  const preVote = structuredClone(command); preVote.context.stage = "PRE_VOTE";
+  const preVote = { ...structuredClone(command), signer }; preVote.context.stage = "PRE_VOTE";
   await assert.rejects(store.issue(preVote), /Nouns.*VOTING/i);
-  const ethereumSettlement = structuredClone(command); ethereumSettlement.quote.baseChainId = "1";
+  const ethereumSettlement = { ...structuredClone(command), signer }; ethereumSettlement.quote.baseChainId = "1";
   await assert.rejects(store.issue(ethereumSettlement), /Base 8453/i);
-  const contractPayer = structuredClone(command); contractPayer.context.payerIsEoa = false;
+  const contractPayer = { ...structuredClone(command), signer }; contractPayer.context.payerIsEoa = false;
   await assert.rejects(store.issue(contractPayer), /payer.*EOA/i);
+});
+
+test("owner-bound hash lookup and resume disclose nothing to a non-owner and refresh nothing", async () => {
+  const expiresAt = new Date("2026-01-01T00:10:00.000Z");
+  const rows = {
+    hash: [{ publicId: "PPPPPPPPPPPPPPPPPPPPPP", status: "QUOTED", payer: A }],
+    resume: [{
+      publicId: "PPPPPPPPPPPPPPPPPPPPPP", status: "QUOTED", payer: A, submissionHash: H("4"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"), inboxCreatedAt: null, quoteId: H("5"), voter: B,
+      attentionAmount: "1000000", feeAmount: "250000", token: A, baseChainId: "8453", splitter: A,
+      expiresAt, signature: "0xsigned", quoteState: "quoted", now: new Date("2026-01-01T00:05:00.000Z"),
+    }],
+  };
+  const statements = [];
+  const store = new PostgresGateStore({ pool: { async query(sql, values) {
+    const text = String(sql);
+    statements.push(text);
+    if (/FROM gate\.submissions WHERE submission_hash/.test(text)) return { rows: rows.hash };
+    return { rows: rows.resume };
+  } } });
+
+  assert.deepEqual(await store.getOwnedSubmissionByHash({ submissionHash: H("4"), payer: A }),
+    { publicId: "PPPPPPPPPPPPPPPPPPPPPP", state: "payment_required" });
+  await assert.rejects(store.getOwnedSubmissionByHash({ submissionHash: H("4"), payer: B }), /unavailable/i);
+  rows.hash = [];
+  assert.equal(await store.getOwnedSubmissionByHash({ submissionHash: H("4"), payer: A }), null);
+
+  const resumed = await store.getOwnedResume({ publicId: "PPPPPPPPPPPPPPPPPPPPPP", payer: A });
+  assert.equal(resumed.state, "payment_required");
+  assert.equal(resumed.quote.signature, "0xsigned");
+  assert.equal(resumed.quote.message.expiry, String(expiresAt.valueOf() / 1000));
+  assert.equal(resumed.quote.totalAmount, "1250000");
+  assert.equal(await store.getOwnedResume({ publicId: "PPPPPPPPPPPPPPPPPPPPPP", payer: B }), null);
+
+  // Past its expiry the same row resumes to a coarse expired state, and every
+  // statement issued was a read.
+  rows.resume[0].now = new Date("2026-01-01T00:10:00.000Z");
+  const expired = await store.getOwnedResume({ publicId: "PPPPPPPPPPPPPPPPPPPPPP", payer: A });
+  assert.equal(expired.state, "expired");
+  assert.equal(Object.hasOwn(expired, "quote"), false);
+  assert.equal(statements.every((text) => /^\s*SELECT/i.test(text)), true);
 });
 
 test("settlement accepts exactly the frozen eight event fields and notification starts pending", async () => {
@@ -252,8 +320,9 @@ test("issuance and inbox lifecycles enforce canonical ACTIVE to VOTING and exact
       mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
-      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
-    reservation: { id: "r", profileId: "p", amount: "1000000", expiresAt: future },
+      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1 },
+    reservation: { id: "r", profileId: "p", amount: "1000000" },
+    signer: gateSigner(),
   };
   for (const patch of [{ nativeState: "1" }, { nativeState: 1 }, { nativeState: "SUCCEEDED" }, { eligibility: "CLOSED" }]) {
     await assert.rejects(issuanceStore.issue({ ...issuance, snapshot: { ...issuance.snapshot, ...patch } }), /ACTIVE.*VOTING/i);
@@ -289,8 +358,9 @@ test("duplicates resume with the exact public state and pending settlement is a 
       mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
-      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
-    reservation: { id: "r", profileId: "p", amount: "1000000", expiresAt: future },
+      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1 },
+    reservation: { id: "r", profileId: "p", amount: "1000000" },
+    signer: gateSigner(),
   });
   assert.deepEqual(resumed, { resumed: true, publicId: "opaque", state: "payment_required" });
 
@@ -305,8 +375,9 @@ test("duplicates resume with the exact public state and pending settlement is a 
       mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub2", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q2", quoteId: H("6"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
-      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
-    reservation: { id: "r2", profileId: "p", amount: "1000000", expiresAt: future },
+      token: A, baseChainId: "8453", splitter: A, quoteVersion: 1 },
+    reservation: { id: "r2", profileId: "p", amount: "1000000" },
+    signer: gateSigner(),
   }), { resumed: true, publicId: "opaque", state: "pending_settlement" });
 
   const calls = [];
