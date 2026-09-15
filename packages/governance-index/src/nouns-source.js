@@ -8,12 +8,12 @@ const PROPOSAL_FIELDS = `id title description status proposer { id } targets val
 const VOTE_FIELDS = `id supportDetailed votesRaw reason blockNumber blockTimestamp transactionHash clientId voter { id } proposal { ${PROPOSAL_FIELDS} }`;
 const SNAPSHOT = `query { _meta { block { number } } }`;
 const PAGE = `query Votes($first:Int!,$after:ID!,$from:BigInt!,$to:BigInt!,$snapshot:Int!){votes(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after,blockNumber_gte:$from,blockNumber_lte:$to}){${VOTE_FIELDS}}}`;
-const PROPOSALS_PAGE = `query Proposals($first:Int!,$after:ID!,$snapshot:Int!){proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after}){${PROPOSAL_FIELDS}}}`;
+const PROPOSALS_PAGE = `query Proposals($first:Int!,$after:ID!,$snapshot:Int!){_meta(block:{number:$snapshot}){block{number hash}} proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after}){${PROPOSAL_FIELDS}}}`;
 // Discovery restricted to proposals created in the synced range, and a targeted
 // refresh for proposals whose state can still change. Together these replace the
 // full re-enumeration on every cycle.
-const NEW_PROPOSALS_PAGE = `query NewProposals($first:Int!,$after:ID!,$from:BigInt!,$snapshot:Int!){proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after,createdBlock_gte:$from}){${PROPOSAL_FIELDS}}}`;
-const REFRESH_PROPOSALS = `query RefreshProposals($ids:[ID!]!,$snapshot:Int!){proposals(first:1000,where:{id_in:$ids},block:{number:$snapshot}){${PROPOSAL_FIELDS}}}`;
+const NEW_PROPOSALS_PAGE = `query NewProposals($first:Int!,$after:ID!,$from:BigInt!,$snapshot:Int!){_meta(block:{number:$snapshot}){block{number hash}} proposals(first:$first,orderBy:id,orderDirection:asc,block:{number:$snapshot},where:{id_gt:$after,createdBlock_gte:$from}){${PROPOSAL_FIELDS}}}`;
+const REFRESH_PROPOSALS = `query RefreshProposals($ids:[ID!]!,$snapshot:Int!){_meta(block:{number:$snapshot}){block{number hash}} proposals(first:1000,where:{id_in:$ids},block:{number:$snapshot}){${PROPOSAL_FIELDS}}}`;
 
 class NounsSubgraphSource {
   constructor(options = {}) {
@@ -38,25 +38,38 @@ class NounsSubgraphSource {
     }
     throw error;
   }
-  async head() { const data = await this.request(SNAPSHOT); const head = Number(data?._meta?.block?.number); if (!Number.isSafeInteger(head)) throw new Error("Nouns subgraph returned no safe head"); return Math.max(0, head - this.finalityDepth); }
-  async page(query, field, fromBlock, toBlock, snapshot) {
+  async head() {
+    const data = await this.request(SNAPSHOT); const head = Number(data?._meta?.block?.number);
+    if (!Number.isSafeInteger(head)) throw new Error("Nouns subgraph returned no safe head");
+    return Math.max(0, head - this.finalityDepth);
+  }
+  observeSnapshot(data, snapshot, provenance) {
+    const meta = data?._meta?.block;
+    const hash = typeof meta?.hash === "string" && /^0x[0-9a-fA-F]{64}$/.test(meta.hash) ? meta.hash.toLowerCase() : null;
+    if (!Number.isSafeInteger(meta?.number) || meta.number !== Number(snapshot) || !hash) throw new Error(`Nouns ${snapshot} snapshot metadata missing or mismatched`);
+    if (provenance.hash && provenance.hash !== hash) throw new Error(`Nouns ${snapshot} snapshot hash changed during pagination`);
+    provenance.hash = hash;
+  }
+  async page(query, field, fromBlock, toBlock, snapshot, provenance) {
     const rows = []; let after = "";
     while (true) {
       const data = await this.request(query, { first: this.pageSize, after, from: String(fromBlock), to: String(toBlock), snapshot: Number(snapshot) });
+      if (provenance) this.observeSnapshot(data, snapshot, provenance);
       const page = data?.[field]; if (!Array.isArray(page)) throw new Error(`Nouns subgraph response missing ${field} array`);
       rows.push(...page); if (page.length < this.pageSize) return rows;
       const next = String(page.at(-1).id); if (next <= after) throw new Error(`Nouns ${field} pagination did not advance`); after = next;
     }
   }
   async fetchRange(fromBlock, toBlock, snapshot = toBlock) { return this.page(PAGE, "votes", fromBlock, toBlock, snapshot); }
-  async incrementalProposals(fromBlock, snapshot, context) {
-    const rows = await this.page(NEW_PROPOSALS_PAGE, "proposals", fromBlock, snapshot, snapshot);
+  async incrementalProposals(fromBlock, snapshot, context, provenance) {
+    const rows = await this.page(NEW_PROPOSALS_PAGE, "proposals", fromBlock, snapshot, snapshot, provenance);
     const discovered = new Set(rows.map((row) => String(row.id)));
     const refreshIds = (context.refreshProposals || [])
       .filter((row) => !discovered.has(String(row.proposalId)) && !isTerminalRow(row))
       .map((row) => String(row.proposalId));
     for (let index = 0; index < refreshIds.length; index += 100) {
       const data = await this.request(REFRESH_PROPOSALS, { ids: refreshIds.slice(index, index + 100), snapshot: Number(snapshot) });
+      this.observeSnapshot(data, snapshot, provenance);
       const page = data?.proposals;
       if (!Array.isArray(page)) throw new Error("Nouns subgraph response missing proposals array");
       rows.push(...page);
@@ -65,14 +78,16 @@ class NounsSubgraphSource {
   }
 
   async fetchProposals(fromBlock, toBlock, snapshot = toBlock, context = {}) {
+    const provenance = { hash: null };
     const rows = context.full
-      ? await this.page(PROPOSALS_PAGE, "proposals", 0, snapshot, snapshot)
-      : await this.incrementalProposals(fromBlock, snapshot, context);
+      ? await this.page(PROPOSALS_PAGE, "proposals", 0, snapshot, snapshot, provenance)
+      : await this.incrementalProposals(fromBlock, snapshot, context, provenance);
+    const blockHash = provenance.hash;
     return rows.map((proposal) => {
       const normalized = { ...normalizeProposal(proposal, { endpoint: this.endpoint, queriedAt: new Date().toISOString(), subgraphBlock: String(snapshot) }), dao: "nouns", chainId: 1, venue: "governor", timing: "block" };
       const payload = { id: proposal.id, title: proposal.title, description: proposal.description, proposer: proposal.proposer, targets: proposal.targets, values: proposal.values, signatures: proposal.signatures, calldatas: proposal.calldatas, createdTimestamp: proposal.createdTimestamp, createdBlock: proposal.createdBlock, startBlock: proposal.startBlock, endBlock: proposal.endBlock };
       return {
-        raw: { daoId: "nouns", sourceId: this.id, sourceRecordKey: `proposal:${proposal.id}`, externalId: String(proposal.id), chainId: 1, contractAddress: this.config.contractAddress, transactionHash: null, logIndex: null, blockNumber: String(proposal.createdBlock), blockHash: null, recordType: "proposal", proposalId: normalized.id, contentHash: normalized.contentHash, payload, sourceKind: "nouns-subgraph", sourceEndpoint: this.endpoint, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(snapshot) },
+        raw: { daoId: "nouns", sourceId: this.id, sourceRecordKey: `proposal:${proposal.id}`, externalId: String(proposal.id), chainId: 1, contractAddress: this.config.contractAddress, transactionHash: null, logIndex: null, blockNumber: String(snapshot), blockHash, recordType: "proposal", proposalId: normalized.id, contentHash: normalized.contentHash, payload, sourceKind: "nouns-subgraph", sourceEndpoint: this.endpoint, sourcePublicEndpoint: this.publicEndpoint, observedHead: String(snapshot) },
         proposal: { daoId: "nouns", proposalId: normalized.id, contentHash: normalized.contentHash, normalized, actions: normalized.actions },
       };
     });

@@ -40,6 +40,8 @@ first read-only migration slice from the former standalone TUI.
 See [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md)
 for the pre-change audit and staged migration map.
 
+The experimental Gavel Gate MVP contract is documented in [`docs/GAVEL_GATE_TECHNICAL_SPEC.md`](docs/GAVEL_GATE_TECHNICAL_SPEC.md); this pointer is not a mainnet-readiness claim.
+
 ## Public website
 
 The static Gavel landing page lives in [`website/`](website/). See its

@@ -151,14 +151,16 @@ test("Nouns raw vote canonical payload excludes mutable embedded proposal state"
 test("Nouns pages are pinned and proposals without votes are enumerated", async () => {
   const proposal = { id: "7", title: "No votes", description: "body", status: "ACTIVE", proposer: { id: OTHER }, targets: [], values: [], signatures: [], calldatas: [], createdTimestamp: "1700000000", createdBlock: "100", startBlock: "101", endBlock: "200", quorumVotes: "1", forVotes: "0", againstVotes: "0", abstainVotes: "0" };
   const requests = [];
-  const source = new NounsSubgraphSource({ finalityDepth: 5, replayBlocks: 8, pageSize: 1, fetch: async (_url, init) => { const body = JSON.parse(init.body); requests.push(body); if (body.query.includes("_meta")) return { ok: true, async json(){ return { data: { _meta: { block: { number: 205 } } } }; } }; if (body.query.includes("proposals(")) return { ok: true, async json(){ return { data: { proposals: body.variables.after === "" ? [proposal] : [] } }; } }; return { ok: true, async json(){ return { data: { votes: [] } }; } }; } });
+  const source = new NounsSubgraphSource({ finalityDepth: 5, replayBlocks: 8, pageSize: 1, fetch: async (_url, init) => { const body = JSON.parse(init.body); requests.push(body); if (body.query.includes("proposals(")) return { ok: true, async json(){ return { data: { _meta: { block: { number: 200, hash: TX2 } }, proposals: body.variables.after === "" ? [proposal] : [] } }; } }; if (body.query.includes("_meta")) return { ok: true, async json(){ return { data: { _meta: { block: { number: 205 } } } }; } }; return { ok: true, async json(){ return { data: { votes: [] } }; } }; } });
   assert.equal(await source.head(), 200);
   const proposals = await source.fetchProposals(90, 110, 200);
   assert.equal(proposals[0].proposal.normalized.id, "7");
   assert.equal(proposals[0].raw.sourceRecordKey, "proposal:7");
   assert.equal(proposals[0].raw.transactionHash, null);
   assert.equal(proposals[0].raw.logIndex, null);
-  assert.equal(proposals[0].raw.blockNumber, "100");
+  assert.equal(proposals[0].raw.blockNumber, "200");
+  assert.equal(proposals[0].raw.blockHash, TX2);
+  assert.equal(proposals[0].raw.payload.createdBlock, "100");
   assert.equal(proposals[0].raw.recordType, "proposal");
   assert.equal(requests.at(-2).variables.snapshot, 200);
   assert.equal(requests.at(-2).variables.after, "");
@@ -463,7 +465,7 @@ test("source records preserve an explicit safe public provenance path", async ()
   const store = new MemoryGovernanceStore();
   const source = new NounsSubgraphSource({ endpoint: "https://private.example/v2/SECRET", sourcePublicEndpoint: "https://docs.example/governance" });
   const proposal = { id: "7", title: "x", description: "body", status: "ACTIVE", proposer: { id: OTHER }, targets: [], values: [], signatures: [], calldatas: [], createdTimestamp: "1700000000", createdBlock: "100", startBlock: "101", endBlock: "200", quorumVotes: "1", forVotes: "0", againstVotes: "0", abstainVotes: "0" };
-  source.fetch = async () => ({ ok: true, async json(){ return { data: { proposals: [proposal] } }; } });
+  source.fetch = async (_url, init) => ({ ok: true, async json(){ const { variables } = JSON.parse(init.body); return { data: { _meta: { block: { number: variables.snapshot, hash: TX2 } }, proposals: [proposal] } }; } });
   source.pageSize = 100;
   const [record] = await source.fetchProposals(1, 200, 200);
   await store.transaction(async (tx) => tx.ingest(record));
@@ -553,7 +555,7 @@ test("redaction strips compound credential fields and non-HTTP connection URIs",
 
 test("Nouns source fails closed on malformed GraphQL page data", async () => {
   const source = new NounsSubgraphSource({ endpoint: "https://example.test/subgraph" });
-  source.request = async () => ({ unexpected: [] });
+  source.request = async (_query, variables) => ({ _meta: { block: { number: variables.snapshot, hash: TX2 } }, unexpected: [] });
   await assert.rejects(source.fetchProposals(1, 2, 2), /missing proposals array/i);
   await assert.rejects(source.fetchRange(1, 2, 2), /missing votes array/i);
 });

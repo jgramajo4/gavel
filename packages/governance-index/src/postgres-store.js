@@ -10,7 +10,7 @@ const {
   encodeProposalCursor,
 } = require("./memory-store");
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
-const { APPLICATION_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
+const { PROVISIONED_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
 
 const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
@@ -180,7 +180,26 @@ class PostgresTransaction {
 
   async ingest(record) {
     const raw = rawRow(record);
-    const result = await this.client.query(`
+    let result;
+    if (raw.recordType === "proposal" && raw.sourceRecordKey) {
+      const existing = (await this.client.query(`
+        SELECT block_number AS "blockNumber",block_hash AS "blockHash",record_type AS "recordType",
+          proposal_id::text AS "proposalId",content_hash AS "contentHash",payload
+        FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+      `, [raw.daoId, raw.sourceId, raw.sourceRecordKey])).rows[0];
+      if (existing) {
+        if (!isDeepStrictEqual(immutableEventMaterial(existing), immutableEventMaterial(raw))) {
+          throw new Error(`canonical event drift for ${eventKey(raw)}`);
+        }
+        await this.client.query(`
+          UPDATE raw_governance_records
+          SET block_hash=$4,observed_head=$5,ingested_at=now()
+          WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+        `, [raw.daoId, raw.sourceId, raw.sourceRecordKey, raw.blockHash, raw.observedHead]);
+        result = { rowCount: 0 };
+      }
+    }
+    if (!result) result = await this.client.query(`
       INSERT INTO raw_governance_records(
         dao_id,source_id,source_record_key,external_id,chain_id,contract_address,transaction_hash,log_index,
         block_number,block_hash,record_type,proposal_id,content_hash,payload,source_kind,
@@ -318,7 +337,7 @@ class PostgresTransaction {
     `, [daoId, sourceId]);
     for (const row of selected.rows) {
       const next = incoming.get(eventKey(row));
-      if (next && !isDeepStrictEqual(canonicalMaterial(row), canonicalMaterial(next))) throw new Error(`canonical event drift for ${eventKey(row)}`);
+      if (next && !isDeepStrictEqual(immutableEventMaterial(row), immutableEventMaterial(next))) throw new Error(`canonical event drift for ${eventKey(row)}`);
     }
     for (const row of selected.rows.filter((candidate) => !incoming.has(eventKey(candidate)))) {
       await this.client.query("DELETE FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3", [daoId, sourceId, row.sourceRecordKey]);
@@ -332,6 +351,7 @@ class PostgresTransaction {
 
 class PostgresGovernanceStore {
   constructor(options = {}) {
+    this.votingPowerReader = options.votingPowerReader;
     if (options.pool) {
       this.pool = options.pool;
       return;
@@ -363,11 +383,11 @@ class PostgresGovernanceStore {
     // what creates them without destroying data.
     const ensured = options.ensureRoles === false
       ? { state: "present", created: [], missing: [] }
-      : await ensureRoles(this.pool, options);
-    const roles = await presentRoles(this.pool);
-    const missingRoles = APPLICATION_ROLES.filter((role) => !roles.includes(role));
+      : await ensureRoles(this.pool, { ...options, roles: PROVISIONED_ROLES });
+    const roles = await presentRoles(this.pool, PROVISIONED_ROLES);
+    const missingRoles = PROVISIONED_ROLES.filter((role) => !roles.includes(role));
 
-    if (missingRoles.length) {
+    if (missingRoles.length || ensured.state === "skipped") {
       // Never fail silently: an ungranted API role is a deployment fault, not a
       // detail. `verify-permissions` is the gate that must pass before serving.
       return {
@@ -385,6 +405,12 @@ class PostgresGovernanceStore {
     await this.pool.query(await fs.readFile(path.join(dir, "002_roles.sql"), "utf8"));
     versions.push("002_roles");
 
+    // The root image copies all packages, so the sibling Gate migration is
+    // available to this migrate command. Roles are reconciled first; the Gate
+    // version is reported only after the effective cross-schema audit passes.
+    const gateMigration = path.join(__dirname, "..", "..", "server", "migrations", "001_gate.sql");
+    await this.pool.query(await fs.readFile(gateMigration, "utf8"));
+
     // The grants ran without error, which is not the same as the roles now
     // being correct. Prove it by exercising them.
     const audit = await auditRoles(this.pool);
@@ -400,6 +426,7 @@ class PostgresGovernanceStore {
         warning: "Role grants were applied but the resulting privileges are wrong. Do not serve traffic until `gavel-indexer verify-permissions --role gavel_api` passes.",
       };
     }
+    versions.push("gate/001_gate-v3");
     const unproven = Object.entries(audit.summary).filter(([, row]) => row.method !== "effective").map(([role]) => role);
     return {
       ok: true,
@@ -417,13 +444,13 @@ class PostgresGovernanceStore {
   // Creates any missing application role without touching indexed data, so a
   // redeploy onto an existing PostgreSQL volume does not require wiping it.
   async ensureRoles(options = {}) {
-    return ensureRoles(this.pool, options);
+    return ensureRoles(this.pool, { ...options, roles: PROVISIONED_ROLES });
   }
 
-  // Which application roles the database currently has.
+  // Which provisioned runtime roles the database currently has.
   async rolesStatus() {
     const present = await presentRoles(this.pool);
-    return { present, missing: APPLICATION_ROLES.filter((role) => !present.includes(role)) };
+    return { present, missing: PROVISIONED_ROLES.filter((role) => !present.includes(role)) };
   }
 
   // Proves what the role can and cannot do by acting as it, rather than by
@@ -518,11 +545,62 @@ class PostgresGovernanceStore {
     `, [id])).rows[0] || null;
   }
 
+  async getHealth(daoId) {
+    if (typeof daoId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(daoId)) throw new TypeError("invalid DAO id");
+    const row = (await this.pool.query(`
+      SELECT count(s.id) > 0 AND count(c.source_id) = count(s.id)
+          AND bool_and(c.last_error IS NULL) AS healthy,
+        min(c.updated_at) AS "refreshedAt",
+        CASE WHEN bool_or(c.last_error IS NOT NULL) THEN 'sync_failed' ELSE NULL END AS "lastError"
+      FROM governance_sources s
+      LEFT JOIN sync_checkpoints c ON c.dao_id=s.dao_id AND c.source_id=s.id
+      WHERE s.dao_id=$1
+    `, [daoId])).rows[0];
+    return {
+      healthy: row?.healthy === true,
+      refreshedAt: row?.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row?.refreshedAt ?? null,
+      lastError: row?.lastError ?? null,
+    };
+  }
+
+  async getVotingPower(daoId, wallet, options = {}) {
+    if (daoId !== "nouns") throw new TypeError("voting power is only available for nouns");
+    if (typeof wallet !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new TypeError("invalid wallet");
+    if (typeof this.votingPowerReader !== "function") throw new Error("canonical voting power reader is not configured");
+    return this.votingPowerReader({ dao: daoId, wallet: wallet.toLowerCase() }, options);
+  }
+
   async getProposal(daoId, id) {
-    return (await this.pool.query(
-      "SELECT normalized FROM proposals WHERE dao_id=$1 AND proposal_id=$2",
-      [daoId, id],
-    )).rows[0]?.normalized || null;
+    const row = (await this.pool.query(`
+      SELECT p.dao_id AS dao,p.proposal_id::text AS "proposalId",p.normalized,
+        p.effective_status AS "effectiveStatus",p.tracking_state AS "trackingState",
+        provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
+        provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'actionIndex',a.action_index,'target',a.target,'valueWei',a.value_wei::text,'signature',a.signature,'calldata',a.calldata
+          ) ORDER BY a.action_index)
+          FROM proposal_actions a WHERE a.dao_id=p.dao_id AND a.proposal_id=p.proposal_id
+        ),'[]'::jsonb) AS actions
+      FROM proposals p
+      LEFT JOIN LATERAL (
+        SELECT r.observed_head AS block_number,r.block_hash,r.ingested_at FROM raw_governance_records r
+        WHERE r.dao_id=p.dao_id AND r.proposal_id=p.proposal_id
+          AND r.record_type='proposal' AND r.content_hash=p.content_hash AND r.block_hash IS NOT NULL
+        ORDER BY r.observed_head DESC,r.id DESC LIMIT 1
+      ) provenance ON true
+      WHERE p.dao_id=$1 AND p.proposal_id=$2
+    `, [daoId, id])).rows[0];
+    if (!row) return null;
+    const contentHash = typeof row.contentHash === "string" && row.contentHash.startsWith("0x")
+      ? row.contentHash : `0x${row.contentHash}`;
+    return {
+      ...row,
+      nativeState: row.effectiveStatus,
+      sourceState: row.normalized?.sourceState ?? row.normalized?.state,
+      refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
+      contentHash,
+    };
   }
 
   async listProposals({ daoId, limit, cursor }) {
