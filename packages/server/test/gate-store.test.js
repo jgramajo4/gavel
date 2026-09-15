@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
+const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
 
 function makeIssuance(suffix = "1", overrides = {}) {
@@ -96,10 +97,9 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
   const store = new PostgresGateStore({
     pool: { connect: async () => client },
     baseCodeReader: async () => "0x6000",
-    quoteSigner: async () => "0xsigned",
   });
-  const future = new Date(Date.now() + 60_000);
   await assert.rejects(store.issue({
+    signer: createQuoteSigner({ signer: `0x${"7".repeat(64)}`, chainId: 8453, splitter: `0x${"a".repeat(40)}` }),
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: `0x${"b".repeat(40)}`,
       expectedProfileVersion: "1", walletKind: "eoa", basePayoutCodeHash: null,
       stage: "VOTING", deploymentCodeHash: `0x${"1".repeat(64)}` },
@@ -110,8 +110,8 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
       payer: `0x${"b".repeat(40)}`, signedSender: `0x${"b".repeat(40)}`, material: {} },
     quote: { id: "quote-pg", quoteId: `0x${"5".repeat(64)}`, payer: `0x${"b".repeat(40)}`, voter: `0x${"a".repeat(40)}`,
       attentionAmount: "1000000", feeAmount: "250000", token: `0x${"a".repeat(40)}`, baseChainId: "8453",
-      splitter: `0x${"a".repeat(40)}`, deploymentId: "deployment-1", quoteVersion: 1, expiresAt: future, signature: "private" },
-    reservation: { id: "reservation-pg", profileId: "profile-1", amount: "1000000", expiresAt: future },
+      splitter: `0x${"a".repeat(40)}`, deploymentId: "deployment-1", quoteVersion: 1 },
+    reservation: { id: "reservation-pg", profileId: "profile-1", amount: "1000000" },
   }), /injected insert failure/);
   assert.equal(calls[0].sql, "BEGIN");
   const lock = calls.find((call) => /pg_advisory_xact_lock/.test(call.sql));

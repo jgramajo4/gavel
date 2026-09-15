@@ -50,7 +50,7 @@ function post(payload, token = TOKEN_VALUE) {
 }
 
 async function harness(options = {}) {
-  const state = { now: new Date(START), healthy: true };
+  const state = { now: new Date(START), healthy: true, sessionWallet: PAYER.toLowerCase() };
   const clock = () => new Date(state.now);
   const store = new MemoryGateStore({ clock });
   await store.mutateProfile({
@@ -93,7 +93,7 @@ async function harness(options = {}) {
       if (token !== TOKEN_VALUE) throw new Error("session unavailable");
       const role = options.role ?? "base_sender";
       if (requirements.role !== undefined && requirements.role !== role) throw new Error("session unavailable");
-      return { wallet: PAYER.toLowerCase(), role, chainId: "8453", audience: "gate", expiry: "9999999999" };
+      return { wallet: state.sessionWallet, role, chainId: "8453", audience: "gate", expiry: "9999999999" };
     },
   };
   const profileService = {
@@ -278,5 +278,98 @@ test("a Gate server configured without a submission service serves no quote rout
   await withServer(gate.server, async (baseUrl) => {
     assert.equal((await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()))).status, 404);
     assert.equal((await requestJson(baseUrl, "/v1/submissions/AAAAAAAAAAAAAAAAAAAAAA/status")).status, 404);
+  });
+});
+
+// --- G5-2: GET /v1/submissions/:publicId/resume ------------------------------
+
+function get(path, baseUrl, token = TOKEN_VALUE) {
+  return requestJson(baseUrl, path, {
+    method: "GET",
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+}
+
+test("resume returns the original quote to the owning base_sender session", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    const { publicId } = created.body;
+
+    const resumed = await get(`/v1/submissions/${publicId}/resume`, baseUrl);
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.headers.get("cache-control"), "no-store");
+    assert.equal(resumed.headers.get("referrer-policy"), "no-referrer");
+    assert.deepEqual(resumed.body, {
+      publicId,
+      state: "payment_required",
+      updatedAt: START.toISOString(),
+      quote: created.body.quote,
+    });
+
+    const typed = createQuoteTypedData(buildQuoteMessage(resumed.body.quote.message), resumed.body.quote.domain);
+    assert.equal(verifyQuoteSignature(typed, resumed.body.quote.signature, SIGNER_ADDRESS), true);
+  });
+});
+
+test("resume requires an owning session and never accepts a payer from the URL", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    const { publicId } = created.body;
+
+    assert.equal((await get(`/v1/submissions/${publicId}/resume`, baseUrl, null)).status, 401);
+    assert.equal((await get(`/v1/submissions/${publicId}/resume`, baseUrl, "wrong")).status, 401);
+
+    // A payer supplied in the query string is ignored: identity comes only from
+    // the authenticated session.
+    const spoofed = await get(`/v1/submissions/${publicId}/resume?payer=${PAYER}`, baseUrl);
+    assert.equal(spoofed.status, 200);
+    assert.deepEqual(spoofed.body.quote, created.body.quote);
+
+    assert.equal((await get("/v1/submissions/AAAAAAAAAAAAAAAAAAAAAA/resume", baseUrl)).status, 404);
+    assert.equal((await get("/v1/submissions/not-a-public-id/resume", baseUrl)).status, 404);
+  });
+});
+
+test("a non-owning wallet gets no existence or private detail from resume", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    gate.state.sessionWallet = "0x9999999999999999999999999999999999999999";
+
+    const foreign = await get(`/v1/submissions/${created.body.publicId}/resume`, baseUrl);
+    assert.equal(foreign.status, 404);
+    assert.deepEqual(foreign.body, { error: { code: "NOT_FOUND", message: "Not found" } });
+    assert.equal(JSON.stringify(foreign.body).includes(created.body.quote.signature), false);
+  });
+});
+
+test("an expired quote resumes to a coarse expired state with no payment payload", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    gate.state.now = new Date(START.getTime() + 10 * 60 * 1000);
+
+    const expired = await get(`/v1/submissions/${created.body.publicId}/resume`, baseUrl);
+    assert.equal(expired.status, 200);
+    assert.equal(expired.body.state, "expired");
+    assert.equal(Object.hasOwn(expired.body, "quote"), false);
+    assert.equal(JSON.stringify(expired.body).includes(created.body.quote.signature), false);
+  });
+});
+
+test("repeated resume is idempotent and creates no second quote or reservation", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    const first = await get(`/v1/submissions/${created.body.publicId}/resume`, baseUrl);
+    gate.state.now = new Date(START.getTime() + 30_000);
+    const second = await get(`/v1/submissions/${created.body.publicId}/resume`, baseUrl);
+
+    assert.deepEqual(second.body, first.body);
+    assert.deepEqual(await gate.store.counts(), {
+      snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0,
+    });
   });
 });

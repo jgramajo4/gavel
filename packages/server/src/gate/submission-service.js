@@ -4,15 +4,12 @@ const crypto = require("node:crypto");
 const { getAddress } = require("ethers");
 const {
   GAVEL_FEE_AMOUNT,
-  QUOTE_LIFETIME_SECONDS,
   QUOTE_VERSION,
   SUPPORTED_DECODER_VERSIONS,
   SubmissionPolicyError,
   assertStageAccepted,
-  buildQuoteMessage,
   createQuoteTypedData,
   decodeAction,
-  quoteTotalAmount,
   validateSubmissionRequest,
   verifyQuoteSignature,
 } = require("@gavel/gate");
@@ -35,8 +32,22 @@ const unavailable = () => reject("rejected_by_policy", "CANONICAL_DATA_UNAVAILAB
 
 // Store failures are mapped to the frozen coarse vocabulary. Nothing below ever
 // reveals a count, a reset time, an owner, or any other private policy value.
+function duplicateReceipt(existing) {
+  return {
+    state: "duplicate",
+    existing: {
+      publicId: existing.publicId,
+      state: existing.state,
+      resumeUrl: `/v1/submissions/${existing.publicId}/resume`,
+    },
+  };
+}
+
 function mapIssuanceFailure(error) {
   const message = String(error?.message ?? "");
+  // A hash that exists under another owner is a collision or forged
+  // authentication: fail closed without confirming owner or state.
+  if (/submission is unavailable/i.test(message)) return notAccepting();
   if (/ACTIVE_QUOTE_EXISTS/.test(message)) {
     return reject("rejected_by_policy", "ACTIVE_QUOTE_EXISTS", 409, INELIGIBLE_MESSAGE);
   }
@@ -132,7 +143,7 @@ function createSubmissionService({
   randomBytes = crypto.randomBytes, newId = () => crypto.randomUUID(),
   rpcTimeoutMs = 2_000,
 } = {}) {
-  for (const method of ["issue", "getProfileByWallet", "getPolicy"]) {
+  for (const method of ["issue", "getProfileByWallet", "getPolicy", "getOwnedSubmissionByHash", "getOwnedResume"]) {
     if (!store || typeof store[method] !== "function") throw new TypeError(`store.${method} is required`);
   }
   // Public receipts are never built by stripping fields off a private row: they
@@ -141,6 +152,9 @@ function createSubmissionService({
   const receipts = publicReader ?? store;
   if (typeof receipts.getSubmission !== "function") {
     throw new TypeError("publicReader.getSubmission is required for public receipt projection");
+  }
+  if (typeof receipts.getOwnedResume !== "function") {
+    throw new TypeError("getOwnedResume is required for owner-bound resume");
   }
   if (!indexClient || typeof indexClient.getProposalSnapshot !== "function") {
     throw new TypeError("indexClient.getProposalSnapshot is required");
@@ -218,6 +232,23 @@ function createSubmissionService({
     };
   }
 
+  // Both the issued and the resumed payload pass through here, so an unsigned,
+  // drifted, or foreign-signed row can never reach a payer on either path.
+  function assertIssuedQuote(quote) {
+    if (!quote || typeof quote.signature !== "string" || !quote.message || !quote.domain) {
+      throw new Error("quote was not persisted with its signed message and signature");
+    }
+    if (!verifyQuoteSignature(createQuoteTypedData(quote.message, quote.domain), quote.signature, signerAddress)) {
+      throw new Error("persisted quote signature does not verify against the configured signer");
+    }
+    return Object.freeze({
+      domain: quote.domain,
+      message: quote.message,
+      totalAmount: quote.totalAmount,
+      signature: quote.signature,
+    });
+  }
+
   async function createSubmission({ session, voterWallet, request, ip } = {}) {
     if (!session || session.role !== "base_sender" || typeof session.wallet !== "string") throw unauthenticated();
     let payer;
@@ -237,10 +268,24 @@ function createSubmissionService({
     //    canonical hash. Evidence URLs are recorded, never dereferenced.
     const { submission, submissionHash } = validateSubmissionRequest(request, { payer, voter });
 
-    // 2. Private sender block and quote-rate checks.
+    // 2. Owner-bound global exact-hash lookup. It runs before every mutable
+    //    block, rate, profile, policy, index, lifecycle, and capacity check, so
+    //    a lost response is always recoverable: a paused Gate, an unhealthy
+    //    index, a newly contract-shaped payer, or a spent rate limit can never
+    //    strand an advocate who already holds a paid-for quote. It refreshes
+    //    nothing and reserves nothing.
+    let existing;
+    try {
+      existing = await store.getOwnedSubmissionByHash({ submissionHash, payer });
+    } catch (error) {
+      throw mapIssuanceFailure(error);
+    }
+    if (existing) return duplicateReceipt(existing);
+
+    // 3. Private sender block and quote-rate checks.
     await senderPolicy.assertAllowed({ sender: payer.toLowerCase(), ip });
 
-    // 3. Gate availability and per-DAO policy/stage.
+    // 4. Gate availability and per-DAO policy/stage.
     const profile = await store.getProfileByWallet(voter);
     if (!profile) throw notFound();
     if (profile.availability !== "accepting_now") throw notAccepting();
@@ -248,10 +293,10 @@ function createSubmissionService({
     if (!policy || policy.enabled !== true || String(policy.chainId) !== "1") throw notAccepting();
     assertStageAccepted(submission.stage, policy);
 
-    // 4. MVP payer identity.
+    // 5. MVP payer identity.
     await assertPayerIsEoa(payer);
 
-    // 5. Fresh canonical snapshot, lifecycle eligibility, and proposal identity.
+    // 6. Fresh canonical snapshot, lifecycle eligibility, and proposal identity.
     let snapshot;
     try {
       snapshot = await indexClient.getProposalSnapshot(submission.proposalId);
@@ -263,23 +308,11 @@ function createSubmissionService({
     }
     if (snapshot.eligibility !== submission.stage) throw notAccepting();
 
-    // 6-7. Deduplication, sender/proposal limits, capacity, persistence, and
-    //      the reservation all commit under the store's profile-scoped lock.
-    const issuedAt = new Date(Math.floor(now().getTime() / 1000) * 1000);
-    const expiresAt = new Date(issuedAt.getTime() + QUOTE_LIFETIME_SECONDS * 1000);
+    // 7. Race-closing hash recheck, sender/proposal limits, capacity,
+    //    persistence, the reservation, the authoritative expiry, and signing all
+    //    happen under the store's profile-scoped lock in one transaction. The
+    //    service supplies unsigned inputs only.
     const quoteId = `0x${randomBytes(32).toString("hex")}`;
-    const message = buildQuoteMessage({
-      quoteId,
-      payer,
-      voter,
-      attentionAmount: decimal(policy.attentionAmount, "policy.attentionAmount"),
-      gavelFeeAmount: GAVEL_FEE_AMOUNT.toString(10),
-      submissionHash,
-      token: configured.token,
-      expiry: String(Math.floor(expiresAt.getTime() / 1000)),
-      quoteVersion: String(QUOTE_VERSION),
-    });
-    const signature = await quoteSigner.signQuote(message);
     const { canonicalFacts, decodedFacts } = issuanceFacts(snapshot);
     const snapshotId = newId();
 
@@ -304,61 +337,52 @@ function createSubmissionService({
           payer, signedSender: payer, material: { ...submission },
         },
         quote: {
-          id: newId(), quoteId, payer, voter, attentionAmount: message.attentionAmount,
-          feeAmount: message.gavelFeeAmount, totalAmount: quoteTotalAmount(message), token: configured.token,
+          id: newId(), quoteId, payer, voter,
+          attentionAmount: decimal(policy.attentionAmount, "policy.attentionAmount"),
+          feeAmount: GAVEL_FEE_AMOUNT.toString(10), token: configured.token,
           baseChainId: configured.chainId, splitter: configured.splitter, deploymentId: configured.id,
-          quoteVersion: QUOTE_VERSION, expiresAt, signature,
+          quoteVersion: QUOTE_VERSION,
         },
-        reservation: { id: newId(), profileId: profile.id, amount: message.attentionAmount, expiresAt },
+        reservation: {
+          id: newId(), profileId: profile.id,
+          amount: decimal(policy.attentionAmount, "policy.attentionAmount"),
+        },
+        signer: quoteSigner,
       });
     } catch (error) {
       throw mapIssuanceFailure(error);
     }
 
-    if (issued?.resumed === true) {
-      return {
-        state: "duplicate",
-        existing: {
-          publicId: issued.publicId,
-          state: issued.state,
-          resumeUrl: `/v1/submissions/${issued.publicId}/resume`,
-        },
-      };
-    }
+    // The store also rechecks the hash under its lock to close the race.
+    if (issued?.resumed === true) return duplicateReceipt(issued);
 
-    // The store owns the authoritative expiry and signature: the Postgres store
-    // re-derives both from its own transaction clock. Rebuild and re-verify the
-    // returned quote so a drifted or unsigned row can never reach a payer.
-    const persisted = issued?.quote;
-    if (!persisted || typeof persisted.signature !== "string") {
-      throw new Error("issued quote was not persisted with a signature");
-    }
-    const authoritative = buildQuoteMessage({
-      ...message,
-      attentionAmount: decimal(persisted.attentionAmount, "persisted attentionAmount"),
-      gavelFeeAmount: decimal(persisted.feeAmount, "persisted feeAmount"),
-      expiry: String(Math.floor(new Date(persisted.expiresAt).getTime() / 1000)),
-    });
-    const typed = createQuoteTypedData(authoritative, {
-      chainId: Number(persisted.baseChainId ?? configured.chainId),
-      verifyingContract: persisted.splitter ?? configured.splitter,
-    });
-    if (!verifyQuoteSignature(typed, persisted.signature, signerAddress)) {
-      throw new Error("issued quote signature does not verify against the configured signer");
-    }
-
+    // The store signed and persisted this exact payload. The service returns it
+    // verbatim and only re-verifies it; it never reconstructs it.
+    const quote = assertIssuedQuote(issued?.quote);
     const receipt = await receipts.getSubmission(issued.publicId);
     return {
       publicId: issued.publicId,
       state: receipt?.state ?? "payment_required",
-      updatedAt: receipt?.updatedAt ?? issuedAt,
-      quote: {
-        domain: typed.domain,
-        message: typed.message,
-        totalAmount: quoteTotalAmount(typed.message),
-        signature: persisted.signature,
-      },
+      updatedAt: receipt?.updatedAt ?? now(),
+      quote,
     };
+  }
+
+  // Private, owner-bound recovery of an already-issued quote. It signs nothing,
+  // refreshes nothing, and reserves nothing.
+  async function resumeSubmission({ session, publicId } = {}) {
+    if (!session || session.role !== "base_sender" || typeof session.wallet !== "string") throw unauthenticated();
+    let payer;
+    try {
+      payer = canonicalAddress(session.wallet, "session wallet");
+    } catch {
+      throw unauthenticated();
+    }
+    if (typeof publicId !== "string" || !PUBLIC_ID.test(publicId)) return null;
+    const resumed = await receipts.getOwnedResume({ publicId, payer });
+    if (!resumed) return null;
+    if (!resumed.quote) return resumed;
+    return { ...resumed, quote: assertIssuedQuote(resumed.quote) };
   }
 
   async function getPublicStatus(publicId) {
@@ -366,7 +390,7 @@ function createSubmissionService({
     return (await receipts.getSubmission(publicId)) ?? null;
   }
 
-  return Object.freeze({ createSubmission, getPublicStatus, redactSignerMaterial });
+  return Object.freeze({ createSubmission, getPublicStatus, resumeSubmission, redactSignerMaterial });
 }
 
 module.exports = { NOT_ACCEPTING_MESSAGE, SubmissionPolicyError, createSenderPolicy, createSubmissionService };

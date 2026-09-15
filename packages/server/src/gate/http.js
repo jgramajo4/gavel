@@ -85,7 +85,8 @@ function createGateHttpServer({ authService, profileService, submissionService,
     throw new TypeError("complete profileService is required");
   }
   if (submissionService !== undefined && (typeof submissionService.createSubmission !== "function"
-      || typeof submissionService.getPublicStatus !== "function")) {
+      || typeof submissionService.getPublicStatus !== "function"
+      || typeof submissionService.resumeSubmission !== "function")) {
     throw new TypeError("complete submissionService is required");
   }
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new TypeError("maxBodyBytes must be a positive integer");
@@ -150,6 +151,19 @@ function createGateHttpServer({ authService, profileService, submissionService,
         return result.state === "duplicate"
           ? sendJson(response, 409, result)
           : sendJson(response, 201, result);
+      }
+      // Resume is owner-bound: identity comes only from the session, never from
+      // the path, query string, or body. A non-owner gets a plain 404.
+      const resume = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/resume$/.exec(path);
+      if (submissionService && request.method === "GET" && resume) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        const resumed = await submissionService.resumeSubmission({ session, publicId: resume[1] });
+        return resumed
+          ? sendJson(response, 200, resumed)
+          : sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
       }
       const status = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/status$/.exec(path);
       if (submissionService && request.method === "GET" && status) {

@@ -1,7 +1,9 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+const { Wallet } = require("ethers");
 const { MemoryGateStore } = require("../src/gate/store-memory");
+const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { defineGateStoreConformance } = require("./support/gate-store-conformance");
 
 const ADDR = {
@@ -11,12 +13,15 @@ const ADDR = {
   payer2: "0x4444444444444444444444444444444444444444",
   splitter: "0x5555555555555555555555555555555555555555",
   signer: "0x6666666666666666666666666666666666666666",
-  token: "0x7777777777777777777777777777777777777777",
+  token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 };
 const hash = (digit) => `0x${digit.repeat(64)}`;
 const hex32 = (number) => `0x${number.toString(16).padStart(64, "0")}`;
 const addr = (number) => `0x${number.toString(16).padStart(40, "0")}`;
 const bytes = (hex) => Buffer.from(hex, "hex");
+const SIGNER_KEY = `0x${"7".repeat(64)}`;
+const SIGNER_ADDRESS = new Wallet(SIGNER_KEY).address;
+const gateSigner = () => createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter: ADDR.splitter });
 
 async function setupStore(options = {}) {
   const store = new MemoryGateStore({ clock: () => new Date("2026-01-01T00:00:00.000Z"), ...options });
@@ -38,8 +43,7 @@ async function setupStore(options = {}) {
 }
 
 function issuance(suffix, { profileId = "profile-1", voter = ADDR.wallet1, payer = ADDR.payer1,
-  submissionHash = hash("a"), quoteId = hash("b"), internalQuoteId = `quote-internal-${suffix}`,
-  expiresAt = new Date("2026-01-01T00:10:00.000Z") } = {}) {
+  submissionHash = hash("a"), quoteId = hash("b"), internalQuoteId = `quote-internal-${suffix}` } = {}) {
   return {
     context: {
       authPassed: true, parsePassed: true, expectedProfileVersion: "1", walletKind: "eoa",
@@ -59,9 +63,10 @@ function issuance(suffix, { profileId = "profile-1", voter = ADDR.wallet1, payer
     quote: {
       id: internalQuoteId, quoteId, payer, voter, attentionAmount: "1000000",
       feeAmount: "250000", token: ADDR.token, baseChainId: "8453", splitter: ADDR.splitter,
-      deploymentId: "deployment-1", quoteVersion: 1, expiresAt, signature: "private-signature",
+      deploymentId: "deployment-1", quoteVersion: 1,
     },
-    reservation: { id: `reservation-${suffix}`, profileId, amount: "1000000", expiresAt },
+    reservation: { id: `reservation-${suffix}`, profileId, amount: "1000000" },
+    signer: gateSigner(),
   };
 }
 
@@ -277,7 +282,8 @@ test("profiles, policies, deployments, and issuance enforce canonical protocol i
       ["wallet voter", { quote: { voter: ADDR.wallet2 } }, /issuance unavailable/],
       ["submission bytes32", { submission: { submissionHash: "not-a-hash" } }, /submissionHash.*bytes32/],
       ["quote bytes32", { quote: { quoteId: "not-a-hash" } }, /quoteId.*bytes32/],
-      ["expiry binding", { reservation: { expiresAt: new Date("2026-01-01T00:09:59.000Z") } }, /reservation expiry.*quote expiry/],
+      ["caller expiry", { reservation: { expiresAt: new Date("2026-01-01T00:09:59.000Z") } }, /store owns issuance time/],
+      ["caller signature", { quote: { signature: "0xcaller-supplied" } }, /store owns signing/],
       ["snapshot lifecycle", { snapshot: { eligibility: "MAYBE" } }, /lifecycle mapping/],
     ];
     for (const [name, overrides, pattern] of cases) {
@@ -501,19 +507,23 @@ test("settlement lifecycle fields use one vocabulary and exact availability sema
 });
 
 test("quote expiry is exactly ten minutes from the authoritative store clock", async () => {
-  const now = new Date("2026-01-01T00:00:00.123Z");
+  let now = new Date("2026-01-01T00:00:00.123Z");
   const store = await setupStore({ clock: () => now });
-  const exact = issuance("exact-expiry", {
-    quoteId: hash("d"), submissionHash: hash("e"), expiresAt: new Date("2026-01-01T00:10:00.123Z"),
-  });
-  const result = await store.issue(exact);
-  assert.deepEqual(result.quote.expiresAt, new Date("2026-01-01T00:10:00.123Z"));
 
-  const drifted = issuance("drifted-expiry", {
-    payer: ADDR.payer2, quoteId: hash("f"), submissionHash: hash("0"), expiresAt: new Date("2026-01-01T00:10:00.124Z"),
-  });
-  await assert.rejects(store.issue(drifted), /exactly 10 minutes/);
-  assert.equal((await store.counts()).submissions, 1);
+  // The store reads its own clock and truncates to the whole second the signed
+  // EIP-712 expiry uses. A caller supplies no instant at all, so wall-clock
+  // movement between service entry and issuance cannot be rejected as drift.
+  const first = await store.issue(issuance("exact-expiry", { quoteId: hash("d"), submissionHash: hash("e") }));
+  assert.deepEqual(first.quote.expiresAt, new Date("2026-01-01T00:10:00.000Z"));
+  assert.equal(first.quote.message.expiry, "1767226200");
+
+  now = new Date("2026-01-01T00:00:37.999Z");
+  const later = await store.issue(issuance("later-expiry", {
+    payer: ADDR.payer2, quoteId: hash("f"), submissionHash: hash("0"),
+  }));
+  assert.deepEqual(later.quote.expiresAt, new Date("2026-01-01T00:10:37.000Z"));
+  assert.equal(later.quote.message.expiry, "1767226237");
+  assert.equal((await store.counts()).submissions, 2);
 });
 
 test("pending settlement is a reversible public hint while a quote remains valid", async () => {

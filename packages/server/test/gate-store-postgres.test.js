@@ -3,6 +3,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const test = require("node:test");
 const { Pool } = require("pg");
+const { createQuoteTypedData, verifyQuoteSignature } = require("@gavel/gate");
+const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
 
 const databaseUrl = process.env.GAVEL_GATE_TEST_DATABASE_URL;
@@ -31,9 +33,11 @@ function canonicalBlocks(from, through, { changedBlock, changedHash, defaultHash
   });
 }
 
+const SIGNER_KEY = `0x${"7".repeat(64)}`;
+
 function issuance(suffix, submissionHash = hash(suffix)) {
-  const future = new Date(Date.now() + 60_000);
   return {
+    signer: createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter: SPLITTER }),
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: PAYER,
       expectedProfileVersion: "1", walletKind: "eoa", basePayoutCodeHash: null, stage: "VOTING", deploymentCodeHash: CODE_HASH },
     snapshot: { id: `snapshot-${suffix}`, dao: "nouns", proposalId: String(Number.parseInt(suffix, 16) || 1),
@@ -42,8 +46,8 @@ function issuance(suffix, submissionHash = hash(suffix)) {
     submission: { id: `submission-${suffix}`, submissionHash, profileId: "profile-1", payer: PAYER, signedSender: PAYER, material: { vote: "for" } },
     quote: { id: `quote-${suffix}`, quoteId: hash(suffix), payer: PAYER, voter: WALLET, attentionAmount: "1000000",
       feeAmount: "250000", token: TOKEN, baseChainId: "8453", splitter: SPLITTER, deploymentId: "deployment-1",
-      quoteVersion: 1, expiresAt: future },
-    reservation: { id: `reservation-${suffix}`, profileId: "profile-1", amount: "1000000", expiresAt: future },
+      quoteVersion: 1 },
+    reservation: { id: `reservation-${suffix}`, profileId: "profile-1", amount: "1000000" },
   };
 }
 
@@ -123,7 +127,6 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
   const store = new PostgresGateStore({
     pool,
     baseCodeReader: async () => "0x6000",
-    quoteSigner: async () => "0xsigned",
   });
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
@@ -321,6 +324,81 @@ test("marked Gate migration rejects unique and foreign-key catalog drift instead
       await pool.query(`ALTER TABLE gate.${table} DROP CONSTRAINT ${constraint.conname}`);
       await assert.rejects(pool.query(migration), /marker does not match installed Gate schema/);
     }
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
+// PR5 / G5-1 + G5-2: the owner-bound duplicate lookup and resume read run real
+// SQL, so they are exercised against a disposable PostgreSQL rather than a stub.
+test("owner-bound hash lookup and resume run against real SQL and refresh nothing", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const store = new PostgresGateStore({ pool, baseCodeReader: async () => "0x" });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(migration);
+
+    await store.mutateProfile({
+      profile: { id: "profile-1", wallet: WALLET, walletKind: "eoa", availability: "accepting_now" },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
+        attentionAmount: "1000000", pendingReservationCapacity: 12, settledCapacity: 25, tags: [] },
+    });
+    await store.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER,
+      token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "5", nextBlock: "5", contractCodeHash: CODE_HASH,
+      config: {}, rpcAccess: "ciphertext", issuanceActive: true });
+
+    const command = issuance("1", hash("b"));
+    command.context.expectedProfileVersion = "1";
+    const issued = await store.issue(command);
+    assert.equal(issued.resumed, false);
+
+    // The signature the database persisted is the one the store signed, and it
+    // verifies against the injected signer's public address.
+    const persisted = (await pool.query("SELECT quote_signature FROM gate.quotes WHERE quote_id=$1",
+      [issued.quote.message.quoteId])).rows[0];
+    assert.equal(persisted.quote_signature, issued.quote.signature);
+    assert.equal(verifyQuoteSignature(
+      createQuoteTypedData(issued.quote.message, issued.quote.domain),
+      issued.quote.signature, command.signer.address), true);
+
+    assert.deepEqual(await store.getOwnedSubmissionByHash({ submissionHash: hash("b"), payer: PAYER }),
+      { publicId: issued.publicId, state: "payment_required" });
+    assert.equal(await store.getOwnedSubmissionByHash({ submissionHash: hash("c"), payer: PAYER }), null);
+    await assert.rejects(store.getOwnedSubmissionByHash({ submissionHash: hash("b"), payer: WALLET }),
+      /submission is unavailable/);
+
+    const resumed = await store.getOwnedResume({ publicId: issued.publicId, payer: PAYER });
+    assert.equal(resumed.state, "payment_required");
+    assert.deepEqual(resumed.quote.message, issued.quote.message);
+    assert.deepEqual(resumed.quote.domain, issued.quote.domain);
+    assert.equal(resumed.quote.signature, issued.quote.signature);
+    assert.equal(resumed.quote.totalAmount, "1250000");
+    assert.equal(await store.getOwnedResume({ publicId: issued.publicId, payer: WALLET }), null);
+    assert.equal(await store.getOwnedResume({ publicId: "AAAAAAAAAAAAAAAAAAAAAA", payer: PAYER }), null);
+
+    // Neither read mutated anything: one quote, one reservation, same expiry.
+    assert.deepEqual(await store.counts(),
+      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0 });
+    assert.deepEqual(await store.getOwnedResume({ publicId: issued.publicId, payer: PAYER }), resumed);
+
+    // The issuance immutability trigger refuses to move a live quote's expiry,
+    // which is exactly the protection resume depends on.
+    await assert.rejects(pool.query("UPDATE gate.quotes SET expires_at=clock_timestamp() WHERE quote_id=$1",
+      [issued.quote.message.quoteId]), /immutable|no field/i);
+
+    // The expired-resume branch is driven by the database clock, so it is
+    // covered by the unit test's stubbed clock rather than by tampering with an
+    // immutable quote row here.
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});

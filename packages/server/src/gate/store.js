@@ -8,6 +8,13 @@ const {
   publicState,
   publicSubmissionProjection,
 } = require("./semantic-contract");
+const {
+  assertSignerDeploymentBinding,
+  assertStoreOwnedQuoteMaterial,
+  buildIssuedQuoteMessage,
+  issuedQuotePayload,
+  signIssuedQuote,
+} = require("./quote-issuance");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
@@ -88,7 +95,6 @@ class PostgresGateStore {
   constructor(options = {}) {
     this.randomBytes = options.randomBytes || crypto.randomBytes;
     this.baseCodeReader = options.baseCodeReader;
-    this.quoteSigner = options.quoteSigner;
     this.rpcTimeoutMs = positiveInteger(options.rpcTimeoutMs, "rpcTimeoutMs", 5_000);
     this.notificationRetryLimit = nonnegativeInteger(options.notificationRetryLimit, "notificationRetryLimit", DEFAULT_NOTIFICATION_RETRY_LIMIT);
     if (options.pool) this.pool = options.pool;
@@ -384,9 +390,10 @@ class PostgresGateStore {
     });
   }
 
-  #validateIssuance({ context, snapshot, submission, quote, reservation }) {
+  #validateIssuance({ context, snapshot, submission, quote, reservation, signer }) {
     invariant(snapshot && submission && quote && reservation, "complete issuance material is required");
     invariant(context?.authPassed === true && context?.parsePassed === true, "authenticated and parsed issuance context is required");
+    assertStoreOwnedQuoteMaterial(quote, reservation);
     const normalized = {
       context: {
         expectedProfileVersion: positiveBigint(context.expectedProfileVersion, "expectedProfileVersion"),
@@ -407,11 +414,15 @@ class PostgresGateStore {
         baseChainId: positiveBigint(quote.baseChainId, "baseChainId"), splitter: address(quote.splitter, "splitter"),
         quoteVersion: Number(quote.quoteVersion), expiresAt: null },
       reservation: { ...reservation, amount: uint78(reservation.amount, "reservation amount", 1000000n), expiresAt: null },
+      signer,
     };
     invariant(normalized.submission.payer === normalized.submission.signedSender, "payer must equal signed_sender");
     invariant(normalized.submission.payer === normalized.context.authenticatedSender, "payer must equal authenticated signed sender");
     invariant(normalized.context.payerIsEoa, "payer must be an EOA");
     invariant(Array.isArray(normalized.snapshot.canonicalActions), "canonicalActions must be an array");
+    if (!signer || typeof signer.signQuote !== "function") {
+      throw new TypeError("an injected quote signer is required for issuance");
+    }
     return normalized;
   }
 
@@ -438,7 +449,7 @@ class PostgresGateStore {
 
   async issue(input) {
     const value = this.#validateIssuance(input);
-    const { context, snapshot, submission, quote, reservation } = value;
+    const { context, snapshot, submission, quote, reservation, signer } = value;
     return this.#transaction(async (client) => {
       const duplicate = (await client.query(`SELECT public_id AS "publicId",status,payer,profile_id AS "profileId"
         FROM gate.submissions WHERE submission_hash=$1`, [submission.submissionHash])).rows[0];
@@ -524,21 +535,23 @@ class PostgresGateStore {
           }
         }
         invariant(publicId, "public id allocation unavailable");
-        await client.query(`INSERT INTO gate.quotes(id,quote_id,submission_id,payer,voter,attention_amount,fee_amount,token,base_chain_id,splitter,deployment_id,quote_version,expires_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [quote.id, quote.quoteId, submission.id, quote.payer, quote.voter,
-          quote.attentionAmount, quote.feeAmount, quote.token, quote.baseChainId, quote.splitter, quote.deploymentId, quote.quoteVersion, quote.expiresAt]);
+        // One signing site, inside this transaction, before the quote row
+        // exists: a signer failure can never strand a committed reservation.
+        assertSignerDeploymentBinding(signer, { chainId: quote.baseChainId, splitter: quote.splitter });
+        const signed = await signIssuedQuote(signer, buildIssuedQuoteMessage({
+          quoteId: quote.quoteId, payer: quote.payer, voter: quote.voter, attentionAmount: quote.attentionAmount,
+          feeAmount: quote.feeAmount, submissionHash: submission.submissionHash, token: quote.token,
+          expiresAt: quote.expiresAt,
+        }));
+        await client.query(`INSERT INTO gate.quotes(id,quote_id,submission_id,payer,voter,attention_amount,fee_amount,token,base_chain_id,splitter,deployment_id,quote_version,expires_at,quote_signature)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [quote.id, quote.quoteId, submission.id, quote.payer, quote.voter,
+          quote.attentionAmount, quote.feeAmount, quote.token, quote.baseChainId, quote.splitter, quote.deploymentId, quote.quoteVersion,
+          quote.expiresAt, signed.signature]);
         await client.query("INSERT INTO gate.capacity_reservations(id,profile_id,quote_id,amount,expires_at) VALUES($1,$2,$3,$4,$5)",
           [reservation.id, submission.profileId, quote.id, reservation.amount, reservation.expiresAt]);
-        const unsignedQuote = Object.freeze({ quoteId: quote.quoteId, payer: quote.payer, voter: quote.voter,
-          attentionAmount: quote.attentionAmount, gavelFeeAmount: quote.feeAmount, submissionHash: submission.submissionHash,
-          token: quote.token, expiry: Math.floor(quote.expiresAt.valueOf() / 1000), quoteVersion: quote.quoteVersion });
-        invariant(typeof this.quoteSigner === "function", "quote signer unavailable");
-        const signature = await this.quoteSigner(unsignedQuote);
-        invariant(typeof signature === "string" && signature.length > 0, "quote signer unavailable");
-        const signed = await client.query("UPDATE gate.quotes SET quote_signature=$2 WHERE id=$1 AND quote_signature IS NULL", [quote.id, signature]);
-        invariant(signed.rowCount === 1, "quote signature could not be persisted");
         await client.query("RELEASE SAVEPOINT gate_issue_material");
-        return { resumed: false, publicId, submission: { id: submission.id, publicId, status: "QUOTED" }, quote: clone({ ...quote, signature, state: "quoted", reservationState: "reserved" }) };
+        return { resumed: false, publicId, submission: { id: submission.id, publicId, status: "QUOTED" },
+          quote: { ...clone({ ...quote, state: "quoted", reservationState: "reserved" }), ...issuedQuotePayload(signed) } };
       } catch (error) {
         await client.query("ROLLBACK TO SAVEPOINT gate_issue_material"); await client.query("RELEASE SAVEPOINT gate_issue_material");
         if (error.code === "23505" && error.constraint === "submissions_submission_hash_key") {
@@ -551,6 +564,51 @@ class PostgresGateStore {
         throw error;
       }
     });
+  }
+
+  // Owner-bound global exact-hash lookup, run before every mutable check.
+  async getOwnedSubmissionByHash({ submissionHash, payer } = {}) {
+    const hash = bytes32(submissionHash, "submissionHash");
+    const owner = address(payer, "payer");
+    const row = (await this.pool.query(`SELECT public_id AS "publicId",status,payer
+      FROM gate.submissions WHERE submission_hash=$1`, [hash])).rows[0];
+    if (!row) return null;
+    invariant(row.payer === owner, "submission is unavailable");
+    return { publicId: row.publicId, state: publicState(row.status) };
+  }
+
+  // Private owner-bound resume: a single read that never refreshes a quote,
+  // extends an expiry, or touches a reservation.
+  async getOwnedResume({ publicId, payer } = {}) {
+    const owner = address(payer, "payer");
+    const row = (await this.pool.query(`SELECT s.public_id AS "publicId",s.status,s.payer,s.submission_hash AS "submissionHash",
+      s.public_state_changed_at AS "updatedAt",i.inbox_created_at AS "inboxCreatedAt",
+      q.quote_id AS "quoteId",q.voter,q.attention_amount::text AS "attentionAmount",q.fee_amount::text AS "feeAmount",
+      q.token,q.base_chain_id::text AS "baseChainId",q.splitter,q.expires_at AS "expiresAt",
+      q.quote_signature AS "signature",q.state AS "quoteState",clock_timestamp() AS now
+      FROM gate.submissions s LEFT JOIN gate.quotes q ON q.submission_id=s.id
+      LEFT JOIN gate.inbox_items i ON i.submission_id=s.id WHERE s.public_id=$1`, [publicId])).rows[0];
+    if (!row || row.payer !== owner) return null;
+    const projection = publicSubmissionProjection(
+      { publicId: row.publicId, status: row.status, publicStateChangedAt: row.updatedAt },
+      row.inboxCreatedAt == null ? null : { inboxCreatedAt: row.inboxCreatedAt },
+    );
+    if (row.status !== "QUOTED" || !row.signature) return projection;
+    const expiresAt = exactDate(row.expiresAt, "quote expiry");
+    if (row.quoteState !== "quoted" || expiresAt <= exactDate(row.now, "database clock")) {
+      return { publicId: row.publicId, state: "expired", updatedAt: clone(row.updatedAt) };
+    }
+    return {
+      ...projection,
+      quote: issuedQuotePayload({
+        domain: { chainId: row.baseChainId, verifyingContract: row.splitter },
+        message: buildIssuedQuoteMessage({
+          quoteId: row.quoteId, payer: row.payer, voter: row.voter, attentionAmount: row.attentionAmount,
+          feeAmount: row.feeAmount, submissionHash: row.submissionHash, token: row.token, expiresAt,
+        }),
+        signature: row.signature,
+      }),
+    };
   }
 
   async countLiabilities(profileId) {

@@ -44,7 +44,7 @@ function session(wallet = PAYER) {
 }
 
 async function harness(options = {}) {
-  const state = { now: new Date(START), fetchCalls: 0, issued: [] };
+  const state = { now: new Date(START), fetchCalls: 0, issued: [], payerCode: "0x", rateLimited: false };
   const clock = () => new Date(state.now);
   const store = new MemoryGateStore({ clock });
   await store.mutateProfile({
@@ -64,7 +64,11 @@ async function harness(options = {}) {
     get(target, property) {
       const value = Reflect.get(target, property);
       if (property !== "issue") return typeof value === "function" ? value.bind(target) : value;
-      return async (input) => { state.issued.push(structuredClone(input)); return target.issue(input); };
+      return async (input) => {
+        const { signer, ...material } = input;
+        state.issued.push({ ...structuredClone(material), signerAddress: signer?.address });
+        return target.issue(input);
+      };
     },
   });
 
@@ -99,7 +103,13 @@ async function harness(options = {}) {
     indexClient,
     quoteSigner: createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter: SPLITTER }),
     deployment: { id: "deployment-1", chainId: 8453, splitter: SPLITTER, token: TOKEN, codeHash: DEPLOYMENT_CODE_HASH },
-    basePayerCodeReader: async () => "0x",
+    basePayerCodeReader: async () => state.payerCode,
+    senderPolicy: { async assertAllowed() {
+      if (!state.rateLimited) return;
+      const error = new Error("Too many submission requests");
+      error.state = "rejected_by_policy"; error.code = "RATE_LIMITED"; error.statusCode = 429;
+      throw error;
+    } },
     clock,
     fetch: () => { state.fetchCalls += 1; throw new Error("evidence URLs must never be fetched"); },
     ...options.service,
@@ -592,6 +602,7 @@ test("the public receipt is read through the public projection reader, never the
       reads.push(publicId);
       return gate.store.getSubmission(publicId);
     },
+    getOwnedResume: (input) => gate.store.getOwnedResume(input),
   };
 
   const { createQuoteSigner } = loadSigner();
@@ -631,6 +642,8 @@ test("an unexpected store failure is never dressed up as a public receipt state"
       getProfileByWallet: (wallet) => gate.store.getProfileByWallet(wallet),
       getPolicy: (id, dao) => gate.store.getPolicy(id, dao),
       getSubmission: (publicId) => gate.store.getSubmission(publicId),
+      getOwnedResume: (input) => gate.store.getOwnedResume(input),
+      async getOwnedSubmissionByHash() { return null; },
       async issue() { throw new Error("relation gate.quotes does not exist"); },
     },
     indexClient: { async getProposalSnapshot(proposalId) {
@@ -651,4 +664,211 @@ test("an unexpected store failure is never dressed up as a public receipt state"
   }));
   assert.equal(error.state, undefined, "an internal failure is not a public receipt state");
   assert.equal(error.statusCode, undefined);
+});
+
+// --- G5-1: owner-bound duplicate recovery precedes every mutable check -------
+
+test("an identical retry recovers the frozen duplicate receipt after the Gate is paused", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+
+  await gate.store.mutateProfile({ profile: { id: "profile-1", wallet: VOTER, availability: "paused" } });
+
+  const retry = await gate.submit();
+  assert.deepEqual(retry, {
+    state: "duplicate",
+    existing: {
+      publicId: first.publicId,
+      state: "payment_required",
+      resumeUrl: `/v1/submissions/${first.publicId}/resume`,
+    },
+  });
+  assert.equal((await gate.store.counts()).submissions, 1);
+  assert.equal((await gate.store.counts()).quotes, 1);
+  assert.equal((await gate.store.counts()).reservations, 1);
+});
+
+test("an identical retry recovers the duplicate receipt without a healthy canonical index", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+  gate.indexSource.healthy = false;
+
+  const retry = await gate.submit();
+  assert.equal(retry.state, "duplicate");
+  assert.equal(retry.existing.publicId, first.publicId);
+  assert.equal(gate.state.issued.length, 1, "a recovered duplicate never re-enters store issuance");
+});
+
+test("a duplicate retry is recovered before the payer EOA proof and the sender rate limit", async () => {
+  const contractLater = await harness();
+  const first = await contractLater.submit();
+  contractLater.state.payerCode = "0x60006000";
+  const afterCode = await contractLater.submit();
+  assert.equal(afterCode.state, "duplicate");
+  assert.equal(afterCode.existing.publicId, first.publicId);
+
+  const limited = await harness();
+  const original = await limited.submit();
+  limited.state.rateLimited = true;
+  const afterLimit = await limited.submit();
+  assert.equal(afterLimit.state, "duplicate");
+  assert.equal(afterLimit.existing.publicId, original.publicId);
+});
+
+test("a duplicate retry refreshes nothing: same quote, same signature, same expiry, one reservation", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+  const before = await gate.store.getOwnedResume({ publicId: first.publicId, payer: PAYER });
+
+  gate.advance(60_000);
+  const retry = await gate.submit();
+  assert.equal(retry.state, "duplicate");
+
+  const after = await gate.store.getOwnedResume({ publicId: first.publicId, payer: PAYER });
+  assert.deepEqual(after, before);
+  assert.equal(after.quote.signature, first.quote.signature);
+  assert.deepEqual(after.quote.message, first.quote.message);
+  assert.equal(await gate.store.countLiabilities("profile-1"), 1000000n);
+  assert.deepEqual(await gate.store.counts(), {
+    snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0,
+  });
+});
+
+test("a different sender cannot discover or recover another sender's submission by hash", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+  const [issued] = gate.state.issued;
+
+  // The payer is inside the frozen hash preimage, so another wallet cannot
+  // naturally reach this hash; a deliberate direct-store probe fails closed.
+  await assert.rejects(
+    gate.store.getOwnedSubmissionByHash({ submissionHash: issued.submission.submissionHash, payer: payerAt(0x99) }),
+    /unavailable/i,
+  );
+  assert.equal(
+    await gate.store.getOwnedSubmissionByHash({ submissionHash: `0x${"09".repeat(32)}`, payer: PAYER }),
+    null,
+  );
+  assert.deepEqual(
+    await gate.store.getOwnedSubmissionByHash({ submissionHash: issued.submission.submissionHash, payer: PAYER }),
+    { publicId: first.publicId, state: "payment_required" },
+  );
+
+  // The coarse service response for a collision reveals neither owner nor state.
+  const { createQuoteSigner } = loadSigner();
+  const { createSubmissionService } = loadService();
+  const colliding = createSubmissionService({
+    store: {
+      getProfileByWallet: (wallet) => gate.store.getProfileByWallet(wallet),
+      getPolicy: (id, dao) => gate.store.getPolicy(id, dao),
+      getSubmission: (id) => gate.store.getSubmission(id),
+      getOwnedResume: (input) => gate.store.getOwnedResume(input),
+      async getOwnedSubmissionByHash() { throw new Error("submission is unavailable"); },
+      async issue() { throw new Error("issue must never be reached after a collision"); },
+    },
+    indexClient: { async getProposalSnapshot() { throw new Error("index must never be reached"); } },
+    quoteSigner: createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter: SPLITTER }),
+    deployment: { id: "deployment-1", chainId: 8453, splitter: SPLITTER, token: TOKEN, codeHash: DEPLOYMENT_CODE_HASH },
+    basePayerCodeReader: async () => { throw new Error("payer code must never be read after a collision"); },
+    clock: () => new Date(gate.state.now),
+  });
+  const collided = await rejection(colliding.createSubmission({
+    session: session(payerAt(0x99)), voterWallet: VOTER, request: submissionBody(),
+  }));
+  assert.equal(collided.state, "rejected_by_policy");
+  assert.equal(collided.code, "NOT_ACCEPTING");
+  assert.equal(`${collided.message}`.includes(first.publicId), false);
+});
+
+// --- G5-2: the frozen owner-bound resume endpoint ----------------------------
+
+test("resume returns the original persisted quote byte-for-byte, never a refreshed one", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+
+  gate.advance(120_000);
+  const resumed = await gate.service.resumeSubmission({ session: session(), publicId: first.publicId });
+
+  assert.deepEqual(Object.keys(resumed).sort(), ["publicId", "quote", "state", "updatedAt"]);
+  assert.equal(resumed.state, "payment_required");
+  assert.equal(resumed.publicId, first.publicId);
+  assert.deepEqual(resumed.quote, first.quote);
+  assert.equal(resumed.quote.signature, first.quote.signature);
+  assert.equal(resumed.quote.message.expiry, first.quote.message.expiry);
+
+  // Repeated resume is idempotent and still creates nothing.
+  const again = await gate.service.resumeSubmission({ session: session(), publicId: first.publicId });
+  assert.deepEqual(again, resumed);
+  assert.deepEqual(await gate.store.counts(), {
+    snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0,
+  });
+});
+
+test("resume is the recovery path for a lost 201 response", async () => {
+  const gate = await harness();
+  const created = await gate.submit();
+
+  // The advocate never saw the response; an identical retry hands back the
+  // opaque resume path, and resume returns the original payment payload.
+  const duplicate = await gate.submit();
+  assert.equal(duplicate.existing.resumeUrl, `/v1/submissions/${created.publicId}/resume`);
+
+  const recovered = await gate.service.resumeSubmission({
+    session: session(), publicId: duplicate.existing.publicId,
+  });
+  assert.deepEqual(recovered.quote, created.quote);
+  assert.equal(gate.state.issued.length, 1);
+});
+
+test("resume discloses nothing to a wallet that does not own the submission", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+
+  assert.equal(await gate.service.resumeSubmission({
+    session: session(payerAt(0x88)), publicId: first.publicId,
+  }), null);
+  assert.equal(await gate.service.resumeSubmission({ session: session(), publicId: "AAAAAAAAAAAAAAAAAAAAAA" }), null);
+  assert.equal(await gate.service.resumeSubmission({ session: session(), publicId: "not-a-public-id" }), null);
+
+  const wrongRole = await rejection(gate.service.resumeSubmission({
+    session: { ...session(), role: "dao_profile" }, publicId: first.publicId,
+  }));
+  assert.equal(wrongRole.statusCode, 401);
+  const noSession = await rejection(gate.service.resumeSubmission({ session: null, publicId: first.publicId }));
+  assert.equal(noSession.statusCode, 401);
+});
+
+test("resume stops returning a payment payload once the quote expires", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+
+  gate.advance(10 * 60 * 1000);
+  const expired = await gate.service.resumeSubmission({ session: session(), publicId: first.publicId });
+  assert.equal(expired.state, "expired");
+  assert.equal(Object.hasOwn(expired, "quote"), false);
+
+  // Wall-clock expiry alone must not release the reservation.
+  assert.equal(await gate.store.countLiabilities("profile-1"), 1000000n);
+  await gate.store.markExpired();
+  const swept = await gate.service.resumeSubmission({ session: session(), publicId: first.publicId });
+  assert.equal(swept.state, "expired");
+  assert.equal(Object.hasOwn(swept, "quote"), false);
+});
+
+test("a resumed pending or accepted submission returns only its coarse state", async () => {
+  const gate = await harness();
+  const first = await gate.submit();
+
+  gate.advance(60_000);
+  await gate.store.markSettlementPending(first.publicId);
+  const pending = await gate.service.resumeSubmission({ session: session(), publicId: first.publicId });
+  assert.deepEqual(pending, {
+    publicId: first.publicId, state: "pending_settlement", updatedAt: new Date(START.getTime() + 60_000),
+  });
+
+  const serialized = JSON.stringify(pending).toLowerCase();
+  for (const secret of ["signature", "quoteid", "capacity", "reservation", "notification", "destination",
+    "snapshot", "nonce", "voter", "attention"]) {
+    assert.equal(serialized.includes(secret), false, secret);
+  }
 });
