@@ -491,7 +491,10 @@ class PostgresGateStore {
         (SELECT count(*)::int FROM gate.quotes q2 JOIN gate.submissions s2 ON s2.id=q2.submission_id
           WHERE s2.profile_id=$1 AND q2.state='quoted' AND q2.expires_at>clock_timestamp() AND s2.payer=$2 AND q2.voter=$3) AS active_pair`,
       [submission.profileId, submission.payer, quote.voter, snapshot.proposalId, snapshot.dao])).rows[0];
-      invariant(Number(limits.active_pair) === 0 && Number(limits.pair_proposal) < 2, "issuance capacity unavailable");
+      // These two are separate frozen rejection codes, not capacity: the HTTP
+      // layer maps them to coarse ACTIVE_QUOTE_EXISTS / SENDER_PROPOSAL_LIMIT.
+      invariant(Number(limits.active_pair) === 0, "ACTIVE_QUOTE_EXISTS");
+      invariant(Number(limits.pair_proposal) < 2, "SENDER_PROPOSAL_LIMIT");
       invariant(Number(limits.pending_count) < Number(policy.pending_reservation_capacity)
         && Number(limits.settled_count) < Number(policy.settled_capacity), "issuance capacity unavailable");
 

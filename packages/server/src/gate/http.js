@@ -1,4 +1,5 @@
 const http = require("node:http");
+const { SubmissionPolicyError } = require("@gavel/gate");
 const { ProfileRequestError } = require("./profile-service");
 const { IndexUnavailableError } = require("./index-client");
 
@@ -75,13 +76,17 @@ function bearerToken(request) {
   return match[1];
 }
 
-function createGateHttpServer({ authService, profileService, maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
-  challengeLimiter = createChallengeLimiter() } = {}) {
+function createGateHttpServer({ authService, profileService, submissionService,
+  maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
   if (!profileService || typeof profileService.updateProfile !== "function"
       || typeof profileService.listPublicProfiles !== "function" || typeof profileService.getPublicProfile !== "function") {
     throw new TypeError("complete profileService is required");
+  }
+  if (submissionService !== undefined && (typeof submissionService.createSubmission !== "function"
+      || typeof submissionService.getPublicStatus !== "function")) {
+    throw new TypeError("complete submissionService is required");
   }
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new TypeError("maxBodyBytes must be a positive integer");
   if (!challengeLimiter || typeof challengeLimiter.allow !== "function") throw new TypeError("challengeLimiter.allow is required");
@@ -131,6 +136,28 @@ function createGateHttpServer({ authService, profileService, maxBodyBytes = DEFA
         };
         return sendJson(response, 200, { items: await profileService.listPublicProfiles(filters) });
       }
+      const submissions = /^\/v1\/gates\/(0x[0-9a-fA-F]{40})\/submissions$/.exec(path);
+      if (submissionService && request.method === "POST" && submissions) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        const payload = await readJson(request, maxBodyBytes);
+        const result = await submissionService.createSubmission({
+          session, voterWallet: submissions[1], request: payload, ip: request.socket.remoteAddress,
+        });
+        // A duplicate is an owner-bound receipt, never a second quoted row.
+        return result.state === "duplicate"
+          ? sendJson(response, 409, result)
+          : sendJson(response, 201, result);
+      }
+      const status = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/status$/.exec(path);
+      if (submissionService && request.method === "GET" && status) {
+        const receipt = await submissionService.getPublicStatus(status[1]);
+        return receipt
+          ? sendJson(response, 200, receipt)
+          : sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
+      }
       const direct = /^\/v1\/gates\/(0x[0-9a-fA-F]{40})$/.exec(path);
       if (request.method === "GET" && direct) {
         const profile = await profileService.getPublicProfile(direct[1].toLowerCase());
@@ -139,6 +166,11 @@ function createGateHttpServer({ authService, profileService, maxBodyBytes = DEFA
       return sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
     } catch (error) {
       if (response.headersSent || response.destroyed) return;
+      if (error instanceof SubmissionPolicyError) {
+        return sendJson(response, error.statusCode, {
+          state: error.state, error: { code: error.code, message: error.message },
+        });
+      }
       const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError;
       const statusCode = known ? error.statusCode : 500;
       const code = known ? error.code : "INTERNAL_ERROR";
