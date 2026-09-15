@@ -27,10 +27,13 @@ const CODE_HASH = hash("6");
 const GAVEL_RECIPIENT = addr("7");
 
 function canonicalBlocks(from, through, { changedBlock, changedHash, defaultHash = hash("d"), timestamp = new Date() } = {}) {
-  return Array.from({ length: through - from + 1 }, (_, offset) => {
+  const hashes = Array.from({ length: through - from + 1 }, (_, offset) => {
     const blockNumber = from + offset;
-    return { blockNumber: String(blockNumber), blockHash: blockNumber === changedBlock ? changedHash : defaultHash, blockTimestamp: timestamp };
+    return blockNumber === changedBlock ? changedHash : defaultHash;
   });
+  return hashes.map((blockHash, offset) => ({
+    blockNumber: String(from + offset), blockHash, parentHash: offset === 0 ? defaultHash : hashes[offset - 1], blockTimestamp: timestamp,
+  }));
 }
 
 const SIGNER_KEY = `0x${"7".repeat(64)}`;
@@ -59,7 +62,7 @@ async function denied(pool, role, sql) {
   } finally { await client.query("ROLLBACK").catch(() => {}); client.release(); }
 }
 
-test("Gate migration upgrades legacy display and zero-stage Nouns rows fail-closed and idempotently", {
+test("Gate migration upgrades legacy display, Nouns policy, and settlement checks idempotently", {
   skip: canRun ? false : skipReason,
 }, async () => {
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
@@ -82,6 +85,16 @@ test("Gate migration upgrades legacy display and zero-stage Nouns rows fail-clos
     await pool.query(`INSERT INTO gate.dao_policies
       (profile_id,dao,chain_id,enabled,accept_pre_vote,accept_voting,attention_amount)
       VALUES('legacy-profile','nouns',1,true,false,false,1000000)`);
+    await pool.query("ALTER TABLE gate.quotes DROP CONSTRAINT quotes_settlement_complete_check");
+    await pool.query(`ALTER TABLE gate.quotes ADD CHECK(
+      (state='settled')=(settled_tx_hash IS NOT NULL AND settled_log_index IS NOT NULL AND settled_at IS NOT NULL
+      AND receipt_block IS NOT NULL AND receipt_block_hash IS NOT NULL AND receipt_block_timestamp IS NOT NULL
+      AND settlement_proof_canonical IS TRUE AND settlement_scanner_verified IS TRUE
+      AND settlement_event_quote_id=quote_id AND settlement_confirmations=1
+      AND settlement_payer IS NOT NULL AND settlement_voter IS NOT NULL AND settlement_attention_amount IS NOT NULL
+      AND settlement_fee_amount IS NOT NULL AND settlement_gavel_recipient IS NOT NULL AND settlement_token IS NOT NULL
+      AND settlement_submission_hash IS NOT NULL AND settlement_quote_version IS NOT NULL
+      AND settlement_source_chain_id IS NOT NULL AND settlement_splitter IS NOT NULL))`);
     await pool.query(`UPDATE public.schema_migrations
       SET migration_checksum='sha256:gate-001-v3-durable-auth-profile-hardening',
           catalog_manifest=public.gavel_gate_catalog_manifest()
@@ -102,6 +115,20 @@ test("Gate migration upgrades legacy display and zero-stage Nouns rows fail-clos
     assert.equal(nounsConstraints.rows[0].conname, "dao_policies_nouns_policy_check");
     await assert.rejects(pool.query(`UPDATE gate.dao_policies SET enabled=true
       WHERE profile_id='legacy-profile' AND dao='nouns'`), (error) => error.code === "23514");
+    const settlementConstraints = await pool.query(`SELECT c.conname,pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
+        AND pg_get_constraintdef(c.oid) LIKE '%settlement_confirmations%'`);
+    assert.equal(settlementConstraints.rows.length, 1);
+    assert.equal(settlementConstraints.rows[0].conname, "quotes_settlement_complete_check");
+    assert.match(settlementConstraints.rows[0].definition, /settlement_confirmations = 1/);
+    for (const column of ["settled_tx_hash", "settled_log_index", "settled_at", "receipt_block", "receipt_block_hash",
+      "receipt_block_timestamp", "settlement_proof_canonical", "settlement_scanner_verified", "settlement_event_quote_id",
+      "settlement_payer", "settlement_voter", "settlement_attention_amount", "settlement_fee_amount",
+      "settlement_gavel_recipient", "settlement_token", "settlement_submission_hash", "settlement_quote_version",
+      "settlement_source_chain_id", "settlement_splitter"]) {
+      assert.match(settlementConstraints.rows[0].definition, new RegExp(`\\b${column}\\b`), column);
+    }
 
     const manifestBeforeRerun = (await pool.query(`SELECT catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0].catalog_manifest;
@@ -201,7 +228,7 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       receiptBlockTimestamp: new Date(Date.now() - 1000), settledAt: new Date(),
       event: { quoteId: settledQuoteId, payer: PAYER, voter: WALLET, attentionAmount: "1000000", gavelFeeAmount: "250000",
         gavelRecipient: GAVEL_RECIPIENT, token: TOKEN, submissionHash: hash("b") },
-      evidence: { oneConfirmation: true, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER } };
+      evidence: { oneConfirmation: true, confirmations: 1, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER } };
     const settleCommand = { quoteId: settledQuoteId, settlement,
       inbox: { id: "inbox-1", issuanceLifecycle: "VOTING", currentLifecycle: "UNKNOWN", lifecycleChanged: false,
         currentLifecycleUnavailable: true, privateUnavailabilityReason: "private" },
@@ -213,12 +240,28 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       observations: [{ kind: "exact_log", quoteId: settledQuoteId, txHash: hash("c"), logIndex: 0, blockNumber: "7",
         blockHash: hash("d"), blockTimestamp: settlement.receiptBlockTimestamp, exactMatch: true }] };
     await store.recordScannerRange(settledScanRange);
-    assert.deepEqual(await store.recordScannerRange(settledScanRange), { released: 0 });
-    await assert.rejects(store.recordScannerRange({ ...settledScanRange, canonicalBlockHash: hash("e"),
-      canonicalBlocks: canonicalBlocks(5, 7, { changedBlock: 7, changedHash: hash("e"), timestamp: settlement.receiptBlockTimestamp }) }),
-    /conflicting scanner generation replay/);
-    assert.equal((await store.settle(settleCommand)).settled, true);
-    assert.equal(await store.settle(settleCommand), false);
+    assert.deepEqual(await store.recordScannerRange(settledScanRange), { released: 0, reorged: 0 });
+    const conflictingScanRange = { ...settledScanRange, canonicalBlockHash: hash("e"),
+      canonicalBlocks: canonicalBlocks(5, 7, { changedBlock: 7, changedHash: hash("e"), timestamp: settlement.receiptBlockTimestamp }),
+      observations: [{ ...settledScanRange.observations[0], blockHash: hash("e") }] };
+    await assert.rejects(store.recordScannerRange(conflictingScanRange), /conflicting scanner generation replay/);
+    assert.deepEqual((await pool.query(`SELECT c.scan_generation::text AS generation,c.next_range_from::text AS next,
+      count(r.id)::int AS ranges FROM gate.settlement_cursors c LEFT JOIN gate.settlement_scan_ranges r
+      ON r.deployment_id=c.deployment_id WHERE c.deployment_id='deployment-1' GROUP BY c.id`)).rows[0],
+    { generation: "1", next: "8", ranges: 1 }, "conflicting replay must not advance or duplicate durable scanner state");
+    assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
+      FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [settledQuoteId])).rows[0],
+    { quote_state: "quoted", quote_reservation_state: "active", reservation_state: "active" });
+    const rollbackCommand = structuredClone(settleCommand);
+    rollbackCommand.notification.summary = { subject: "missing-text" };
+    await assert.rejects(store.settle(rollbackCommand));
+    assert.deepEqual(await store.counts(),
+      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0 });
+    const concurrentSettlement = await Promise.all([store.settle(settleCommand), store.settle(settleCommand)]);
+    assert.equal(concurrentSettlement.filter((result) => result?.settled === true).length, 1);
+    assert.equal(concurrentSettlement.filter((result) => result === false).length, 1);
+    assert.deepEqual(await store.counts(),
+      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 1, monitors: 1 });
     await assert.rejects(store.settle({ ...settleCommand, settlement: { ...settlement, txHash: hash("e") } }), /conflicting/);
     await pool.query("UPDATE gate.quotes SET settled_tx_hash=$2 WHERE quote_id=$1", [settledQuoteId, hash("e")]).then(
       () => assert.fail("settlement evidence changed"), (error) => assert.equal(error.code, "23514"));
@@ -227,9 +270,10 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     assert.equal(receipt.state, "accepted");
 
     const rewrittenAt = new Date();
-    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "6", throughBlock: "8",
+    const rewritten = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "6", throughBlock: "8",
       canonicalBlockHash: hash("d"), canonicalBlockTimestamp: rewrittenAt,
       canonicalBlocks: canonicalBlocks(6, 8, { changedBlock: 7, changedHash: hash("e"), timestamp: rewrittenAt }), observations: [] });
+    assert.deepEqual(rewritten, { released: 0, reorged: 1 });
     const reorged = (await pool.query("SELECT settlement_reorged_at FROM gate.quotes WHERE quote_id=$1", [settledQuoteId])).rows[0];
     assert.ok(reorged.settlement_reorged_at, "accepted overlap rewrite must be privately marked");
     assert.ok((await pool.query("SELECT reconciliation_metadata->'trailingOverlapReorg' AS anomaly FROM gate.settlement_reorg_monitors WHERE quote_id='quote-1'")).rows[0].anomaly,
@@ -237,6 +281,12 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     assert.equal((await createPublicGateReader(pool).getSubmission(first.publicId)).state, "accepted");
     assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_observations WHERE quote_id=$1", [settledQuoteId])).rows[0].n, 1,
       "orphaned generations remain immutable audit history");
+    assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,
+      r.state AS reservation_state,r.released_at IS NULL AS never_released,r.consumed_at IS NOT NULL AS consumed
+      FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [settledQuoteId])).rows[0],
+    { quote_state: "settled", quote_reservation_state: "consumed", reservation_state: "consumed", never_released: true, consumed: true },
+    "scanner reconciliation must leave a consumed reservation durably consumed, not pending or released");
+    assert.equal(await store.countLiabilities("profile-1"), 0n, "a consumed reservation must not remain stranded as pending liability");
 
     const expiring = issuance("f"); expiring.context.expectedProfileVersion = "4";
     const issuedExpiring = await store.issue(expiring);
@@ -273,11 +323,18 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       await pool.query("ALTER TABLE gate.capacity_reservations ENABLE TRIGGER capacity_reservations_immutable_relationship");
     }
     await store.markExpired();
+    const releaseScanAt = new Date();
     await assert.rejects(pool.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb)",
-      ["deployment-1", "8", "9", hash("f"), new Date(), JSON.stringify({ kind: "observations", observations: [{ kind: "exact_log" }], metadata: {} })]));
+      ["deployment-1", "9", "12", hash("f"), releaseScanAt, JSON.stringify({ generation: "5", kind: "no_match",
+        canonicalBlocks: canonicalBlocks(9, 11, { defaultHash: hash("f"), timestamp: releaseScanAt })
+          .map((block) => ({ ...block, blockTimestamp: block.blockTimestamp.toISOString() })), observations: [], metadata: {} })]),
+    /scanner result does not completely describe its canonical range/);
     assert.equal((await pool.query("SELECT next_range_from::text AS next FROM gate.settlement_cursors WHERE deployment_id='deployment-1'")).rows[0].next, "11");
     assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_ranges WHERE deployment_id='deployment-1'")).rows[0].n, 4);
-    const releaseScanAt = new Date();
+    assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
+      FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [hash("f")])).rows[0],
+    { quote_state: "expired", quote_reservation_state: "expiry_pending_reconciliation", reservation_state: "expiry_pending_reconciliation" },
+    "incomplete canonical coverage must not release an expired reservation");
     await assert.rejects(store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "10", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(10, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] }), /discontinuous/);
@@ -285,8 +342,17 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(9, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] });
     assert.equal(scan.released, 1);
+    assert.deepEqual(await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "9", throughBlock: "12",
+      canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
+      canonicalBlocks: canonicalBlocks(9, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] }), { released: 0, reorged: 0 },
+    "an exact scanner replay must not double release");
     const releaseEvidence = { deploymentId: "deployment-1" };
     assert.equal(await store.releaseReservation(hash("f"), releaseEvidence), false);
+    assert.deepEqual((await pool.query(`SELECT q.reservation_state AS quote_reservation_state,r.state AS reservation_state,
+      r.released_at IS NOT NULL AS released,count(*) OVER()::int AS graph_count
+      FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [hash("f")])).rows[0],
+    { quote_reservation_state: "released", reservation_state: "released", released: true, graph_count: 1 },
+    "scanner reconciliation must release exactly one quote-reservation graph");
     assert.equal(await store.countLiabilities("profile-1"), 0n);
 
     assert.equal(await denied(pool, "gavel_gate", "DELETE FROM gate.quotes WHERE false"), true);

@@ -19,6 +19,7 @@ const quote = require('./quote');
 const submissionPolicy = require('./submission-policy');
 const enrollment = require('./enrollment');
 const nounsGateAdapter = require('./nouns-gate-adapter');
+const settlement = require('./settlement');
 
 module.exports = {
   ...constants,
@@ -26,6 +27,7 @@ module.exports = {
   ...submissionPolicy,
   ...enrollment,
   ...nounsGateAdapter,
+  ...settlement,
   SUBMISSION_HASH_DOMAIN_TAG: submissionHash.SUBMISSION_HASH_DOMAIN_TAG,
   createDaoPolicySchema: schema.createDaoPolicySchema,
   validateDaoPolicy: schema.validateDaoPolicy,

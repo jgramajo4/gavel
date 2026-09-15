@@ -178,7 +178,7 @@ function settlementCommand(suffix, quoteId, overrides = {}) {
         gavelRecipient: ADDR.payer2, gavelFeeAmount: "250000", token: ADDR.token, submissionHash: hash("a"),
       },
       evidence: {
-        oneConfirmation: true, canonical: true, scannerVerified: true,
+        oneConfirmation: true, confirmations: 1, canonical: true, scannerVerified: true,
         chainId: "8453", splitter: ADDR.splitter,
       },
     },
@@ -187,7 +187,8 @@ function settlementCommand(suffix, quoteId, overrides = {}) {
       lifecycleChanged: false, currentLifecycleUnavailable: false,
     },
     notification: {
-      id: `notification-${suffix}`, channel: "email", destinationRef: "vault:ciphertext", status: "pending",
+      id: `notification-${suffix}`, channel: "email", destinationRef: "vault:ciphertext",
+      summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." }, status: "pending",
     },
     monitor: { id: `monitor-${suffix}`, nextCheckBlock: "151" },
   };
@@ -336,6 +337,9 @@ test("settlement resolves public quoteId, verifies every event binding and scann
     bad.settlement.evidence[field] = false;
     await assert.rejects(store.settle(bad), /scanner evidence/);
   }
+  const badDepth = structuredClone(command);
+  badDepth.settlement.evidence.confirmations = 2;
+  await assert.rejects(store.settle(badDepth), /scanner evidence/);
   const atExpiry = structuredClone(command);
   atExpiry.settlement.receiptBlockTimestamp = new Date("2026-01-01T00:10:00.000Z");
   await assert.rejects(store.settle(atExpiry), /strictly before quote expiry/);
@@ -344,9 +348,190 @@ test("settlement resolves public quoteId, verifies every event binding and scann
   assert.deepEqual(accepted, { settled: true, inboxCreatedAt: new Date("2026-01-01T00:06:00.000Z") });
   accepted.inboxCreatedAt.setUTCFullYear(1999);
   assert.equal(await store.settle(structuredClone(command)), false);
+  const dynamicReplay = structuredClone(command);
+  dynamicReplay.settlement.settledAt = new Date("2026-01-01T00:07:00.000Z");
+  dynamicReplay.inbox.currentLifecycle = "CLOSED";
+  dynamicReplay.inbox.lifecycleChanged = true;
+  assert.equal(await store.settle(dynamicReplay), false);
   const conflict = structuredClone(command);
   conflict.settlement.txHash = hash("f");
   await assert.rejects(store.settle(conflict), /conflicting settlement evidence/);
+});
+
+test("PR6 memory store persists owner-bound settlement hints and exposes only private settlement material", async () => {
+  let now = new Date("2026-01-01T00:01:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("2");
+  const issued = await store.issue(issuance("pr6-hint", { quoteId, submissionHash: hash("3") }));
+  assert.equal(await store.recordSettlementHint({ publicId: issued.publicId, payer: ADDR.payer2,
+    txHash: hash("8"), chainId: "8453", splitter: ADDR.splitter }), null);
+  const hint = await store.recordSettlementHint({ publicId: issued.publicId, payer: ADDR.payer1,
+    txHash: hash("8"), chainId: "8453", splitter: ADDR.splitter });
+  assert.deepEqual(hint, { publicId: issued.publicId, state: "pending_settlement", updatedAt: now });
+  assert.deepEqual(await store.listPendingSettlementHints({ limit: 10 }), [{
+    publicId: issued.publicId, quoteId, txHash: hash("8"), expiresAt: issued.quote.expiresAt,
+  }]);
+  const privateQuote = await store.findSettlementQuote(quoteId);
+  assert.deepEqual(Object.keys(privateQuote).sort(), ["attentionAmount", "baseChainId", "dao", "destinationRef",
+    "expiresAt", "feeAmount", "gavelRecipient", "issuanceLifecycle", "payer", "proposalId", "quoteId",
+    "quoteVersion", "splitter", "submissionHash", "token", "trustedSummary", "voter"].sort());
+  assert.deepEqual(privateQuote.trustedSummary,
+    { subject: "Paid pitch ready", text: "Open your private Gate inbox." });
+  assert.equal(privateQuote.destinationRef, "profile:profile-1");
+  now = new Date("2026-01-01T00:02:00.000Z");
+  assert.equal(await store.resolveSettlementHint({ publicId: issued.publicId, txHash: hash("8"), state: "payment_required" }), true);
+  assert.deepEqual(await store.listPendingSettlementHints({ limit: 10 }), []);
+  assert.equal((await store.getSubmission(issued.publicId)).state, "payment_required");
+  now = issued.quote.expiresAt;
+  const expired = await store.recordSettlementHint({ publicId: issued.publicId, payer: ADDR.payer1,
+    txHash: hash("9"), chainId: "8453", splitter: ADDR.splitter });
+  assert.equal(expired.state, "expired");
+  assert.equal(expired.updatedAt.toISOString(), issued.quote.expiresAt.toISOString());
+  assert.equal((await store.getSubmission(issued.publicId)).state, "expired");
+  assert.equal(await store.countLiabilities("profile-1"), 1000000n);
+});
+
+test("PR6 memory store recovers durable latest exact observations and owns overlap config", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("pr6-recovery", { quoteId }));
+  const state = await store.getScannerState({ chainId: "8453", splitter: ADDR.splitter });
+  assert.equal(state.overlap, 64);
+  const settlement = settlementCommand("recovery", quoteId).settlement;
+  settlement.receiptBlock = "0"; settlement.receiptBlockHash = hash("9");
+  settlement.receiptBlockTimestamp = new Date("2026-01-01T00:00:00.000Z");
+  settlement.settledAt = settlement.receiptBlockTimestamp;
+  await store.recordScannerRange({ deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: settlement.receiptBlockTimestamp,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("9"), parentHash: hash("8"), blockTimestamp: settlement.receiptBlockTimestamp }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: settlement.receiptBlockTimestamp, exactMatch: true, details: { settlement } }] });
+  assert.deepEqual(await store.listUnsettledSettlementObservations({ chainId: "8453", splitter: ADDR.splitter }),
+    [{ quoteId, settlement }]);
+});
+
+test("Memory deployment ignores a caller-provided later cursor and starts exactly at deployment block", async () => {
+  const store = new MemoryGateStore();
+  await store.configureDeployment({ id: "cursor-pin", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "10", nextBlock: "1000",
+    config: { overlap: 64 }, rpcAccess: {}, issuanceActive: true });
+  assert.deepEqual(await store.getScannerState({ chainId: "8453", splitter: ADDR.splitter }), {
+    deploymentId: "cursor-pin", deploymentBlock: "10", nextRangeFrom: "10", generation: "0", overlap: 64,
+  });
+});
+
+test("PR6 memory scanner atomically releases expiry-pending reservations after complete no-match coverage", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("d");
+  await store.issue(issuance("memory-release", { quoteId, expiresAt: new Date("2026-01-01T00:10:00.000Z") }));
+  now = new Date("2026-01-01T00:11:00.000Z");
+  await store.markExpired();
+  const result = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: now,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("9"), parentHash: hash("8"), blockTimestamp: now }],
+    observations: [] });
+  assert.deepEqual(result, { released: 1, reorged: 0 });
+  assert.equal(await store.countLiabilities("profile-1"), 0n);
+});
+
+test("concurrent scanner generation replays ignore observer settledAt while preserving chain evidence", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("scanner-replay", { quoteId }));
+  const settlement = settlementCommand("scanner-replay", quoteId).settlement;
+  settlement.receiptBlock = "0";
+  settlement.receiptBlockHash = hash("9");
+  settlement.receiptBlockTimestamp = new Date("2026-01-01T00:00:00.000Z");
+  const range = {
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: settlement.receiptBlockTimestamp,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("9"), parentHash: hash("8"), blockTimestamp: settlement.receiptBlockTimestamp }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: settlement.receiptBlockTimestamp, exactMatch: true, details: { settlement } }],
+  };
+  const replay = structuredClone(range);
+  replay.observations[0].details.settlement.settledAt = new Date("2026-01-01T00:09:00.000Z");
+
+  assert.deepEqual(await Promise.all([store.recordScannerRange(range), store.recordScannerRange(replay)]),
+    [{ released: 0, reorged: 0 }, { released: 0, reorged: 0 }]);
+  const [durable] = await store.listUnsettledSettlementObservations({ chainId: "8453", splitter: ADDR.splitter });
+  assert.deepEqual(durable.settlement.settledAt, settlement.receiptBlockTimestamp);
+});
+
+test("PR6 memory scanner rejects inconsistent canonical parent evidence", async () => {
+  const store = await setupStore();
+  await assert.rejects(store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "1",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+    canonicalBlocks: [
+      { blockNumber: "0", blockHash: hash("8"), parentHash: hash("7"), blockTimestamp: new Date("2026-01-01T00:00:00.000Z") },
+      { blockNumber: "1", blockHash: hash("9"), parentHash: hash("6"), blockTimestamp: new Date("2026-01-01T00:00:00.000Z") },
+    ],
+    observations: [],
+  }), /parent.*canonical|ancestry/i);
+});
+
+test("PR6 memory worker claims only due monitors, advances schedule durably, and fences stale owners", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("4");
+  await store.issue(issuance("pr6-worker", { quoteId, submissionHash: hash("5") }));
+  const command = settlementCommand("pr6-worker", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("5") } },
+  });
+  await store.settle(command);
+  assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "150", limit: 5 }), []);
+  const monitors = await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "151", limit: 5 });
+  assert.equal(monitors.length, 1);
+  assert.equal(monitors[0].id, "monitor-pr6-worker");
+  assert.equal(monitors[0].claimToken, "1");
+  now = new Date(now.valueOf() + 31_000);
+  assert.equal(await store.advanceSettlementMonitor({ id: monitors[0].id, claimToken: "9", progressBlock: "151",
+    nextCheckBlock: "152", completed: false, reorged: false }), false);
+  assert.equal(await store.advanceSettlementMonitor({ id: monitors[0].id, claimToken: monitors[0].claimToken, progressBlock: "151",
+    nextCheckBlock: "152", completed: false, reorged: false }), true);
+  assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "151", limit: 5 }), []);
+  const final = await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "152", limit: 5 });
+  assert.equal(await store.advanceSettlementMonitor({ id: final[0].id, claimToken: final[0].claimToken, progressBlock: "152",
+    nextCheckBlock: null, completed: true, reorged: false }), true);
+  assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "999", limit: 5 }), []);
+  const jobs = await store.claimNotificationAttempts({ limit: 5, now });
+  assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext",
+    summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } }]);
+  assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
+  const retryAt = new Date("2026-01-01T00:07:00.000Z");
+  await store.failNotification({ id: jobs[0].id, claimToken: jobs[0].claimToken, errorCode: "TEMP", nextAttemptAt: retryAt });
+  assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
+  now = retryAt;
+  const retry = await store.claimNotificationAttempts({ limit: 5, now });
+  assert.equal(retry[0].retryCount, 1);
+  assert.equal(retry[0].claimToken, "2");
+  await store.completeNotification({ id: retry[0].id, claimToken: retry[0].claimToken, providerOpaqueId: "provider-1" });
+  assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
+  assert.equal((await store.counts()).notifications, 1);
+});
+
+test("notification completions require the current unexpired claim and retries return to pending", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("6");
+  await store.issue(issuance("claim-owner", { quoteId, submissionHash: hash("7") }));
+  await store.settle(settlementCommand("claim-owner", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("7") } },
+  }));
+  const first = (await store.claimNotificationAttempts({ now }))[0];
+  now = new Date("2026-01-01T00:06:31.000Z");
+  const second = (await store.claimNotificationAttempts({ now }))[0];
+  assert.notEqual(second.claimToken, first.claimToken);
+  assert.equal(await store.completeNotification({ id: first.id, claimToken: first.claimToken, providerOpaqueId: "stale" }), false);
+  assert.equal(await store.failNotification({ id: first.id, claimToken: first.claimToken, errorCode: "STALE",
+    nextAttemptAt: new Date("2026-01-01T00:07:00.000Z") }), false);
+  assert.equal(await store.failNotification({ id: second.id, claimToken: second.claimToken, errorCode: "TEMP",
+    nextAttemptAt: new Date("2026-01-01T00:07:00.000Z") }), true);
+  now = new Date("2026-01-01T00:07:00.000Z");
+  const retry = (await store.claimNotificationAttempts({ now }))[0];
+  assert.equal(await store.completeNotification({ id: retry.id, claimToken: retry.claimToken, providerOpaqueId: "sent" }), true);
 });
 
 test("expiry updates public submission state and release requires cursor-authorized complete canonical coverage", async () => {
@@ -361,21 +546,22 @@ test("expiry updates public submission state and release requires cursor-authori
   now = new Date("2026-01-01T00:10:01.000Z");
   assert.equal(await store.markExpired(now), 1);
   assert.equal((await store.getSubmission(issued.publicId)).state, "expired");
+  assert.equal(await store.countLiabilities("profile-1"), 1000000n, "expiry alone must retain the pending liability");
 
   const evidence = {
     deploymentId: "deployment-1", chainId: "8453", splitter: ADDR.splitter,
     cursor: { fromBlock: "0", throughBlock: "0", nextBlock: "1" },
     coverage: { rangeFrom: "0", rangeTo: "0", lastEligibleBlock: "0", canonical: true, canonicalBlockHash: hash("8") },
   };
-  await assert.rejects(store.releaseReservation(publicQuoteId, "0"), /structured scanner coverage/);
-  const incomplete = structuredClone(evidence);
-  incomplete.coverage.rangeTo = "0";
-  incomplete.coverage.lastEligibleBlock = "1";
-  await assert.rejects(store.releaseReservation(publicQuoteId, incomplete), /complete.*last eligible/);
-  const mismatch = structuredClone(evidence);
-  mismatch.splitter = ADDR.wallet2;
-  await assert.rejects(store.releaseReservation(publicQuoteId, mismatch), /deployment.*mismatch/);
-  assert.equal(await store.releaseReservation(publicQuoteId, evidence), true);
+  await assert.rejects(store.releaseReservation(publicQuoteId, "0"), /owned by recordScannerRange/);
+  await assert.rejects(store.releaseReservation(publicQuoteId, evidence), /owned by recordScannerRange/);
+  const releaseResult = await store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("8"), canonicalBlockTimestamp: now,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("8"), parentHash: hash("9"), blockTimestamp: now }],
+    observations: [],
+  });
+  assert.deepEqual(releaseResult, { released: 1, reorged: 0 });
   assert.equal(await store.releaseReservation(publicQuoteId, evidence), false);
   assert.equal(await store.countLiabilities("profile-1"), 0n);
   assert.deepEqual(await store.settle(settlementCommand("released", publicQuoteId)), {
@@ -652,10 +838,11 @@ test("late canonical settlement consumes a released reservation, creates overage
   }));
   now = new Date("2026-01-01T00:11:00.000Z");
   await store.markExpired(now);
-  await store.releaseReservation(lateQuoteId, {
-    deploymentId: "deployment-1", chainId: "8453", splitter: ADDR.splitter,
-    cursor: { fromBlock: "0", throughBlock: "0", nextBlock: "1" },
-    coverage: { rangeFrom: "0", rangeTo: "0", lastEligibleBlock: "0", canonical: true, canonicalBlockHash: hex32(9002) },
+  await store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hex32(9002), canonicalBlockTimestamp: now,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hex32(9002), parentHash: hex32(9003), blockTimestamp: now }],
+    observations: [],
   });
 
   for (let index = 1; index <= 25; index += 1) {
