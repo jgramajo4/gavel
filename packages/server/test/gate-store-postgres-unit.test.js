@@ -20,7 +20,7 @@ function issuanceCommand() {
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: A,
       expectedProfileVersion: "1", walletKind: "eoa", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "s", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE",
-      eligibility: "VOTING", mappingVersion: 1, sourceBlock: "1", sourceBlockHash: H("3"),
+      eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"),
       refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A, material: {} },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
@@ -44,6 +44,10 @@ test("Postgres store rejects non-canonical protocol primitives before SQL", asyn
   }), /bytes32|snapshot|hash/i);
   await assert.rejects(store.mutateProfile({
     profile: { id: "p", wallet: A },
+    policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: false, attentionAmount: "1000000" },
+  }), /VOTING/i);
+  await assert.rejects(store.mutateProfile({
+    profile: { id: "p", wallet: A },
     policy: { dao: "nouns", chainId: "1", enabled: "yes", acceptPreVote: true, acceptVoting: true, attentionAmount: "1000000" },
   }), /enabled.*boolean/i);
   await assert.rejects(store.mutateProfile({
@@ -51,6 +55,8 @@ test("Postgres store rejects non-canonical protocol primitives before SQL", asyn
     policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
       attentionAmount: "2000000", pendingReservationCapacity: 0, settledCapacity: 25 },
   }), /pending.*positive/i);
+  await assert.rejects(store.mutateProfile({ profile: { id: "p", wallet: A,
+    display: { message: { session: "private" } } } }), /display\.message/);
   for (const [pendingReservationCapacity, settledCapacity] of [[13, 25], [25, 25]]) {
     await assert.rejects(store.mutateProfile({
       profile: { id: "p", wallet: A },
@@ -86,7 +92,7 @@ test("Postgres issuance and settlement reject stale or incomplete evidence befor
       expectedProfileVersion: "1", walletKind: "eoa", basePayoutCodeHash: null,
       stage: "VOTING", deploymentCodeHash: `0x${"1".repeat(64)}` },
     snapshot: { id: "s", dao: "nouns", proposalId: "1", contentHash: `0x${"2".repeat(64)}`,
-      mappingVersion: 1, sourceBlock: "1", sourceBlockHash: `0x${"3".repeat(64)}`, canonicalActions: [] },
+      mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: `0x${"3".repeat(64)}`, canonicalActions: [] },
     submission: { id: "sub", submissionHash: `0x${"4".repeat(64)}`, profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: `0x${"5".repeat(64)}`, payer: A, voter: A, attentionAmount: "1000000",
       feeAmount: "250000", token: A, baseChainId: "1", splitter: A, quoteVersion: 1, expiresAt: future },
@@ -118,12 +124,36 @@ test("profile mutation preserves omitted wallet kind and marks unauthoritative d
   const omitted = calls.find((call) => /FROM gate\.mutate_profile/.test(call.sql));
   assert.equal(omitted.values[2], null);
   assert.ok(calls.findIndex((call) => /pg_advisory_xact_lock/.test(call.sql)) < calls.indexOf(omitted));
+  assert.deepEqual(calls.find((call) => /pg_advisory_xact_lock/.test(call.sql)).values, ["gate:profile:p"]);
 
   calls.length = 0;
   await store.mutateProfile({ profile: { id: "p", wallet: A, walletKind: "eoa" } });
   const downgrade = calls.find((call) => /FROM gate\.mutate_profile/.test(call.sql));
   assert.equal(downgrade.values[2], "eoa");
   assert.equal(downgrade.values[11], false);
+});
+
+test("profile listing enforces a bounded stable SQL page", async () => {
+  const calls = [];
+  const store = new PostgresGateStore({ pool: { async query(sql, values) { calls.push({ sql: String(sql), values }); return { rows: [] }; } } });
+  await store.listProfiles({ dao: "nouns", availability: "accepting_now", limit: 50, offset: 0 });
+  assert.match(calls[0].sql, /ORDER BY p\.updated_at DESC,p\.id ASC\s+LIMIT \$3 OFFSET \$4/i);
+  assert.deepEqual(calls[0].values, ["nouns", "accepting_now", 50, 0]);
+  await assert.rejects(store.listProfiles({ limit: 51 }), /limit/);
+});
+
+test("public profile capacity lookup returns only a coarse availability boolean", async () => {
+  const calls = [];
+  const store = new PostgresGateStore({ pool: { async query(sql, values) {
+    calls.push({ sql: String(sql), values });
+    return { rows: [{ available: false }] };
+  } } });
+  assert.equal(await store.isProfileAccepting("profile-1", "nouns"), false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].values, ["profile-1", "nouns"]);
+  assert.match(calls[0].sql, /pending_reservation_capacity/);
+  assert.match(calls[0].sql, /settled_capacity/);
+  assert.match(calls[0].sql, /interval '24 hours'/);
 });
 
 test("issuance uses independent DAO/Base chains, exact database-clock lifetime, locked Base code verification, and in-transaction signing", async () => {
@@ -154,7 +184,7 @@ test("issuance uses independent DAO/Base chains, exact database-clock lifetime, 
   });
   const command = {
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: B, expectedProfileVersion: "7", walletKind: "contract", stage: "VOTING", deploymentCodeHash: H("1") },
-    snapshot: { id: "snap", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: 1, sourceBlock: "1", sourceBlockHash: H("3"), refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
+    snapshot: { id: "snap", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: B, signedSender: B, material: {} },
     quote: { id: "q", quoteId: H("5"), payer: B, voter: A, attentionAmount: "1000000", feeAmount: "250000", token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1, expiresAt: callerExpiry },
     reservation: { id: "r", profileId: "p", amount: "1000000", expiresAt: callerExpiry },
@@ -219,7 +249,7 @@ test("issuance and inbox lifecycles enforce canonical ACTIVE to VOTING and exact
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: A,
       expectedProfileVersion: "1", walletKind: "eoa", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "s", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING",
-      mappingVersion: 1, sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
+      mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
       token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
@@ -256,7 +286,7 @@ test("duplicates resume with the exact public state and pending settlement is a 
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: A,
       expectedProfileVersion: "1", walletKind: "eoa", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "s", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING",
-      mappingVersion: 1, sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
+      mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
       token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
@@ -272,7 +302,7 @@ test("duplicates resume with the exact public state and pending settlement is a 
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: A,
       expectedProfileVersion: "1", walletKind: "eoa", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "s2", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING",
-      mappingVersion: 1, sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
+      mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), canonicalActions: [] },
     submission: { id: "sub2", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A },
     quote: { id: "q2", quoteId: H("6"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
       token: A, baseChainId: "8453", splitter: A, quoteVersion: 1, expiresAt: future },
@@ -356,6 +386,22 @@ test("issuance rechecks the exact hash after the profile lock and resumes the co
   assert.equal(hashLookups, 2);
   assert.ok(calls.findIndex((sql) => /pg_advisory_xact_lock/.test(sql))
     < calls.findLastIndex((sql) => /submission_hash/.test(sql)));
+});
+
+test("issuance locks the persisted profile identity when it differs from the wallet", async () => {
+  const calls = [];
+  let hashLookups = 0;
+  const client = { async query(sql, values = []) {
+    sql = String(sql); calls.push({ sql, values });
+    if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) {
+      hashLookups += 1;
+      return hashLookups === 1 ? { rows: [] } : { rows: [{ publicId: "winner", status: "QUOTED", payer: A, profileId: "p" }] };
+    }
+    return { rows: [], rowCount: 1 };
+  }, release() {} };
+  const store = new PostgresGateStore({ pool: { connect: async () => client } });
+  await store.issue(issuanceCommand());
+  assert.deepEqual(calls.find(({ sql }) => /pg_advisory_xact_lock/.test(sql)).values, ["gate:profile:p"]);
 });
 
 test("notification metadata-only patches preserve omitted fields and pass a bounded retry limit", async () => {
@@ -458,7 +504,10 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /enabled boolean NOT NULL/i);
   assert.match(sql, /current_lifecycle_unavailable boolean NOT NULL/i);
   assert.match(sql, /CREATE TYPE gate\.lifecycle AS ENUM \('PRE_VOTE','VOTING','CLOSED','UNKNOWN'\)/i);
-  assert.match(sql, /dao <> 'nouns' OR \(chain_id = 1 AND accept_pre_vote = false\)/i);
+  assert.match(sql, /dao <> 'nouns' OR \(chain_id = 1 AND accept_pre_vote = false AND \(enabled = false OR accept_voting = true\)\)/i);
+  assert.match(sql, /mapping_version text NOT NULL CHECK\(mapping_version='nouns-lifecycle\/1'\)/i);
+  assert.match(sql, /ALTER COLUMN mapping_version TYPE text[\s\S]*nouns-lifecycle\/1/i);
+  assert.match(sql, /ADD CONSTRAINT proposal_snapshots_mapping_version_check\s+CHECK \(mapping_version='nouns-lifecycle\/1'\)/i);
   assert.match(sql, /status IN\('QUOTED','SETTLEMENT_PENDING','SETTLED','EXPIRED'\)/i);
   assert.match(sql, /retry_count integer NOT NULL DEFAULT 0/i);
   assert.match(sql, /private_unavailability_reason/i);
@@ -472,6 +521,11 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.doesNotMatch(sql, /GRANT[^;]*DELETE/i);
   assert.match(sql, /protect_settlement_evidence/i);
   assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.mutate_profile/i);
+  assert.match(sql, /display_cache\s*-\s*ARRAY\['ens','message'\]/i);
+  assert.match(sql, /before_row\.wallet\s*<>\s*p_wallet[\s\S]*wallet.*immutable/i);
+  const publicProfiles = sql.match(/CREATE (?:OR REPLACE )?VIEW gate_public\.profiles[\s\S]*?;/i)?.[0] || "";
+  assert.doesNotMatch(publicProfiles, /SELECT[^;]*\bdisplay_cache\s*(?:,|FROM)/i);
+  assert.match(publicProfiles, /\bens\b[\s\S]*\bmessage\b/i);
   assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.validate_relational_bindings/i);
   assert.doesNotMatch(sql, /DECLARE[^\n]+;\s*\nDECLARE\s/i);
   assert.match(sql, /settlement_scanner_verified boolean/i);

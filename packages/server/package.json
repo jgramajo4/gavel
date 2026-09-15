@@ -5,6 +5,8 @@
   "description": "Reserved package boundary for the optional self-hosted Gavel service.",
   "license": "GPL-3.0-only",
   "dependencies": {
+    "@gavel/gate": "^0.2.0",
+    "ethers": "^6.17.0",
     "pg": "^8.23.0"
   },
   "scripts": {

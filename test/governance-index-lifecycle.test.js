@@ -35,29 +35,31 @@ function nounsSubgraph(options = {}) {
   const calls = [];
   const fetch = async (_endpoint, init) => {
     const { query, variables } = JSON.parse(init.body);
-    const operation = query.includes("_meta") ? "meta"
-      : query.includes("votes(") ? "votes"
+    const operation = query.includes("votes(") ? "votes"
       : query.includes("id_in") ? "refreshProposals"
       : query.includes("createdBlock_gte") ? "newProposals"
-      : "allProposals";
+      : query.includes("proposals(") ? "allProposals"
+      : "meta";
     calls.push({ operation, variables });
     if (operation === "meta") return json({ _meta: { block: { number: SUBGRAPH_HEAD } } });
     if (operation === "votes") return json({ votes: [] });
+    const meta = { _meta: { block: { number: variables.snapshot, hash: `0x${"12".repeat(32)}` } } };
     if (operation === "refreshProposals") {
       const wanted = new Set((variables.ids || []).map(String));
-      return json({ proposals: proposals.filter((row) => wanted.has(String(row.id))) });
+      return json({ ...meta, proposals: proposals.filter((row) => wanted.has(String(row.id))) });
     }
     if (operation === "newProposals") {
       const after = String(variables.after || "");
       const from = BigInt(variables.from);
       return json({
+        ...meta,
         proposals: proposals
           .filter((row) => BigInt(row.createdBlock) >= from && String(row.id) > after)
           .sort((a, b) => (String(a.id) > String(b.id) ? 1 : -1)),
       });
     }
     const after = String(variables.after || "");
-    return json({ proposals: proposals.filter((row) => String(row.id) > after).sort((a, b) => (String(a.id) > String(b.id) ? 1 : -1)) });
+    return json({ ...meta, proposals: proposals.filter((row) => String(row.id) > after).sort((a, b) => (String(a.id) > String(b.id) ? 1 : -1)) });
   };
   const source = new NounsSubgraphSource({ fetch, finalityDepth: FINALITY_DEPTH, replayBlocks: 8, pageSize: 500 });
   return { source, calls };

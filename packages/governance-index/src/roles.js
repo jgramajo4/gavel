@@ -31,6 +31,7 @@ const UNQUOTED_IDENTIFIER = /^[a-z_][a-z0-9_$]{0,62}$/;
 const freezePrivileges = (privileges) => Object.freeze([...privileges]);
 const GATE_TABLE_PRIVILEGES = Object.freeze({
   auth_nonces: freezePrivileges(["SELECT"]),
+  auth_sessions: freezePrivileges(["SELECT"]),
   capacity_reservations: freezePrivileges(["SELECT", "INSERT", "UPDATE"]),
   dao_policies: freezePrivileges(["SELECT"]),
   delivery_settings: freezePrivileges(["SELECT"]),
@@ -54,6 +55,9 @@ const GATE_TABLE_PRIVILEGES = Object.freeze({
   submissions: freezePrivileges(["SELECT", "INSERT", "UPDATE"]),
 });
 const GATE_REQUIRED_FUNCTIONS = Object.freeze([
+  "gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint)",
+  "gate.consume_auth_nonce(text,bigint)",
+  "gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint)",
   "gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamp with time zone,boolean,text,boolean,jsonb)",
   "gate.transition_notification(text,gate.notification_state,text,text)",
   "gate.record_scanner_range(text,bigint,bigint,text,timestamp with time zone,jsonb)",

@@ -44,6 +44,7 @@ test("role inventory preserves application roles and authoritatively includes Ga
 test("Gate privilege audit has one exact migration-matched table matrix", () => {
   assert.deepEqual(GATE_TABLE_PRIVILEGES, {
     auth_nonces: ["SELECT"],
+    auth_sessions: ["SELECT"],
     capacity_reservations: ["SELECT", "INSERT", "UPDATE"],
     dao_policies: ["SELECT"],
     delivery_settings: ["SELECT"],
@@ -143,7 +144,9 @@ function permissionPool({ leakApi = false, dangerousGate = false, catalogLeak = 
         }))) };
       }
       if (/has_function_privilege\('gavel_gate'/.test(text)) {
-        return { rows: values[0].map((signature, index) => ({ signature, granted: !(missingFunction && index === 0) })) };
+        return { rows: values[0].map((signature) => ({
+          signature, granted: !(missingFunction && signature.includes("mutate_profile")),
+        })) };
       }
       if (/FROM pg_roles WHERE rolname = \$1/.test(text)) {
         return { rows: [{ login: true, superuser: false, createrole: false, createdb: false, inherit: false, bypassrls: false, replication: false }] };
@@ -210,6 +213,10 @@ test("migration grants only safe projections to the public API role", () => {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.release_expired_reservation\(text,text\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile\(text,text,text,gate\.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.record_scanner_range\(text,bigint,bigint,text,timestamptz,jsonb\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.insert_auth_nonce\(gate\.auth_proof_type,gate\.auth_purpose,gate\.auth_role,text,text,bigint,text,text,text,bigint,bigint\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.consume_auth_nonce\(text,bigint\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.insert_auth_session\(text,text,gate\.auth_role,bigint,text,bigint,bigint\) TO gavel_gate/i);
+  assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*gate\.(?:auth_nonces|auth_sessions)[^;]*TO gavel_gate/i);
   assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
 });
 

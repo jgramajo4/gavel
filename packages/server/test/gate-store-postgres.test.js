@@ -37,7 +37,7 @@ function issuance(suffix, submissionHash = hash(suffix)) {
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: PAYER,
       expectedProfileVersion: "1", walletKind: "eoa", basePayoutCodeHash: null, stage: "VOTING", deploymentCodeHash: CODE_HASH },
     snapshot: { id: `snapshot-${suffix}`, dao: "nouns", proposalId: String(Number.parseInt(suffix, 16) || 1),
-      contentHash: hash(suffix), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: 1,
+      contentHash: hash(suffix), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
       sourceBlock: "100", sourceBlockHash: hash("a"), refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: `submission-${suffix}`, submissionHash, profileId: "profile-1", payer: PAYER, signedSender: PAYER, material: { vote: "for" } },
     quote: { id: `quote-${suffix}`, quoteId: hash(suffix), payer: PAYER, voter: WALLET, attentionAmount: "1000000",
@@ -54,6 +54,67 @@ async function denied(pool, role, sql) {
     try { await client.query(sql); return false; } catch (error) { return error.code === "42501" || error.code === "23514"; }
   } finally { await client.query("ROLLBACK").catch(() => {}); client.release(); }
 }
+
+test("Gate migration upgrades legacy display and zero-stage Nouns rows fail-closed and idempotently", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(migration);
+
+    await pool.query("ALTER TABLE gate.profiles DROP CONSTRAINT profiles_public_display_shape");
+    await pool.query("ALTER TABLE gate.dao_policies DROP CONSTRAINT dao_policies_nouns_policy_check");
+    await pool.query(`ALTER TABLE gate.dao_policies ADD CONSTRAINT dao_policies_nouns_policy_check
+      CHECK (dao <> 'nouns' OR (chain_id=1 AND accept_pre_vote=false))`);
+    await pool.query(`INSERT INTO gate.profiles(id,wallet,wallet_kind,display_cache)
+      VALUES('legacy-profile',$1,'eoa',$2::jsonb)`, [WALLET, JSON.stringify({
+      ens: "legacy.eth", message: null, destination: "private", nested: { email: "secret@example.test" },
+    })]);
+    await pool.query(`INSERT INTO gate.dao_policies
+      (profile_id,dao,chain_id,enabled,accept_pre_vote,accept_voting,attention_amount)
+      VALUES('legacy-profile','nouns',1,true,false,false,1000000)`);
+    await pool.query(`UPDATE public.schema_migrations
+      SET migration_checksum='sha256:gate-001-v3-durable-auth-profile-hardening',
+          catalog_manifest=public.gavel_gate_catalog_manifest()
+      WHERE version='gate/001_gate-v3'`);
+
+    await pool.query(migration);
+    assert.deepEqual((await pool.query("SELECT display_cache FROM gate.profiles WHERE id='legacy-profile'")).rows[0].display_cache,
+      { ens: "legacy.eth", message: null });
+    assert.deepEqual((await pool.query("SELECT ens,message FROM gate_public.profiles WHERE id='legacy-profile'")).rows[0],
+      { ens: "legacy.eth", message: null });
+    assert.deepEqual((await pool.query(`SELECT enabled,accept_voting FROM gate.dao_policies
+      WHERE profile_id='legacy-profile' AND dao='nouns'`)).rows[0], { enabled: false, accept_voting: false });
+    const nounsConstraints = await pool.query(`SELECT c.conname,pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='gate' AND t.relname='dao_policies' AND c.contype='c'
+        AND pg_get_constraintdef(c.oid) LIKE '%nouns%'`);
+    assert.equal(nounsConstraints.rows.length, 1);
+    assert.equal(nounsConstraints.rows[0].conname, "dao_policies_nouns_policy_check");
+    await assert.rejects(pool.query(`UPDATE gate.dao_policies SET enabled=true
+      WHERE profile_id='legacy-profile' AND dao='nouns'`), (error) => error.code === "23514");
+
+    const manifestBeforeRerun = (await pool.query(`SELECT catalog_manifest FROM public.schema_migrations
+      WHERE version='gate/001_gate-v3'`)).rows[0].catalog_manifest;
+    await pool.query(migration);
+    assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
+      WHERE version='gate/001_gate-v3'`)).rows[0], {
+      migration_checksum: "sha256:gate-001-v3-legacy-upgrade-hardening",
+      catalog_manifest: manifestBeforeRerun,
+    });
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
 
 test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor release, and privacy", {
   skip: canRun ? false : skipReason,
@@ -77,6 +138,29 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_indexer') THEN CREATE ROLE gavel_indexer NOLOGIN; END IF;
     END $$`);
     await pool.query(migration);
+    await pool.query(`INSERT INTO gate.proposal_snapshots
+      (id,dao,proposal_id,content_hash,native_state,normalized_eligibility,mapping_version,source_block,source_block_hash,
+       refreshed_at,canonical_facts,decoded_facts,canonical_actions)
+      VALUES('legacy-mapping','nouns',999,$1,'ACTIVE','VOTING','nouns-lifecycle/1',1,$2,clock_timestamp(),'{}','{}','[]')`,
+    [hash("8"), hash("9")]);
+    await pool.query("ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT proposal_snapshots_mapping_version_check");
+    await pool.query(`ALTER TABLE gate.proposal_snapshots ALTER COLUMN mapping_version TYPE integer
+      USING CASE WHEN mapping_version='nouns-lifecycle/1' THEN 1 ELSE NULL END`);
+    await pool.query("ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_mapping_version_check CHECK(mapping_version=1)");
+    await pool.query(`UPDATE public.schema_migrations SET migration_checksum='sha256:gate-001-v3-durable-auth-profile',
+      catalog_manifest=public.gavel_gate_catalog_manifest() WHERE version='gate/001_gate-v3'`);
+    await pool.query(migration);
+    assert.deepEqual((await pool.query(`SELECT data_type FROM information_schema.columns
+      WHERE table_schema='gate' AND table_name='proposal_snapshots' AND column_name='mapping_version'`)).rows[0], { data_type: "text" });
+    assert.match((await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c
+      JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='gate' AND t.relname='proposal_snapshots' AND c.conname='proposal_snapshots_mapping_version_check'`)).rows[0].definition,
+    /mapping_version = 'nouns-lifecycle\/1'/);
+    assert.equal((await pool.query("SELECT mapping_version FROM gate.proposal_snapshots WHERE id='legacy-mapping'")).rows[0].mapping_version,
+      "nouns-lifecycle/1");
+    await pool.query("ALTER TABLE gate.proposal_snapshots DISABLE TRIGGER proposal_snapshots_immutable");
+    try { await pool.query("DELETE FROM gate.proposal_snapshots WHERE id='legacy-mapping'"); }
+    finally { await pool.query("ALTER TABLE gate.proposal_snapshots ENABLE TRIGGER proposal_snapshots_immutable"); }
     await pool.query(migration);
     assert.equal((await pool.query("SELECT count(*)::int AS n FROM public.schema_migrations WHERE version='gate/001_gate-v3'")).rows[0].n, 1);
 

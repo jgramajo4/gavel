@@ -13,12 +13,18 @@ DO $$
 DECLARE
   marked boolean;
   existing_objects integer;
+  installed_tables integer;
   stored_manifest jsonb;
   current_manifest jsonb;
 BEGIN
   SELECT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version='gate/001_gate-v3') INTO marked;
   SELECT count(*) INTO existing_objects FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='gate' AND c.relkind IN ('r','p','v','m','S');
+  SELECT count(*) INTO installed_tables FROM information_schema.tables WHERE table_schema='gate' AND table_name=ANY(ARRAY[
+    'profiles','dao_policies','auth_nonces','auth_sessions','proposal_snapshots','splitter_deployments','submissions','quotes',
+    'capacity_reservations','inbox_items','notification_attempts','sender_blocks','rate_limit_events','delivery_settings',
+    'settlement_cursors','settlement_scan_ranges','settlement_scan_blocks','settlement_scan_observations','settlement_reorg_monitors',
+    'profile_version_authorizations']);
   IF marked THEN
     IF to_regprocedure('public.gavel_gate_catalog_manifest()') IS NOT NULL THEN
       SELECT catalog_manifest INTO stored_manifest FROM public.schema_migrations WHERE version='gate/001_gate-v3';
@@ -27,11 +33,14 @@ BEGIN
     IF to_regclass('gate.profiles') IS NULL
        OR current_manifest IS DISTINCT FROM stored_manifest
        OR obj_description(to_regclass('gate.profiles'), 'pg_class') IS DISTINCT FROM 'gavel gate 001 v3'
-       OR (SELECT count(*) FROM information_schema.tables WHERE table_schema='gate' AND table_name=ANY(ARRAY[
-         'profiles','dao_policies','auth_nonces','proposal_snapshots','splitter_deployments','submissions','quotes',
-         'capacity_reservations','inbox_items','notification_attempts','sender_blocks','rate_limit_events','delivery_settings',
-         'settlement_cursors','settlement_scan_ranges','settlement_scan_blocks','settlement_scan_observations','settlement_reorg_monitors',
-         'profile_version_authorizations'])) <> 19
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          = 'sha256:gate-001-v3-postgres-parity' AND installed_tables <> 19)
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          = 'sha256:gate-001-v3-durable-auth-profile' AND installed_tables <> 20)
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables <> 20)
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          = 'sha256:gate-001-v3-legacy-upgrade-hardening' AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
@@ -49,8 +58,15 @@ BEGIN
          WHERE n.nspname='gate' AND p.proname='transition_notification' AND p.pronargs=7)
        OR NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
          WHERE n.nspname='gate' AND p.proname='transition_notification' AND p.pronargs=4)
-       OR (SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          IS DISTINCT FROM 'sha256:gate-001-v3-postgres-parity' THEN
+       OR COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
+          NOT IN ('sha256:gate-001-v3-postgres-parity','sha256:gate-001-v3-durable-auth-profile',
+            'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening')
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          = 'sha256:gate-001-v3-durable-auth-profile' AND (
+            to_regclass('gate.auth_sessions') IS NULL
+            OR to_regprocedure('gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint)') IS NULL
+            OR to_regprocedure('gate.consume_auth_nonce(text,bigint)') IS NULL
+            OR to_regprocedure('gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint)') IS NULL)) THEN
       RAISE EXCEPTION 'gate/001_gate-v3 marker does not match installed Gate schema';
     END IF;
   ELSIF existing_objects <> 0 THEN
@@ -81,6 +97,24 @@ CREATE TABLE IF NOT EXISTS gate.profiles (
   base_payout_verified_at timestamptz,
   base_payout_code_hash text CHECK (base_payout_code_hash IS NULL OR base_payout_code_hash ~ '^0x[0-9a-f]{64}$'),
   display_cache jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(display_cache)='object')
+);
+ALTER TABLE gate.profiles DROP CONSTRAINT IF EXISTS profiles_public_display_shape;
+UPDATE gate.profiles
+SET display_cache =
+  CASE WHEN jsonb_typeof(display_cache->'ens') IN ('string','null')
+    THEN jsonb_build_object('ens',display_cache->'ens') ELSE '{}'::jsonb END
+  || CASE WHEN jsonb_typeof(display_cache->'message') IN ('string','null')
+    THEN jsonb_build_object('message',display_cache->'message') ELSE '{}'::jsonb END
+WHERE display_cache IS DISTINCT FROM
+  CASE WHEN jsonb_typeof(display_cache->'ens') IN ('string','null')
+    THEN jsonb_build_object('ens',display_cache->'ens') ELSE '{}'::jsonb END
+  || CASE WHEN jsonb_typeof(display_cache->'message') IN ('string','null')
+    THEN jsonb_build_object('message',display_cache->'message') ELSE '{}'::jsonb END;
+ALTER TABLE gate.profiles ADD CONSTRAINT profiles_public_display_shape CHECK (
+  jsonb_typeof(display_cache)='object'
+  AND display_cache - ARRAY['ens','message']::text[] = '{}'::jsonb
+  AND (NOT (display_cache ? 'ens') OR jsonb_typeof(display_cache->'ens') IN ('string','null'))
+  AND (NOT (display_cache ? 'message') OR jsonb_typeof(display_cache->'message') IN ('string','null'))
 );
 COMMENT ON TABLE gate.profiles IS 'gavel gate 001 v3';
 
@@ -122,9 +156,26 @@ CREATE TABLE IF NOT EXISTS gate.dao_policies (
   pending_reservation_capacity integer NOT NULL DEFAULT 12 CHECK (pending_reservation_capacity > 0),
   settled_capacity integer NOT NULL DEFAULT 25 CHECK (settled_capacity > 0),
   CHECK (pending_reservation_capacity <= settled_capacity / 2),
-  CHECK (dao <> 'nouns' OR (chain_id = 1 AND accept_pre_vote = false)),
   public_tags jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(public_tags)='array'),
   UNIQUE (profile_id,dao)
+);
+ALTER TABLE gate.dao_policies DROP CONSTRAINT IF EXISTS dao_policies_nouns_policy_check;
+DO $$
+DECLARE legacy_constraint name;
+BEGIN
+  FOR legacy_constraint IN
+    SELECT c.conname FROM pg_constraint c
+    WHERE c.conrelid='gate.dao_policies'::regclass AND c.contype='c'
+      AND position('nouns' in lower(pg_get_constraintdef(c.oid))) > 0
+  LOOP
+    EXECUTE format('ALTER TABLE gate.dao_policies DROP CONSTRAINT %I',legacy_constraint);
+  END LOOP;
+END $$;
+UPDATE gate.dao_policies
+SET enabled=false
+WHERE dao='nouns' AND accept_voting=false AND enabled=true;
+ALTER TABLE gate.dao_policies ADD CONSTRAINT dao_policies_nouns_policy_check CHECK (
+  dao <> 'nouns' OR (chain_id = 1 AND accept_pre_vote = false AND (enabled = false OR accept_voting = true))
 );
 DROP TRIGGER IF EXISTS dao_policies_bump_profile_version ON gate.dao_policies;
 
@@ -156,6 +207,9 @@ BEGIN
         CASE WHEN p_has_verified_at THEN p_verified_at END,CASE WHEN p_has_code_hash THEN p_code_hash END)
       RETURNING * INTO result_row;
   ELSE
+    IF before_row.wallet <> p_wallet THEN
+      RAISE EXCEPTION 'profile wallet is immutable' USING ERRCODE='23514';
+    END IF;
     IF before_row.wallet_kind='contract' AND p_wallet_kind='eoa' AND NOT COALESCE(p_wallet_kind_authoritative,false) THEN
       RAISE EXCEPTION 'contract wallet kind downgrade requires authoritative classification' USING ERRCODE='23514';
     END IF;
@@ -226,17 +280,73 @@ CREATE TABLE IF NOT EXISTS gate.auth_nonces (
 );
 CREATE INDEX IF NOT EXISTS auth_nonces_lookup_idx ON gate.auth_nonces(nonce_hash,expires_at) WHERE consumed_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS gate.auth_sessions (
+ token_hash text NOT NULL PRIMARY KEY CHECK(token_hash ~ '^0x[0-9a-f]{64}$'),
+ wallet text NOT NULL CHECK(wallet ~ '^0x[0-9a-f]{40}$'), role gate.auth_role NOT NULL,
+ chain_id bigint NOT NULL CHECK(chain_id>0), audience text NOT NULL CHECK(length(audience)>0),
+ issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL, revoked_at timestamptz,
+ CHECK(expires_at>issued_at), CHECK(revoked_at IS NULL OR revoked_at>=issued_at)
+);
+CREATE INDEX IF NOT EXISTS auth_sessions_active_idx ON gate.auth_sessions(token_hash,expires_at) WHERE revoked_at IS NULL;
+
+CREATE OR REPLACE FUNCTION gate.insert_auth_nonce(
+ p_proof_type gate.auth_proof_type,p_purpose gate.auth_purpose,p_role gate.auth_role,p_wallet text,p_audience text,
+ p_chain_id bigint,p_verifier text,p_nonce_hash text,p_payload_hash text,p_issued_at bigint,p_expiry bigint
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ INSERT INTO gate.auth_nonces(id,proof_type,signed_purpose,internal_operation,role,wallet,audience,chain_id,verifier,
+   nonce_hash,payload_hash,issued_at,expires_at)
+ VALUES(p_nonce_hash,p_proof_type,p_purpose,
+   CASE p_proof_type WHEN 'WalletSession' THEN 'create_session' WHEN 'GateEnrollment' THEN 'mutate_profile'
+     ELSE 'verify_base_payout_control' END,
+   p_role,p_wallet,p_audience,p_chain_id,p_verifier,p_nonce_hash,p_payload_hash,to_timestamp(p_issued_at),to_timestamp(p_expiry));
+END $$;
+REVOKE ALL ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.consume_auth_nonce(p_nonce_hash text,p_consumed_at bigint)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ UPDATE gate.auth_nonces SET consumed_at=to_timestamp(p_consumed_at)
+   WHERE nonce_hash=p_nonce_hash AND consumed_at IS NULL AND expires_at>to_timestamp(p_consumed_at);
+ IF NOT FOUND THEN RAISE EXCEPTION 'authentication proof unavailable' USING ERRCODE='23514'; END IF;
+END $$;
+REVOKE ALL ON FUNCTION gate.consume_auth_nonce(text,bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.insert_auth_session(
+ p_token_hash text,p_wallet text,p_role gate.auth_role,p_chain_id bigint,p_audience text,p_issued_at bigint,p_expiry bigint
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ INSERT INTO gate.auth_sessions(token_hash,wallet,role,chain_id,audience,issued_at,expires_at)
+ VALUES(p_token_hash,p_wallet,p_role,p_chain_id,p_audience,to_timestamp(p_issued_at),to_timestamp(p_expiry));
+END $$;
+REVOKE ALL ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) FROM PUBLIC;
+
 CREATE TABLE IF NOT EXISTS gate.proposal_snapshots (
  id text PRIMARY KEY, dao text NOT NULL CHECK(dao ~ '^[a-z][a-z0-9-]{0,62}$'), proposal_id numeric(78,0) NOT NULL CHECK(proposal_id>=0),
  content_hash text NOT NULL CHECK(content_hash ~ '^0x[0-9a-f]{64}$'), native_state text NOT NULL CHECK(native_state ~ '^[A-Z][A-Z_]*$'),
  normalized_eligibility text NOT NULL CHECK(normalized_eligibility IN('PRE_VOTE','VOTING','CLOSED')),
- mapping_version integer NOT NULL CHECK(mapping_version=1), source_block bigint NOT NULL CHECK(source_block>=0),
+ mapping_version text NOT NULL CHECK(mapping_version='nouns-lifecycle/1'), source_block bigint NOT NULL CHECK(source_block>=0),
  source_block_hash text NOT NULL CHECK(source_block_hash ~ '^0x[0-9a-f]{64}$'), refreshed_at timestamptz NOT NULL,
  canonical_facts jsonb NOT NULL CHECK(jsonb_typeof(canonical_facts)='object'), decoded_facts jsonb NOT NULL CHECK(jsonb_typeof(decoded_facts)='object'),
  canonical_actions jsonb NOT NULL CHECK(jsonb_typeof(canonical_actions)='array'),
  CHECK(dao<>'nouns' OR ((native_state='ACTIVE' AND normalized_eligibility='VOTING') OR (native_state<>'ACTIVE' AND normalized_eligibility='CLOSED'))),
  UNIQUE(dao,proposal_id,content_hash,source_block,source_block_hash)
 );
+DO $$
+DECLARE mapping_version_type text;
+BEGIN
+ SELECT data_type INTO mapping_version_type FROM information_schema.columns
+   WHERE table_schema='gate' AND table_name='proposal_snapshots' AND column_name='mapping_version';
+ IF mapping_version_type='integer' THEN
+  ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_mapping_version_check;
+  ALTER TABLE gate.proposal_snapshots ALTER COLUMN mapping_version TYPE text
+    USING CASE WHEN mapping_version=1 THEN 'nouns-lifecycle/1' ELSE mapping_version::text END;
+  ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_mapping_version_check
+    CHECK (mapping_version='nouns-lifecycle/1');
+ ELSIF mapping_version_type IS DISTINCT FROM 'text' THEN
+  RAISE EXCEPTION 'unsupported gate.proposal_snapshots.mapping_version type: %',mapping_version_type;
+ END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS gate.splitter_deployments (
  id text PRIMARY KEY, chain_id bigint NOT NULL CHECK(chain_id>0), splitter text NOT NULL CHECK(splitter ~ '^0x[0-9a-f]{40}$'),
@@ -814,8 +924,12 @@ CREATE CONSTRAINT TRIGGER monitors_consistent AFTER INSERT OR UPDATE ON gate.set
 -- They never receive USAGE on the private Gate schema or privileges on its tables.
 CREATE SCHEMA IF NOT EXISTS gate_public;
 REVOKE ALL ON SCHEMA gate_public FROM PUBLIC;
+DROP VIEW IF EXISTS gate_public.profiles;
 CREATE OR REPLACE VIEW gate_public.profiles WITH (security_barrier=true) AS
- SELECT id,wallet,wallet_kind,availability,display_cache,enrolled_at,updated_at FROM gate.profiles;
+ SELECT id,wallet,wallet_kind,availability,
+   CASE WHEN jsonb_typeof(display_cache->'ens')='string' THEN display_cache->>'ens' END AS ens,
+   CASE WHEN jsonb_typeof(display_cache->'message')='string' THEN display_cache->>'message' END AS message,
+   enrolled_at,updated_at FROM gate.profiles;
 CREATE OR REPLACE VIEW gate_public.dao_policies WITH (security_barrier=true) AS
  SELECT profile_id,dao,chain_id,enabled,accept_pre_vote,accept_voting,attention_amount,public_tags FROM gate.dao_policies;
 CREATE OR REPLACE VIEW gate_public.submission_receipts WITH (security_barrier=true) AS
@@ -843,7 +957,7 @@ DO $$ BEGIN
     gate.inbox_items,gate.settlement_cursors,gate.settlement_reorg_monitors TO gavel_gate;
   GRANT SELECT,INSERT ON gate.notification_attempts TO gavel_gate;
   GRANT SELECT,INSERT ON gate.proposal_snapshots TO gavel_gate;
-  GRANT SELECT ON gate.auth_nonces,gate.sender_blocks,gate.rate_limit_events,gate.delivery_settings TO gavel_gate;
+  GRANT SELECT ON gate.auth_nonces,gate.auth_sessions,gate.sender_blocks,gate.rate_limit_events,gate.delivery_settings TO gavel_gate;
   GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA gate TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb,boolean) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) TO gavel_gate;
@@ -851,6 +965,9 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.record_scanner_range(text,bigint,bigint,text,timestamptz,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) TO gavel_gate;
  END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_api') THEN
   REVOKE ALL ON SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL TABLES IN SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL SEQUENCES IN SCHEMA gate FROM gavel_api;
@@ -913,7 +1030,7 @@ $catalog_manifest$;
 REVOKE ALL ON FUNCTION public.gavel_gate_catalog_manifest() FROM PUBLIC;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-postgres-parity',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v3-legacy-upgrade-hardening',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest;

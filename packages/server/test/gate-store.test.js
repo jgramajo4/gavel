@@ -10,7 +10,7 @@ function makeIssuance(suffix = "1", overrides = {}) {
   const value = {
     snapshot: {
       id: `snapshot-${suffix}`, dao: "0xDAO", proposalId: "7", contentHash: `hash-${suffix}`,
-      nativeState: "ACTIVE", eligibility: "ELIGIBLE", mappingVersion: 1,
+      nativeState: "ACTIVE", eligibility: "ELIGIBLE", mappingVersion: "nouns-lifecycle/1",
       sourceBlock: "100", sourceBlockHash: "0xblock", refreshedAt: new Date(),
       canonicalFacts: { title: "Vote" }, decodedFacts: {},
     },
@@ -41,6 +41,25 @@ test("Gate migration declares every private persistence table and immutable rela
   assert.match(sql, /payer\s*=\s*signed_sender/i);
   assert.match(sql, /protect_immutable_issuance/i);
   assert.doesNotMatch(sql, /GRANT[^;]*ON\s+gate\.[^;]*TO\s+(?:gavel_api|gavel_indexer)/i);
+});
+
+test("Gate migration fail-closed upgrades legacy public display and Nouns policies", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const displaySanitizer = sql.indexOf("UPDATE gate.profiles\nSET display_cache");
+  const displayConstraint = sql.indexOf("ADD CONSTRAINT profiles_public_display_shape");
+  assert.ok(displaySanitizer >= 0 && displaySanitizer < displayConstraint,
+    "legacy display data must be sanitized before the public-shape constraint is validated");
+  assert.match(sql.slice(displaySanitizer, displayConstraint), /jsonb_typeof\(display_cache->'ens'\).*IN \('string','null'\)/s);
+  assert.match(sql.slice(displaySanitizer, displayConstraint), /jsonb_typeof\(display_cache->'message'\).*IN \('string','null'\)/s);
+  assert.doesNotMatch(sql.slice(displaySanitizer, displayConstraint), /destination|email|webhook/i);
+
+  const nounsDrop = sql.indexOf("DROP CONSTRAINT IF EXISTS dao_policies_nouns_policy_check");
+  const nounsDisable = sql.indexOf("UPDATE gate.dao_policies\nSET enabled=false");
+  const nounsConstraint = sql.indexOf("ADD CONSTRAINT dao_policies_nouns_policy_check");
+  assert.ok(nounsDrop >= 0 && nounsDrop < nounsDisable && nounsDisable < nounsConstraint,
+    "the named Nouns policy constraint must be replaced only after legacy zero-stage policies are disabled");
+  assert.match(sql.slice(nounsDisable, nounsConstraint), /accept_voting\s*=\s*false/i);
+  assert.match(sql.slice(nounsConstraint), /dao <> 'nouns'[\s\S]*enabled = false[\s\S]*accept_voting = true/i);
 });
 
 test("public Gate reader exposes only explicit safe profile, policy, and receipt projections", async () => {
@@ -85,7 +104,7 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
       expectedProfileVersion: "1", walletKind: "eoa", basePayoutCodeHash: null,
       stage: "VOTING", deploymentCodeHash: `0x${"1".repeat(64)}` },
     snapshot: { id: "snapshot-pg", dao: "nouns", proposalId: "1", contentHash: `0x${"2".repeat(64)}`, nativeState: "ACTIVE",
-      eligibility: "VOTING", mappingVersion: 1, sourceBlock: "1", sourceBlockHash: `0x${"3".repeat(64)}`, refreshedAt: new Date(),
+      eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: `0x${"3".repeat(64)}`, refreshedAt: new Date(),
       canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "submission-pg", submissionHash: `0x${"4".repeat(64)}`, profileId: "profile-1",
       payer: `0x${"b".repeat(40)}`, signedSender: `0x${"b".repeat(40)}`, material: {} },

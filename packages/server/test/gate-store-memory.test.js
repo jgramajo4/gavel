@@ -48,7 +48,7 @@ function issuance(suffix, { profileId = "profile-1", voter = ADDR.wallet1, payer
     },
     snapshot: {
       id: `snapshot-${suffix}`, dao: "nouns", proposalId: "7", contentHash: hash("c"),
-      nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: 1, sourceBlock: "100",
+      nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "100",
       sourceBlockHash: hash("d"), refreshedAt: new Date("2026-01-01T00:00:00.000Z"),
       canonicalFacts: { title: "Vote" }, decodedFacts: {}, canonicalActions: [],
     },
@@ -413,11 +413,11 @@ test("profile versions change exactly once per effective profile or policy mutat
   assert.deepEqual((await store.getProfile("profile-1")).updatedAt, initial.updatedAt);
   await store.mutateProfile({ profile: { id: "profile-1", wallet: ADDR.wallet1, display: { ens: "voter.eth" } } });
   assert.equal((await store.getProfile("profile-1")).profileVersion, 2);
-  await store.mutateProfile({ profile: { id: "profile-1", wallet: ADDR.wallet1 }, policy: {
+  await assert.rejects(store.mutateProfile({ profile: { id: "profile-1", wallet: ADDR.wallet1 }, policy: {
     dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: false,
     attentionAmount: "1000000", tags: [],
-  } });
-  assert.equal((await store.getProfile("profile-1")).profileVersion, 3);
+  } }), /VOTING/);
+  assert.equal((await store.getProfile("profile-1")).profileVersion, 2);
 });
 
 test("owned exact-hash retries resume before mutable checks while cross-payer collisions fail closed", async () => {
@@ -575,6 +575,7 @@ test("failed notifications retry only through pending and stop at the configured
 
 test("pending reservation capacity is 12 count-based liabilities", async () => {
   const store = await setupStore();
+  assert.equal(await store.isProfileAccepting("profile-1", "nouns"), true);
   for (let index = 1; index <= 12; index += 1) {
     await store.issue(issuance(`pending-${index}`, {
       payer: addr(100 + index), quoteId: hex32(1000 + index), submissionHash: hex32(2000 + index),
@@ -583,6 +584,7 @@ test("pending reservation capacity is 12 count-based liabilities", async () => {
   await assert.rejects(store.issue(issuance("pending-13", {
     payer: addr(113), quoteId: hex32(1013), submissionHash: hex32(2013),
   })), /capacity unavailable/);
+  assert.equal(await store.isProfileAccepting("profile-1", "nouns"), false);
   assert.equal((await store.counts()).submissions, 12);
 });
 

@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { Pool } = require("pg");
 const { keccak256 } = require("ethers");
+const { NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
 const {
   DEFAULT_NOTIFICATION_RETRY_LIMIT,
   normalizeCapacityPolicy,
@@ -15,6 +16,8 @@ const UINT78 = /^\d{1,78}$/;
 const LIFECYCLES = new Set(["PRE_VOTE", "VOTING", "CLOSED", "UNKNOWN"]);
 const CURRENT_LIFECYCLES = new Set(["VOTING", "CLOSED", "UNKNOWN"]);
 const PUBLIC_ID_ATTEMPTS = 5;
+const PROFILE_PAGE_LIMIT = 50;
+const PROFILE_MAX_OFFSET = 10_000;
 const SETTLEMENT_EVENT_FIELDS = Object.freeze([
   "attentionAmount", "gavelFeeAmount", "gavelRecipient", "payer", "quoteId", "submissionHash", "token", "voter",
 ]);
@@ -64,6 +67,22 @@ function publicIdFrom(value) {
 function sameTimestamp(a, b) { return new Date(a).valueOf() === new Date(b).valueOf(); }
 function invariant(condition, message) { if (!condition) throw new Error(message); }
 function resume(row) { return { resumed: true, publicId: row.publicId, state: publicState(row.status) }; }
+function publicDisplay(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("display must be an object");
+  const fields = Object.keys(value);
+  if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
+  for (const field of fields) {
+    if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+  }
+  return value;
+}
+const AUTH_NONCE_COLUMNS = `proof_type::text AS "proofType",signed_purpose::text AS purpose,role::text,wallet,audience,
+  chain_id::text AS "chainId",verifier,nonce_hash AS "nonceHash",payload_hash AS "payloadHash",
+  extract(epoch from issued_at)::bigint::text AS "issuedAt",extract(epoch from expires_at)::bigint::text AS expiry,
+  CASE WHEN consumed_at IS NULL THEN NULL ELSE extract(epoch from consumed_at)::bigint::text END AS "consumedAt"`;
+const AUTH_SESSION_COLUMNS = `token_hash AS "tokenHash",wallet,role::text,chain_id::text AS "chainId",audience,
+  extract(epoch from issued_at)::bigint::text AS "issuedAt",extract(epoch from expires_at)::bigint::text AS expiry,
+  CASE WHEN revoked_at IS NULL THEN NULL ELSE extract(epoch from revoked_at)::bigint::text END AS "revokedAt"`;
 
 class PostgresGateStore {
   constructor(options = {}) {
@@ -102,6 +121,50 @@ class PostgresGateStore {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`gate:profile:${profileId}`]);
   }
 
+  #authTransaction(client) {
+    return Object.freeze({
+      getNonceByHash: (nonceHash) => this.#getNonceByHash(client, nonceHash, true),
+      consumeNonce: async (nonceHash, consumedAt) => {
+        await client.query("SELECT gate.consume_auth_nonce($1,$2)", [bytes32(nonceHash, "nonceHash"), uint78(consumedAt, "consumedAt")]);
+      },
+      insertSession: async (row) => {
+        await client.query("SELECT gate.insert_auth_session($1,$2,$3,$4,$5,$6,$7)", [
+          bytes32(row?.tokenHash, "tokenHash"), address(row?.wallet, "session wallet"), row?.role,
+          positiveBigint(row?.chainId, "session chainId"), row?.audience,
+          uint78(row?.issuedAt, "session issuedAt"), uint78(row?.expiry, "session expiry"),
+        ]);
+      },
+    });
+  }
+
+  async #getNonceByHash(queryable, nonceHash, lock = false) {
+    const row = (await queryable.query(`SELECT ${AUTH_NONCE_COLUMNS} FROM gate.auth_nonces
+      WHERE nonce_hash=$1${lock ? " FOR UPDATE" : ""}`, [bytes32(nonceHash, "nonceHash")])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async insertNonce(row) {
+    await this.pool.query("SELECT gate.insert_auth_nonce($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [
+      row?.proofType, row?.purpose, row?.role ?? null, address(row?.wallet, "nonce wallet"), row?.audience ?? null,
+      positiveBigint(row?.chainId, "nonce chainId"), address(row?.verifier, "nonce verifier"),
+      bytes32(row?.nonceHash, "nonceHash"), bytes32(row?.payloadHash, "payloadHash"),
+      uint78(row?.issuedAt, "nonce issuedAt"), uint78(row?.expiry, "nonce expiry"),
+    ]);
+  }
+
+  async getNonceByHash(nonceHash) { return this.#getNonceByHash(this.pool, nonceHash); }
+
+  async getSessionByTokenHash(tokenHash) {
+    const row = (await this.pool.query(`SELECT ${AUTH_SESSION_COLUMNS} FROM gate.auth_sessions WHERE token_hash=$1`,
+      [bytes32(tokenHash, "tokenHash")])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async transaction(callback) {
+    if (typeof callback !== "function") throw new TypeError("transaction callback is required");
+    return this.#transaction((client) => callback(this.#authTransaction(client)));
+  }
+
   async allocatePublicId(client = this.pool) {
     for (let attempt = 0; attempt < PUBLIC_ID_ATTEMPTS; attempt += 1) {
       const candidate = publicIdFrom(this.randomBytes(16));
@@ -111,7 +174,7 @@ class PostgresGateStore {
     throw new Error("public id allocation unavailable");
   }
 
-  async mutateProfile({ profile, policy }) {
+  async #mutateProfile({ profile, policy }, transactionClient = null) {
     invariant(profile?.id && profile.wallet, "profile id and wallet are required");
     const wallet = address(profile.wallet, "wallet");
     const walletKind = profile.walletKind ?? null;
@@ -121,6 +184,7 @@ class PostgresGateStore {
     }
     if (profile.availability !== undefined && !["accepting_now", "paused", "closed"].includes(profile.availability)) throw new TypeError("invalid availability");
     const codeHash = profile.basePayoutCodeHash == null ? null : bytes32(profile.basePayoutCodeHash, "basePayoutCodeHash");
+    if (profile.display !== undefined) publicDisplay(profile.display);
     let normalizedPolicy = null;
     if (policy) {
       if (typeof policy.enabled !== "boolean") throw new TypeError("policy enabled must be boolean");
@@ -136,11 +200,12 @@ class PostgresGateStore {
         tags: policy.tags || [],
       };
       if (!Array.isArray(normalizedPolicy.tags)) throw new TypeError("tags must be an array");
-      invariant(normalizedPolicy.dao !== "nouns" || (normalizedPolicy.chainId === "1" && normalizedPolicy.acceptPreVote === false),
-        "Nouns policy must use Ethereum chain 1 with PRE_VOTE disabled");
+      invariant(normalizedPolicy.dao !== "nouns" || (normalizedPolicy.chainId === "1"
+        && normalizedPolicy.acceptPreVote === false && normalizedPolicy.acceptVoting === true),
+      "Nouns policy must use Ethereum chain 1 with PRE_VOTE disabled and VOTING enabled");
     }
-    return this.#transaction(async (client) => {
-      await this.#profileLock(client, profile.id);
+    const execute = async (client) => {
+      if (!transactionClient) await this.#profileLock(client, profile.id);
       const row = (await client.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,
         profile_version AS "profileVersion",enrolled_at AS "enrolledAt",updated_at AS "updatedAt",
         base_payout_verified_at AS "basePayoutVerifiedAt",base_payout_code_hash AS "basePayoutCodeHash",display_cache AS display
@@ -151,7 +216,54 @@ class PostgresGateStore {
         profile.basePayoutCodeHash !== undefined, normalizedPolicy == null ? null : JSON.stringify(normalizedPolicy),
         profile.walletKindAuthoritative === true])).rows[0];
       return clone(row);
+    };
+    return transactionClient ? execute(transactionClient) : this.#transaction(execute);
+  }
+
+  async mutateProfile(input) { return this.#mutateProfile(input); }
+
+  async withProfileTransaction(wallet, callback) {
+    const canonicalWallet = address(wallet, "wallet");
+    if (typeof callback !== "function") throw new TypeError("profile transaction callback is required");
+    return this.#transaction(async (client) => {
+      const existing = await this.#getProfileByWallet(client, canonicalWallet);
+      await this.#profileLock(client, existing?.id ?? canonicalWallet);
+      const auth = this.#authTransaction(client);
+      return callback(Object.freeze({
+        getNonceByHash: auth.getNonceByHash,
+        consumeNonce: auth.consumeNonce,
+        getProfileByWallet: (value) => this.#getProfileByWallet(client, value, true),
+        mutateProfile: (input) => {
+          invariant(address(input?.profile?.wallet, "profile wallet") === canonicalWallet,
+            "profile transaction wallet mismatch");
+          return this.#mutateProfile(input, client);
+        },
+      }));
     });
+  }
+
+  async #getProfileByWallet(queryable, wallet, lock = false) {
+    const row = (await queryable.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,
+      profile_version AS "profileVersion",enrolled_at AS "enrolledAt",updated_at AS "updatedAt",
+      base_payout_verified_at AS "basePayoutVerifiedAt",base_payout_code_hash AS "basePayoutCodeHash",display_cache AS display
+      FROM gate.profiles WHERE wallet=$1${lock ? " FOR UPDATE" : ""}`, [address(wallet, "wallet")])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async getProfileByWallet(wallet) { return this.#getProfileByWallet(this.pool, wallet); }
+
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+    const normalizedDao = dao === undefined ? null : daoSlug(dao);
+    if (availability !== undefined && !["accepting_now", "paused", "closed"].includes(availability)) throw new TypeError("invalid availability");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
+    const rows = (await this.pool.query(`SELECT DISTINCT p.id,p.wallet,p.wallet_kind AS "walletKind",p.availability,
+      p.profile_version AS "profileVersion",p.enrolled_at AS "enrolledAt",p.updated_at AS "updatedAt",
+      p.base_payout_verified_at AS "basePayoutVerifiedAt",p.base_payout_code_hash AS "basePayoutCodeHash",p.display_cache AS display
+      FROM gate.profiles p LEFT JOIN gate.dao_policies d ON d.profile_id=p.id
+      WHERE ($1::text IS NULL OR d.dao=$1) AND ($2::gate.availability IS NULL OR p.availability=$2)
+      ORDER BY p.updated_at DESC,p.id ASC LIMIT $3 OFFSET $4`, [normalizedDao, availability ?? null, limit, offset])).rows;
+    return clone(rows);
   }
 
   async getProfile(id) {
@@ -167,6 +279,18 @@ class PostgresGateStore {
       pending_reservation_capacity AS "pendingReservationCapacity",settled_capacity AS "settledCapacity",public_tags AS tags
       FROM gate.dao_policies WHERE profile_id=$1 AND dao=$2`, [profileId, daoSlug(dao)])).rows[0];
     return row ? clone(row) : null;
+  }
+
+  async isProfileAccepting(profileId, dao) {
+    const row = (await this.pool.query(`SELECT EXISTS (
+      SELECT 1 FROM gate.dao_policies d WHERE d.profile_id=$1 AND d.dao=$2
+        AND (SELECT count(*) FROM gate.capacity_reservations r
+          WHERE r.profile_id=d.profile_id AND r.state IN('active','expiry_pending_reconciliation')) < d.pending_reservation_capacity
+        AND (SELECT count(*) FROM gate.capacity_reservations r
+          WHERE r.profile_id=d.profile_id AND r.state='consumed'
+            AND r.consumed_at>clock_timestamp()-interval '24 hours') < d.settled_capacity
+      ) AS available`, [profileId, daoSlug(dao)])).rows[0];
+    return row?.available === true;
   }
 
   async configureDeployment(deployment) {
@@ -273,7 +397,7 @@ class PostgresGateStore {
       },
       snapshot: { ...snapshot, dao: daoSlug(snapshot.dao), proposalId: uint78(snapshot.proposalId, "proposalId"),
         contentHash: bytes32(snapshot.contentHash, "contentHash"), sourceBlock: uint78(snapshot.sourceBlock, "sourceBlock"),
-        sourceBlockHash: bytes32(snapshot.sourceBlockHash, "sourceBlockHash"), mappingVersion: Number(snapshot.mappingVersion),
+        sourceBlockHash: bytes32(snapshot.sourceBlockHash, "sourceBlockHash"), mappingVersion: snapshot.mappingVersion,
         canonicalActions: snapshot.canonicalActions },
       submission: { ...submission, submissionHash: bytes32(submission.submissionHash, "submissionHash"),
         payer: address(submission.payer, "payer"), signedSender: address(submission.signedSender, "signed_sender") },
@@ -296,7 +420,8 @@ class PostgresGateStore {
     invariant(normalized.quote.feeAmount === "250000", "feeAmount must equal 250000");
     invariant(normalized.quote.quoteVersion === 1, "quoteVersion must equal 1");
     invariant(normalized.quote.baseChainId === "8453", "quote settlement chain must be Base 8453");
-    invariant(normalized.snapshot.mappingVersion === 1, "mappingVersion must equal 1");
+    invariant(normalized.snapshot.mappingVersion === NOUNS_LIFECYCLE_MAPPING_VERSION,
+      `mappingVersion must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
     invariant(normalized.snapshot.dao !== "nouns" || (normalized.context.stage === "VOTING"
       && normalized.snapshot.nativeState === "ACTIVE" && normalized.snapshot.eligibility === "VOTING"),
     "Nouns issuance requires canonical ACTIVE to VOTING lifecycle mapping");
@@ -604,8 +729,15 @@ function createPublicGateReader(queryable) {
   if (!queryable || typeof queryable.query !== "function") throw new TypeError("queryable.query is required");
   return Object.freeze({
     async getProfile(id) {
-      return (await queryable.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,display_cache AS display,
-        enrolled_at AS "enrolledAt",updated_at AS "updatedAt" FROM gate_public.profiles WHERE id=$1`, [id])).rows[0] || null;
+      const row = (await queryable.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,ens,message,
+        enrolled_at AS "enrolledAt",updated_at AS "updatedAt" FROM gate_public.profiles WHERE id=$1`, [id])).rows[0];
+      if (!row) return null;
+      row.display = {
+        ...(typeof row.ens === "string" ? { ens: row.ens } : {}),
+        ...(typeof row.message === "string" ? { message: row.message } : {}),
+      };
+      delete row.ens; delete row.message;
+      return row;
     },
     async getPolicy(profileId, dao) {
       return (await queryable.query(`SELECT profile_id AS "profileId",dao,chain_id::text AS "chainId",enabled,

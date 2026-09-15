@@ -180,7 +180,26 @@ class PostgresTransaction {
 
   async ingest(record) {
     const raw = rawRow(record);
-    const result = await this.client.query(`
+    let result;
+    if (raw.recordType === "proposal" && raw.sourceRecordKey) {
+      const existing = (await this.client.query(`
+        SELECT block_number AS "blockNumber",block_hash AS "blockHash",record_type AS "recordType",
+          proposal_id::text AS "proposalId",content_hash AS "contentHash",payload
+        FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+      `, [raw.daoId, raw.sourceId, raw.sourceRecordKey])).rows[0];
+      if (existing) {
+        if (!isDeepStrictEqual(immutableEventMaterial(existing), immutableEventMaterial(raw))) {
+          throw new Error(`canonical event drift for ${eventKey(raw)}`);
+        }
+        await this.client.query(`
+          UPDATE raw_governance_records
+          SET block_hash=$4,observed_head=$5,ingested_at=now()
+          WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+        `, [raw.daoId, raw.sourceId, raw.sourceRecordKey, raw.blockHash, raw.observedHead]);
+        result = { rowCount: 0 };
+      }
+    }
+    if (!result) result = await this.client.query(`
       INSERT INTO raw_governance_records(
         dao_id,source_id,source_record_key,external_id,chain_id,contract_address,transaction_hash,log_index,
         block_number,block_hash,record_type,proposal_id,content_hash,payload,source_kind,
@@ -318,7 +337,7 @@ class PostgresTransaction {
     `, [daoId, sourceId]);
     for (const row of selected.rows) {
       const next = incoming.get(eventKey(row));
-      if (next && !isDeepStrictEqual(canonicalMaterial(row), canonicalMaterial(next))) throw new Error(`canonical event drift for ${eventKey(row)}`);
+      if (next && !isDeepStrictEqual(immutableEventMaterial(row), immutableEventMaterial(next))) throw new Error(`canonical event drift for ${eventKey(row)}`);
     }
     for (const row of selected.rows.filter((candidate) => !incoming.has(eventKey(candidate)))) {
       await this.client.query("DELETE FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3", [daoId, sourceId, row.sourceRecordKey]);
@@ -332,6 +351,7 @@ class PostgresTransaction {
 
 class PostgresGovernanceStore {
   constructor(options = {}) {
+    this.votingPowerReader = options.votingPowerReader;
     if (options.pool) {
       this.pool = options.pool;
       return;
@@ -525,11 +545,62 @@ class PostgresGovernanceStore {
     `, [id])).rows[0] || null;
   }
 
+  async getHealth(daoId) {
+    if (typeof daoId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(daoId)) throw new TypeError("invalid DAO id");
+    const row = (await this.pool.query(`
+      SELECT count(s.id) > 0 AND count(c.source_id) = count(s.id)
+          AND bool_and(c.last_error IS NULL) AS healthy,
+        min(c.updated_at) AS "refreshedAt",
+        CASE WHEN bool_or(c.last_error IS NOT NULL) THEN 'sync_failed' ELSE NULL END AS "lastError"
+      FROM governance_sources s
+      LEFT JOIN sync_checkpoints c ON c.dao_id=s.dao_id AND c.source_id=s.id
+      WHERE s.dao_id=$1
+    `, [daoId])).rows[0];
+    return {
+      healthy: row?.healthy === true,
+      refreshedAt: row?.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row?.refreshedAt ?? null,
+      lastError: row?.lastError ?? null,
+    };
+  }
+
+  async getVotingPower(daoId, wallet, options = {}) {
+    if (daoId !== "nouns") throw new TypeError("voting power is only available for nouns");
+    if (typeof wallet !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new TypeError("invalid wallet");
+    if (typeof this.votingPowerReader !== "function") throw new Error("canonical voting power reader is not configured");
+    return this.votingPowerReader({ dao: daoId, wallet: wallet.toLowerCase() }, options);
+  }
+
   async getProposal(daoId, id) {
-    return (await this.pool.query(
-      "SELECT normalized FROM proposals WHERE dao_id=$1 AND proposal_id=$2",
-      [daoId, id],
-    )).rows[0]?.normalized || null;
+    const row = (await this.pool.query(`
+      SELECT p.dao_id AS dao,p.proposal_id::text AS "proposalId",p.normalized,
+        p.effective_status AS "effectiveStatus",p.tracking_state AS "trackingState",
+        provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
+        provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'actionIndex',a.action_index,'target',a.target,'valueWei',a.value_wei::text,'signature',a.signature,'calldata',a.calldata
+          ) ORDER BY a.action_index)
+          FROM proposal_actions a WHERE a.dao_id=p.dao_id AND a.proposal_id=p.proposal_id
+        ),'[]'::jsonb) AS actions
+      FROM proposals p
+      LEFT JOIN LATERAL (
+        SELECT r.observed_head AS block_number,r.block_hash,r.ingested_at FROM raw_governance_records r
+        WHERE r.dao_id=p.dao_id AND r.proposal_id=p.proposal_id
+          AND r.record_type='proposal' AND r.content_hash=p.content_hash AND r.block_hash IS NOT NULL
+        ORDER BY r.observed_head DESC,r.id DESC LIMIT 1
+      ) provenance ON true
+      WHERE p.dao_id=$1 AND p.proposal_id=$2
+    `, [daoId, id])).rows[0];
+    if (!row) return null;
+    const contentHash = typeof row.contentHash === "string" && row.contentHash.startsWith("0x")
+      ? row.contentHash : `0x${row.contentHash}`;
+    return {
+      ...row,
+      nativeState: row.effectiveStatus,
+      sourceState: row.normalized?.sourceState ?? row.normalized?.state,
+      refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
+      contentHash,
+    };
   }
 
   async listProposals({ daoId, limit, cursor }) {

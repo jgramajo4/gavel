@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
 const {
   DEFAULT_NOTIFICATION_RETRY_LIMIT,
   INBOX_LIFECYCLES,
@@ -24,8 +25,19 @@ const QUOTE_STATES = new Set(["quoted", "expired", "settled"]);
 const RESERVATION_STATES = new Set(["active", "expiry_pending_reconciliation", "released", "consumed"]);
 const INBOX_LIFECYCLE_SET = new Set(INBOX_LIFECYCLES);
 const PUBLIC_ID_ATTEMPTS = 5;
+const PROFILE_PAGE_LIMIT = 50;
+const PROFILE_MAX_OFFSET = 10_000;
 
 function clone(value) { return value == null ? value : structuredClone(value); }
+function publicDisplay(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("display must be an object");
+  const fields = Object.keys(value);
+  if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
+  for (const field of fields) {
+    if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+  }
+  return value;
+}
 function address(value, name) {
   const raw = String(value ?? "");
   if (!ADDRESS.test(raw)) throw new TypeError(`${name} must be an exact 20-byte Ethereum address`);
@@ -84,6 +96,8 @@ class MemoryGateStore {
   #inboxItems;
   #notifications;
   #monitors;
+  #authNonces;
+  #authSessions;
   #notificationRetryLimit;
 
   constructor(options = {}) {
@@ -110,6 +124,8 @@ class MemoryGateStore {
     this.#inboxItems = new Map();
     this.#notifications = new Map();
     this.#monitors = new Map();
+    this.#authNonces = new Map();
+    this.#authSessions = new Map();
   }
 
   #allocatePublicIdUnsafe() {
@@ -147,7 +163,7 @@ class MemoryGateStore {
     try { return await callback(); } finally { release(); }
   }
 
-  async mutateProfile({ profile, policy }) {
+  async #mutateProfileUnsafe({ profile, policy }) {
     if (!profile?.id || !profile.wallet) throw new TypeError("profile id and wallet are required");
     const wallet = address(profile.wallet, "wallet");
     const suppliedWalletKind = profile.walletKind;
@@ -160,6 +176,7 @@ class MemoryGateStore {
     const basePayoutVerifiedAt = profile.basePayoutVerifiedAt == null
       ? profile.basePayoutVerifiedAt
       : instant(profile.basePayoutVerifiedAt, "basePayoutVerifiedAt");
+    if (profile.display !== undefined) publicDisplay(profile.display);
     if (profile.availability !== undefined && !AVAILABILITIES.has(profile.availability)) throw new TypeError("invalid availability");
     let normalizedPolicy;
     if (policy) {
@@ -171,8 +188,9 @@ class MemoryGateStore {
       if (BigInt(attentionAmount) < 1_000_000n) throw new TypeError("attentionAmount must be at least 1000000");
       if (typeof policy.enabled !== "boolean") throw new TypeError("policy enabled must be boolean");
       if (typeof policy.acceptPreVote !== "boolean" || typeof policy.acceptVoting !== "boolean") throw new TypeError("policy lifecycle flags must be boolean");
-      if (dao !== "nouns" || chainId.raw !== NOUNS_DAO_CHAIN_ID || policy.acceptPreVote !== false) {
-        throw new TypeError("MVP policy must be Nouns chain 1 with PRE_VOTE disabled");
+      if (dao !== "nouns" || chainId.raw !== NOUNS_DAO_CHAIN_ID || policy.acceptPreVote !== false
+          || policy.acceptVoting !== true) {
+        throw new TypeError("MVP policy must be Nouns chain 1 with PRE_VOTE disabled and VOTING enabled");
       }
       if (!Array.isArray(policy.tags ?? [])) throw new TypeError("policy tags must be an array");
       normalizedPolicy = {
@@ -180,10 +198,9 @@ class MemoryGateStore {
         pendingReservationCapacity, settledCapacity, tags: clone(policy.tags ?? []),
       };
     }
-    return this.#withProfileLock(profile.id, async () => {
-      // No await occurs between the uniqueness check and write, so different profile locks
-      // cannot interleave this process-wide wallet constraint.
+    {
       const existing = this.#profiles.get(profile.id);
+      if (existing && existing.wallet !== wallet) throw new Error("profile wallet is immutable");
       const walletKind = suppliedWalletKind ?? existing?.walletKind ?? "eoa";
       const collision = [...this.#profiles.values()].find((row) => row.wallet === wallet && row.id !== profile.id);
       if (collision) throw new Error("wallet already enrolled");
@@ -213,11 +230,126 @@ class MemoryGateStore {
       if (normalizedPolicy) this.#policies.set(`${profile.id}:${normalizedPolicy.dao}`, clone(normalizedPolicy));
       this.#profiles.set(profile.id, row);
       return clone(row);
+    }
+  }
+
+  async mutateProfile(input) {
+    const profileId = input?.profile?.id;
+    if (!profileId) return this.#mutateProfileUnsafe(input);
+    return this.#serialized(() => this.#withProfileLock(profileId, () => this.#mutateProfileUnsafe(input)));
+  }
+
+  async insertNonce(row) {
+    return this.#serialized(() => {
+      if (!row?.nonceHash) throw new TypeError("nonceHash is required");
+      if (this.#authNonces.has(row.nonceHash)) throw new Error("nonce collision");
+      this.#authNonces.set(row.nonceHash, clone(row));
     });
+  }
+
+  async getNonceByHash(nonceHash) { return clone(this.#authNonces.get(nonceHash) ?? null); }
+  async getSessionByTokenHash(tokenHash) { return clone(this.#authSessions.get(tokenHash) ?? null); }
+
+  #authTransactionView() {
+    return {
+      getNonceByHash: async (nonceHash) => clone(this.#authNonces.get(nonceHash) ?? null),
+      consumeNonce: async (nonceHash, consumedAt) => {
+        const row = this.#authNonces.get(nonceHash);
+        if (!row || row.consumedAt !== null) throw new Error("authentication proof unavailable");
+        row.consumedAt = String(consumedAt);
+      },
+      insertSession: async (row) => {
+        if (!row?.tokenHash) throw new TypeError("tokenHash is required");
+        if (this.#authSessions.has(row.tokenHash)) throw new Error("session collision");
+        this.#authSessions.set(row.tokenHash, clone(row));
+      },
+    };
+  }
+
+  async transaction(callback) {
+    if (typeof callback !== "function") throw new TypeError("transaction callback is required");
+    return this.#serialized(async () => {
+      const nonces = structuredClone(this.#authNonces);
+      const sessions = structuredClone(this.#authSessions);
+      try { return await callback(Object.freeze(this.#authTransactionView())); }
+      catch (error) {
+        this.#authNonces = nonces;
+        this.#authSessions = sessions;
+        throw error;
+      }
+    });
+  }
+
+  async withProfileTransaction(wallet, callback) {
+    const canonicalWallet = address(wallet, "wallet");
+    if (typeof callback !== "function") throw new TypeError("profile transaction callback is required");
+    return this.#serialized(() => {
+      const lockId = [...this.#profiles.values()].find((row) => row.wallet === canonicalWallet)?.id ?? canonicalWallet;
+      return this.#withProfileLock(lockId, async () => {
+        const profiles = structuredClone(this.#profiles);
+        const policies = structuredClone(this.#policies);
+        const nonces = structuredClone(this.#authNonces);
+        try {
+          const auth = this.#authTransactionView();
+          const transaction = Object.freeze({
+            getNonceByHash: auth.getNonceByHash,
+            consumeNonce: auth.consumeNonce,
+            getProfileByWallet: async (value) => this.#getProfileByWallet(value),
+            mutateProfile: async (input) => {
+              if (address(input?.profile?.wallet, "profile wallet") !== canonicalWallet) {
+                throw new Error("profile transaction wallet mismatch");
+              }
+              return this.#mutateProfileUnsafe(input);
+            },
+          });
+          return await callback(transaction);
+        } catch (error) {
+          this.#profiles = profiles;
+          this.#policies = policies;
+          this.#authNonces = nonces;
+          throw error;
+        }
+      });
+    });
+  }
+
+  #getProfileByWallet(wallet) {
+    const canonicalWallet = address(wallet, "wallet");
+    return clone([...this.#profiles.values()].find((row) => row.wallet === canonicalWallet) ?? null);
+  }
+
+  async getProfileByWallet(wallet) { return this.#getProfileByWallet(wallet); }
+
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+    const normalizedDao = dao === undefined ? undefined : daoSlug(dao);
+    if (availability !== undefined && !AVAILABILITIES.has(availability)) throw new TypeError("invalid availability");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
+    return [...this.#profiles.values()]
+      .filter((profile) => availability === undefined || profile.availability === availability)
+      .filter((profile) => normalizedDao === undefined || this.#policies.has(`${profile.id}:${normalizedDao}`))
+      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime() || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit)
+      .map(clone);
   }
 
   async getProfile(id) { return clone(this.#profiles.get(id) ?? null); }
   async getPolicy(profileId, dao) { return clone(this.#policies.get(`${profileId}:${daoSlug(dao)}`) ?? null); }
+
+  async isProfileAccepting(profileId, dao) {
+    const policy = this.#policies.get(`${profileId}:${daoSlug(dao)}`);
+    if (!policy) return false;
+    const settledWindowStart = instant(this.#clock(), "clock").getTime() - SETTLED_CAPACITY_WINDOW_MS;
+    let pending = 0;
+    let settled = 0;
+    for (const reservation of this.#reservations.values()) {
+      if (reservation.profileId !== profileId) continue;
+      if (["active", "expiry_pending_reconciliation"].includes(reservation.state)) pending += 1;
+      if (reservation.state === "consumed" && reservation.consumedAt?.getTime() > settledWindowStart) settled += 1;
+    }
+    return pending < policy.pendingReservationCapacity && settled < policy.settledCapacity;
+  }
+
   async getSubmission(publicId) {
     const submission = [...this.#submissions.values()].find((row) => row.publicId === publicId);
     if (!submission) return null;
@@ -310,7 +442,9 @@ class MemoryGateStore {
     }
     if (quote.quoteVersion !== 1) throw new Error("quote version must equal 1");
     requireNounsIssuanceLifecycle(snapshot.nativeState, snapshot.eligibility);
-    if (snapshot.mappingVersion !== 1) throw new Error("mapping version must equal 1");
+    if (snapshot.mappingVersion !== NOUNS_LIFECYCLE_MAPPING_VERSION) {
+      throw new Error(`mapping version must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
+    }
     if (!Array.isArray(snapshot.canonicalActions)) throw new TypeError("canonicalActions must be an array");
     if (submission.status !== undefined && submission.status !== "QUOTED") throw new TypeError("invalid initial submission state");
     if (quote.state !== undefined && (!QUOTE_STATES.has(quote.state) || quote.state !== "quoted")) throw new TypeError("invalid initial quote state");

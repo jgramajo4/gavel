@@ -15,9 +15,13 @@ const {
   serializeVerificationFact,
 } = require('./facts');
 const markdown = require('./markdown');
+const enrollment = require('./enrollment');
+const nounsGateAdapter = require('./nouns-gate-adapter');
 
 module.exports = {
   ...constants,
+  ...enrollment,
+  ...nounsGateAdapter,
   SUBMISSION_HASH_DOMAIN_TAG: submissionHash.SUBMISSION_HASH_DOMAIN_TAG,
   createDaoPolicySchema: schema.createDaoPolicySchema,
   validateDaoPolicy: schema.validateDaoPolicy,
