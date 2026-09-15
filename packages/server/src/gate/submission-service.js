@@ -153,8 +153,8 @@ function createSubmissionService({
   if (typeof receipts.getSubmission !== "function") {
     throw new TypeError("publicReader.getSubmission is required for public receipt projection");
   }
-  if (typeof receipts.getOwnedResume !== "function") {
-    throw new TypeError("getOwnedResume is required for owner-bound resume");
+  if (typeof store.getOwnedResume !== "function") {
+    throw new TypeError("store.getOwnedResume is required for owner-bound resume");
   }
   if (!indexClient || typeof indexClient.getProposalSnapshot !== "function") {
     throw new TypeError("indexClient.getProposalSnapshot is required");
@@ -379,7 +379,7 @@ function createSubmissionService({
       throw unauthenticated();
     }
     if (typeof publicId !== "string" || !PUBLIC_ID.test(publicId)) return null;
-    const resumed = await receipts.getOwnedResume({ publicId, payer });
+    const resumed = await store.getOwnedResume({ publicId, payer });
     if (!resumed) return null;
     if (!resumed.quote) return resumed;
     return { ...resumed, quote: assertIssuedQuote(resumed.quote) };

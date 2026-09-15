@@ -2,7 +2,8 @@
   "name": "@gavel/server",
   "version": "0.0.0",
   "private": true,
-  "description": "Reserved package boundary for the optional self-hosted Gavel service.",
+  "description": "Canonical optional self-hosted Gavel service runtime.",
+  "main": "src/gate/runtime.js",
   "license": "GPL-3.0-only",
   "dependencies": {
     "@gavel/gate": "^0.2.0",

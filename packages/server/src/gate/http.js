@@ -2,6 +2,7 @@ const http = require("node:http");
 const { SubmissionPolicyError } = require("@gavel/gate");
 const { ProfileRequestError } = require("./profile-service");
 const { IndexUnavailableError } = require("./index-client");
+const { SettlementRequestError } = require("./settlement-service");
 
 const DEFAULT_MAX_BODY_BYTES = 256 * 1024;
 const DEFAULT_CHALLENGE_LIMIT = 20;
@@ -76,7 +77,7 @@ function bearerToken(request) {
   return match[1];
 }
 
-function createGateHttpServer({ authService, profileService, submissionService,
+function createGateHttpServer({ authService, profileService, submissionService, settlementService,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
@@ -88,6 +89,9 @@ function createGateHttpServer({ authService, profileService, submissionService,
       || typeof submissionService.getPublicStatus !== "function"
       || typeof submissionService.resumeSubmission !== "function")) {
     throw new TypeError("complete submissionService is required");
+  }
+  if (settlementService !== undefined && typeof settlementService.submitTxHash !== "function") {
+    throw new TypeError("complete settlementService is required");
   }
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new TypeError("maxBodyBytes must be a positive integer");
   if (!challengeLimiter || typeof challengeLimiter.allow !== "function") throw new TypeError("challengeLimiter.allow is required");
@@ -152,6 +156,17 @@ function createGateHttpServer({ authService, profileService, submissionService,
           ? sendJson(response, 409, result)
           : sendJson(response, 201, result);
       }
+      const settlement = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/settlement$/.exec(path);
+      if (settlementService && request.method === "POST" && settlement) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        const body = await readJson(request, maxBodyBytes);
+        return sendJson(response, 202, await settlementService.submitTxHash({
+          session, publicId: settlement[1], txHash: body.txHash, chainId: body.chainId,
+        }));
+      }
       // Resume is owner-bound: identity comes only from the session, never from
       // the path, query string, or body. A non-owner gets a plain 404.
       const resume = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/resume$/.exec(path);
@@ -185,11 +200,14 @@ function createGateHttpServer({ authService, profileService, submissionService,
           state: error.state, error: { code: error.code, message: error.message },
         });
       }
-      const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError;
+      const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError || error instanceof SettlementRequestError;
       const statusCode = known ? error.statusCode : 500;
       const code = known ? error.code : "INTERNAL_ERROR";
       const message = known ? error.message : "Internal server error";
-      return sendJson(response, statusCode, { error: { code, message } });
+      const body = { error: { code, message } };
+      if (error instanceof SettlementRequestError && error.state) body.state = error.state;
+      if (error instanceof SettlementRequestError && error.updatedAt) body.updatedAt = error.updatedAt;
+      return sendJson(response, statusCode, body);
     }
   });
 }

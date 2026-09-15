@@ -307,6 +307,8 @@ class PostgresGateStore {
     const gavelRecipient = address(deployment.gavelRecipient, "gavelRecipient");
     const block = uint78(deployment.deploymentBlock, "deploymentBlock");
     const codeHash = bytes32(deployment.contractCodeHash, "contractCodeHash");
+    const config = { ...(deployment.config || {}),
+      overlap: positiveInteger(Number(deployment.config?.overlap ?? 64), "deployment.config.overlap") };
     return this.#transaction(async (client) => {
       const row = (await client.query(`INSERT INTO gate.splitter_deployments
         (id,chain_id,splitter,signer,token,gavel_recipient,deployment_block,scanner_cursor,contract_code_hash,config,rpc_access_ciphertext,issuance_active,retired_at,retirement_ready_at)
@@ -319,7 +321,7 @@ class PostgresGateStore {
         RETURNING id,chain_id::text AS "chainId",splitter,signer,token,deployment_block::text AS "deploymentBlock",
           scanner_cursor::text AS "nextBlock",contract_code_hash AS "contractCodeHash",gavel_recipient AS "gavelRecipient",config,rpc_access_ciphertext AS "rpcAccess",
           issuance_active AS "issuanceActive",retired_at AS "retiredAt",retirement_ready_at AS "retirementReadyAt"`,
-      [deployment.id, chainId, splitter, signer, token, gavelRecipient, block, block, codeHash, JSON.stringify(deployment.config || {}),
+      [deployment.id, chainId, splitter, signer, token, gavelRecipient, block, block, codeHash, JSON.stringify(config),
         typeof deployment.rpcAccess === "string" ? deployment.rpcAccess : JSON.stringify(deployment.rpcAccess || {}),
         deployment.issuanceActive === true, deployment.retiredAt ?? null, deployment.retirementReadyAt ?? null])).rows[0];
       invariant(row, "immutable deployment identity mismatch");
@@ -344,11 +346,16 @@ class PostgresGateStore {
       return {
         blockNumber,
         blockHash: bytes32(block.blockHash, "canonicalBlocks.blockHash"),
+        parentHash: bytes32(block.parentHash, "canonicalBlocks.parentHash"),
         blockTimestamp: exactDate(block.blockTimestamp, "canonicalBlocks.blockTimestamp").toISOString(),
       };
     });
     invariant(BigInt(canonicalBlocks.length) === BigInt(throughBlock) - BigInt(fromBlock) + 1n,
       "canonicalBlocks must cover every block in the scanner range");
+    for (let index = 1; index < canonicalBlocks.length; index += 1) {
+      invariant(canonicalBlocks[index].parentHash === canonicalBlocks[index - 1].blockHash,
+        "canonical block parent ancestry is inconsistent");
+    }
     const checkpoint = canonicalBlocks.at(-1);
     invariant(checkpoint.blockHash === canonicalBlockHash
       && sameTimestamp(checkpoint.blockTimestamp, canonicalBlockTimestamp),
@@ -368,8 +375,14 @@ class PostgresGateStore {
         blockHash: bytes32(observation.blockHash, "observation.blockHash"),
         blockTimestamp: exactDate(observation.blockTimestamp, "observation.blockTimestamp").toISOString(),
         exactMatch,
-        details: observation.details || {},
+        details: clone(observation.details || {}),
       };
+      if (normalized.kind === "exact_log" && normalized.details?.settlement) {
+        normalized.details.settlement.settledAt = exactDate(
+          normalized.details.settlement.receiptBlockTimestamp,
+          "settlement.receiptBlockTimestamp",
+        ).toISOString();
+      }
       const canonicalBlock = canonicalBlocks[Number(BigInt(normalized.blockNumber) - BigInt(fromBlock))];
       invariant(canonicalBlock && canonicalBlock.blockHash === normalized.blockHash
         && sameTimestamp(canonicalBlock.blockTimestamp, normalized.blockTimestamp),
@@ -386,7 +399,9 @@ class PostgresGateStore {
     return this.#transaction(async (client) => {
       const row = (await client.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb) AS released",
         [range.deploymentId, fromBlock, throughBlock, canonicalBlockHash, canonicalBlockTimestamp, JSON.stringify(result)])).rows[0];
-      return { released: Number(row?.released || 0) };
+      const reorged = (await client.query(`SELECT count(*)::int AS count FROM gate.settlement_reorg_monitors
+        WHERE reconciliation_metadata#>>'{trailingOverlapReorg,generation}'=$1`, [generation])).rows[0];
+      return { released: Number(row?.released || 0), reorged: Number(reorged?.count || 0) };
     });
   }
 
@@ -616,6 +631,134 @@ class PostgresGateStore {
     return BigInt(row.total);
   }
 
+  async getScannerState({ chainId, splitter } = {}) {
+    const row = (await this.pool.query(`SELECT c.deployment_id AS "deploymentId",c.deployment_block::text AS "deploymentBlock",
+      c.next_range_from::text AS "nextRangeFrom",c.scan_generation::text AS generation,(d.config->>'overlap')::integer AS overlap
+      FROM gate.settlement_cursors c JOIN gate.splitter_deployments d ON d.id=c.deployment_id
+      WHERE c.chain_id=$1 AND c.splitter=$2`,
+    [positiveBigint(chainId, "chainId"), address(splitter, "splitter")])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async claimSettlementLifecycle({ quoteId, staleAfterMs = 15_000 } = {}) {
+    const publicQuoteId = bytes32(quoteId, "quoteId");
+    if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs < 1 || staleAfterMs > 60_000) {
+      throw new TypeError("staleAfterMs must be from 1 to 60000");
+    }
+    const row = (await this.pool.query(`WITH claimed AS (
+      UPDATE gate.quotes SET lifecycle_recheck_attempted_at=clock_timestamp()
+      WHERE quote_id=$1 AND state<>'settled' AND lifecycle_recheck_attempted_at IS NULL
+      RETURNING true AS attempt,false AS pending,NULL::jsonb AS lifecycle
+    ), existing AS (
+      SELECT false AS attempt,
+        lifecycle_recheck IS NULL AND lifecycle_recheck_attempted_at>clock_timestamp()-make_interval(secs => $2 / 1000.0) AS pending,
+        lifecycle_recheck AS lifecycle FROM gate.quotes
+      WHERE quote_id=$1 AND state<>'settled' AND NOT EXISTS(SELECT 1 FROM claimed)
+    ) SELECT * FROM claimed UNION ALL SELECT * FROM existing`, [publicQuoteId, staleAfterMs])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async recordSettlementLifecycle({ quoteId, lifecycle } = {}) {
+    const publicQuoteId = bytes32(quoteId, "quoteId");
+    if (!lifecycle || typeof lifecycle !== "object" || Array.isArray(lifecycle)) throw new TypeError("lifecycle is required");
+    const row = await this.pool.query(`UPDATE gate.quotes SET lifecycle_recheck=$2::jsonb
+      WHERE quote_id=$1 AND state<>'settled' AND lifecycle_recheck_attempted_at IS NOT NULL AND lifecycle_recheck IS NULL`,
+    [publicQuoteId, JSON.stringify(lifecycle)]);
+    return row.rowCount === 1;
+  }
+
+  async listUnsettledSettlementObservations({ chainId, splitter, limit = 50 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    return clone((await this.pool.query(`SELECT o.quote_id AS "quoteId",o.details->'settlement' AS settlement
+      FROM gate.settlement_scan_observations o
+      JOIN gate.splitter_deployments d ON d.id=o.deployment_id
+      JOIN gate.quotes q ON q.quote_id=o.quote_id
+      WHERE d.chain_id=$1 AND d.splitter=$2 AND o.exact_match AND q.state<>'settled'
+        AND jsonb_typeof(o.details->'settlement')='object'
+        AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
+          WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)
+      ORDER BY o.block_number,o.log_index LIMIT $3`,
+    [positiveBigint(chainId, "chainId"), address(splitter, "splitter"), limit])).rows);
+  }
+
+  async findSettlementQuote(quoteId) {
+    const row = (await this.pool.query(`SELECT q.quote_id AS "quoteId",q.payer,q.voter,q.attention_amount::text AS "attentionAmount",
+      q.fee_amount::text AS "feeAmount",d.gavel_recipient AS "gavelRecipient",q.token,s.submission_hash AS "submissionHash",
+      q.quote_version AS "quoteVersion",q.base_chain_id::text AS "baseChainId",q.splitter,q.expires_at AS "expiresAt",
+      ps.normalized_eligibility AS "issuanceLifecycle",ps.dao,ps.proposal_id::text AS "proposalId",
+      COALESCE(ds.ciphertext,'profile:'||s.profile_id) AS "destinationRef",
+      jsonb_build_object('subject','Paid pitch ready','text','Open your private Gate inbox.') AS "trustedSummary"
+      FROM gate.quotes q JOIN gate.submissions s ON s.id=q.submission_id
+      JOIN gate.proposal_snapshots ps ON ps.id=s.issuance_snapshot_id
+      JOIN gate.splitter_deployments d ON d.id=q.deployment_id
+      LEFT JOIN gate.delivery_settings ds ON ds.profile_id=s.profile_id WHERE q.quote_id=$1`,
+    [bytes32(quoteId, "quoteId")])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async recordSettlementHint({ publicId, payer, txHash, chainId, splitter } = {}) {
+    const owner = address(payer, "payer");
+    const transactionHash = bytes32(txHash, "txHash");
+    const settlementChain = positiveBigint(chainId, "chainId");
+    const settlementSplitter = address(splitter, "splitter");
+    return this.#transaction(async (client) => {
+      const row = (await client.query(`SELECT s.id,s.public_id AS "publicId",s.status,s.payer,s.public_state_changed_at AS "updatedAt",
+        s.pending_settlement_tx_hash AS "pendingTxHash",q.id AS "quoteInternalId",q.state::text AS quote_state,q.expires_at>clock_timestamp() AS unexpired,
+        q.base_chain_id::text AS "baseChainId",q.splitter FROM gate.submissions s JOIN gate.quotes q ON q.submission_id=s.id
+        WHERE s.public_id=$1 FOR UPDATE OF s,q`, [publicId])).rows[0];
+      if (!row || row.payer !== owner) return null;
+      if (row.quote_state === "expired" || row.unexpired === false) {
+        if (row.quote_state !== "expired") {
+          await client.query("UPDATE gate.quotes SET state='expired' WHERE id=$1", [row.quoteInternalId]);
+          await client.query(`UPDATE gate.capacity_reservations SET state='expiry_pending_reconciliation',updated_at=clock_timestamp()
+            WHERE quote_id=$1 AND state='active'`, [row.quoteInternalId]);
+        }
+        if (row.status !== "EXPIRED") {
+          row.updatedAt = (await client.query(`UPDATE gate.submissions SET status='EXPIRED',public_state_changed_at=clock_timestamp()
+            WHERE id=$1 RETURNING public_state_changed_at AS "updatedAt"`, [row.id])).rows[0].updatedAt;
+        }
+        return { publicId: row.publicId, state: "expired", updatedAt: clone(row.updatedAt) };
+      }
+      invariant(row.quote_state === "quoted" && row.unexpired === true && row.baseChainId === settlementChain
+        && row.splitter === settlementSplitter, "settlement hint can be recorded only for a valid payable quote");
+      if (row.pendingTxHash && row.pendingTxHash !== transactionHash) throw new Error("conflicting settlement transaction hash");
+      if (row.status === "SETTLEMENT_PENDING") return { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(row.updatedAt) };
+      invariant(row.status === "QUOTED", "settlement hint can be recorded only for a valid payable quote");
+      const changed = (await client.query(`UPDATE gate.submissions SET status='SETTLEMENT_PENDING',pending_settlement_tx_hash=$2,
+        public_state_changed_at=clock_timestamp() WHERE id=$1 RETURNING public_state_changed_at AS "updatedAt"`,
+      [row.id, transactionHash])).rows[0];
+      return { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(changed.updatedAt) };
+    });
+  }
+
+  async listPendingSettlementHints({ limit = 50 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    return clone((await this.pool.query(`SELECT s.public_id AS "publicId",q.quote_id AS "quoteId",
+      s.pending_settlement_tx_hash AS "txHash",q.expires_at AS "expiresAt"
+      FROM gate.submissions s JOIN gate.quotes q ON q.submission_id=s.id
+      WHERE s.status='SETTLEMENT_PENDING' AND s.pending_settlement_tx_hash IS NOT NULL ORDER BY s.public_state_changed_at LIMIT $1`, [limit])).rows);
+  }
+
+  async resolveSettlementHint({ publicId, txHash, state } = {}) {
+    const transactionHash = bytes32(txHash, "txHash");
+    if (!["payment_required", "expired"].includes(state)) throw new TypeError("invalid settlement hint state");
+    return this.#transaction(async (client) => {
+      const row = (await client.query(`SELECT s.id,q.id AS quote_id FROM gate.submissions s JOIN gate.quotes q ON q.submission_id=s.id
+        WHERE s.public_id=$1 AND s.status='SETTLEMENT_PENDING' AND s.pending_settlement_tx_hash=$2 FOR UPDATE OF s,q`,
+      [publicId, transactionHash])).rows[0];
+      if (!row) return false;
+      if (state === "expired") {
+        await client.query("UPDATE gate.quotes SET state='expired' WHERE id=$1 AND state='quoted'", [row.quote_id]);
+        await client.query(`UPDATE gate.capacity_reservations SET state='expiry_pending_reconciliation',updated_at=clock_timestamp()
+          WHERE quote_id=$1 AND state='active'`, [row.quote_id]);
+      }
+      const status = state === "expired" ? "EXPIRED" : "QUOTED";
+      await client.query(`UPDATE gate.submissions SET status=$2,pending_settlement_tx_hash=NULL,
+        public_state_changed_at=clock_timestamp() WHERE id=$1`, [row.id, status]);
+      return true;
+    });
+  }
+
   async markSettlementPending(publicId, pending = true) {
     if (typeof pending !== "boolean") throw new TypeError("pending settlement marker must be boolean");
     const expectedStatus = pending ? "QUOTED" : "SETTLEMENT_PENDING";
@@ -672,14 +815,16 @@ class PostgresGateStore {
       token: address(event.token, "event.token"), submissionHash: bytes32(event.submissionHash, "event.submissionHash"),
       sourceChainId: positiveBigint(evidence.chainId, "evidence.chainId"),
       splitter: address(evidence.splitter, "evidence.splitter"), canonical: evidence.canonical === true,
-      scannerVerified: evidence.scannerVerified === true, oneConfirmation: evidence.oneConfirmation === true, confirmations: 1,
+      scannerVerified: evidence.scannerVerified === true, oneConfirmation: evidence.oneConfirmation === true,
+      confirmations: Number(positiveBigint(evidence.confirmations, "evidence.confirmations")),
     };
   }
 
   async settle({ quoteId, settlement, inbox, notification, monitor }) {
     const publicQuoteId = bytes32(quoteId, "quoteId");
     const e = this.#settlementEvidence(settlement);
-    invariant(Number.isInteger(e.logIndex) && e.logIndex >= 0 && e.canonical && e.scannerVerified && e.oneConfirmation,
+    invariant(Number.isInteger(e.logIndex) && e.logIndex >= 0 && e.canonical && e.scannerVerified && e.oneConfirmation
+        && e.confirmations === 1,
       "canonical one-confirmation scanner evidence is required");
     invariant(e.quoteId === publicQuoteId, "settlement quoteId does not match public quote");
     if (!notification?.id || notification.status !== "pending") throw new TypeError("notification must start pending");
@@ -721,23 +866,16 @@ class PostgresGateStore {
       if (quote.state === "settled") {
         const evidenceMatches = quote.settled_tx_hash === e.txHash && Number(quote.settled_log_index) === e.logIndex
           && String(quote.receipt_block) === e.receiptBlock && quote.receipt_block_hash === e.receiptBlockHash
-          && sameTimestamp(quote.receipt_block_timestamp, e.receiptBlockTimestamp) && sameTimestamp(quote.settled_at, e.settledAt)
+          && sameTimestamp(quote.receipt_block_timestamp, e.receiptBlockTimestamp)
           && quote.settlement_proof_canonical === true && quote.settlement_scanner_verified === true
-          && quote.settlement_event_quote_id === e.quoteId && Number(quote.settlement_confirmations) === e.confirmations;
+          && quote.settlement_event_quote_id === e.quoteId;
         invariant(evidenceMatches, "conflicting settlement evidence");
-        const related = (await client.query(`SELECT i.id AS inbox_id,i.issuance_lifecycle,i.current_lifecycle,i.lifecycle_changed,
-          i.current_lifecycle_unavailable,i.private_unavailability_reason,n.id AS notification_id,n.channel,
-          n.destination_ref_ciphertext,m.id AS monitor_id
+        const related = (await client.query(`SELECT i.id AS inbox_id,n.id AS notification_id,m.id AS monitor_id
           FROM gate.inbox_items i JOIN gate.notification_attempts n ON n.inbox_id=i.id
           JOIN gate.settlement_reorg_monitors m ON m.quote_id=$2 WHERE i.submission_id=$1`,
         [quote.submission_internal_id, quote.id])).rows[0];
-        invariant(related && related.inbox_id === inbox.id && related.issuance_lifecycle === inbox.issuanceLifecycle
-          && related.current_lifecycle === inbox.currentLifecycle && related.lifecycle_changed === inbox.lifecycleChanged
-          && related.current_lifecycle_unavailable === inbox.currentLifecycleUnavailable
-          && related.private_unavailability_reason === (inbox.privateUnavailabilityReason ?? null)
-          && related.notification_id === notification.id && related.channel === notification.channel
-          && related.destination_ref_ciphertext === notification.destinationRef && related.monitor_id === monitor.id,
-        "conflicting settlement side effects");
+        invariant(related && related.inbox_id === inbox.id && related.notification_id === notification.id
+          && related.monitor_id === monitor.id, "conflicting settlement side effects");
         return false;
       }
       invariant(["quoted", "expired"].includes(quote.state), "quote cannot be settled");
@@ -752,19 +890,84 @@ class PostgresGateStore {
       const consumed = await client.query(`UPDATE gate.capacity_reservations SET state='consumed',consumed_at=clock_timestamp(),updated_at=clock_timestamp()
         WHERE quote_id=$1 AND state IN('active','expiry_pending_reconciliation','released') RETURNING id`, [quote.id]);
       invariant(consumed.rowCount === 1, "reservation cannot be consumed");
-      await client.query("UPDATE gate.submissions SET status='SETTLED',public_state_changed_at=clock_timestamp() WHERE id=$1", [quote.submission_internal_id]);
+      await client.query("UPDATE gate.submissions SET status='SETTLED',pending_settlement_tx_hash=NULL,public_state_changed_at=clock_timestamp() WHERE id=$1", [quote.submission_internal_id]);
       const accepted = (await client.query(`INSERT INTO gate.inbox_items
         (id,submission_id,profile_id,issuance_lifecycle,current_lifecycle,lifecycle_changed,current_lifecycle_unavailable,private_unavailability_reason)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING inbox_created_at AS "inboxCreatedAt"`, [inbox.id, quote.submission_internal_id,
         quote.profile_id, inbox.issuanceLifecycle, inbox.currentLifecycle, inbox.lifecycleChanged === true,
         inbox.currentLifecycleUnavailable === true, inbox.privateUnavailabilityReason ?? null])).rows[0];
-      await client.query("INSERT INTO gate.notification_attempts(id,inbox_id,channel,destination_ref_ciphertext,state) VALUES($1,$2,$3,$4,$5)",
-        [notification.id, inbox.id, notification.channel, notification.destinationRef, notification.status]);
+      await client.query(`INSERT INTO gate.notification_attempts
+        (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,clock_timestamp())`,
+      [notification.id, inbox.id, notification.channel, notification.destinationRef,
+        JSON.stringify(notification.summary ?? { subject: "Paid pitch ready", text: "Open your private Gate inbox." }), notification.status]);
       await client.query(`INSERT INTO gate.settlement_reorg_monitors(id,chain_id,splitter,quote_id,receipt_block,receipt_block_hash,tx_hash,log_index,next_check_block)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(chain_id,splitter,quote_id) DO NOTHING`,
       [monitor.id, e.sourceChainId, e.splitter, quote.id, e.receiptBlock, e.receiptBlockHash, e.txHash, e.logIndex, nextCheckBlock]);
       return { settled: true, inboxCreatedAt: accepted.inboxCreatedAt };
     });
+  }
+
+  async claimSettlementMonitors({ chainId, splitter, headBlock, limit = 50, leaseMs = 5 * 60_000 } = {}) {
+    const settlementChain = positiveBigint(chainId, "chainId");
+    const settlementSplitter = address(splitter, "splitter");
+    const head = uint78(headBlock, "headBlock");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
+    const rows = (await this.pool.query(`WITH candidates AS (
+        SELECT id,quote_id FROM gate.settlement_reorg_monitors WHERE chain_id=$1 AND splitter=$2 AND completed_at IS NULL
+          AND next_check_block<=$3 AND (claimed_until IS NULL OR claimed_until<=clock_timestamp())
+          ORDER BY next_check_block,id LIMIT $4 FOR UPDATE SKIP LOCKED)
+      UPDATE gate.settlement_reorg_monitors m SET claimed_until=clock_timestamp()+make_interval(secs => $5 / 1000.0),claim_generation=claim_generation+1
+      FROM candidates c JOIN gate.quotes q ON q.id=c.quote_id WHERE m.id=c.id RETURNING m.id,q.quote_id AS "quoteId",m.receipt_block::text AS "receiptBlock",
+        m.receipt_block_hash AS "receiptBlockHash",m.tx_hash AS "txHash",m.log_index AS "logIndex",
+        m.progress_block::text AS "progressBlock",m.reconciliation_metadata AS "reconciliationMetadata",m.claim_generation::text AS "claimToken"`,
+    [settlementChain, settlementSplitter, head, limit, leaseMs])).rows;
+    return clone(rows);
+  }
+
+  async advanceSettlementMonitor({ id, claimToken, progressBlock, nextCheckBlock, completed, reorged } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof completed !== "boolean" || typeof reorged !== "boolean") throw new TypeError("invalid monitor advancement");
+    const progress = uint78(progressBlock, "progressBlock");
+    const next = completed ? null : uint78(nextCheckBlock, "nextCheckBlock");
+    if (!completed && BigInt(next) <= BigInt(progress)) throw new Error("nextCheckBlock must advance beyond progressBlock");
+    return this.#transaction(async (client) => {
+      const row = (await client.query(`UPDATE gate.settlement_reorg_monitors SET progress_block=$2,next_check_block=COALESCE($4,next_check_block),claimed_until=NULL,
+        completed_at=CASE WHEN $5 THEN COALESCE(completed_at,clock_timestamp()) ELSE completed_at END,
+        reconciliation_metadata=CASE WHEN $6 THEN reconciliation_metadata||jsonb_build_object('monitorReorged',true) ELSE reconciliation_metadata END
+        WHERE id=$1 AND claim_generation=$3::bigint AND claimed_until>clock_timestamp() RETURNING quote_id`,
+      [id, progress, claimToken, next, completed, reorged])).rows[0];
+      if (!row) return false;
+      if (reorged) await client.query("UPDATE gate.quotes SET settlement_reorged_at=COALESCE(settlement_reorged_at,clock_timestamp()) WHERE id=$1", [row.quote_id]);
+      return true;
+    });
+  }
+
+  async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
+    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","destinationRef",summary
+      FROM gate.claim_notification_attempts($1,$2,$3)`,
+    [limit, this.notificationRetryLimit, leaseMs])).rows;
+    return clone(rows);
+  }
+
+  async completeNotification({ id, claimToken, providerOpaqueId = null } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || (providerOpaqueId !== null && (typeof providerOpaqueId !== "string" || providerOpaqueId.length > 256))) {
+      throw new TypeError("invalid notification completion");
+    }
+    const row = (await this.pool.query("SELECT gate.complete_notification_attempt($1,$2,$3) AS completed",
+      [id, claimToken, providerOpaqueId])).rows[0];
+    return Boolean(row?.completed);
+  }
+
+  async failNotification({ id, claimToken, errorCode, nextAttemptAt } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof errorCode !== "string" || !errorCode) throw new TypeError("notification id, claimToken, and errorCode are required");
+    const row = (await this.pool.query("SELECT gate.fail_notification_attempt($1,$2,$3,$4) AS failed",
+      [id, claimToken, errorCode, exactDate(nextAttemptAt, "nextAttemptAt")])).rows[0];
+    return Boolean(row?.failed);
   }
 
   async updateNotification(id, patch = {}) {

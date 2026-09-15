@@ -60,6 +60,9 @@ const GATE_REQUIRED_FUNCTIONS = Object.freeze([
   "gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint)",
   "gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamp with time zone,boolean,text,boolean,jsonb)",
   "gate.transition_notification(text,gate.notification_state,text,text)",
+  "gate.claim_notification_attempts(integer,integer,integer)",
+  "gate.complete_notification_attempt(text,text,text)",
+  "gate.fail_notification_attempt(text,text,text,timestamp with time zone)",
   "gate.record_scanner_range(text,bigint,bigint,text,timestamp with time zone,jsonb)",
   "gate.release_expired_reservation(text,text)",
 ]);

@@ -94,6 +94,7 @@ class MemoryGateStore {
   #operationLock;
   #deployments;
   #settlementCursors;
+  #scannerRanges;
   #snapshots;
   #submissions;
   #submissionHashes;
@@ -122,6 +123,7 @@ class MemoryGateStore {
     this.#operationLock = Promise.resolve();
     this.#deployments = new Map();
     this.#settlementCursors = new Map();
+    this.#scannerRanges = new Map();
     this.#snapshots = new Map();
     this.#submissions = new Map();
     this.#submissionHashes = new Set();
@@ -414,9 +416,13 @@ class MemoryGateStore {
       signer: address(deployment.signer, "signer"), token: address(deployment.token, "token"),
       gavelRecipient: address(deployment.gavelRecipient, "gavelRecipient"),
       contractCodeHash: bytes32(deployment.contractCodeHash, "contractCodeHash"),
-      deploymentBlock: deploymentBlock.raw, nextBlock: nextBlock.raw, issuanceActive: deployment.issuanceActive === true,
-      config: clone(deployment.config ?? {}), rpcAccess: clone(deployment.rpcAccess ?? {}),
+      deploymentBlock: deploymentBlock.raw, nextBlock: deploymentBlock.raw, issuanceActive: deployment.issuanceActive === true,
+      config: { ...clone(deployment.config ?? {}), overlap: Number(deployment.config?.overlap ?? 64) },
+      rpcAccess: clone(deployment.rpcAccess ?? {}),
     };
+    if (!Number.isSafeInteger(normalized.config.overlap) || normalized.config.overlap < 1) {
+      throw new TypeError("deployment.config.overlap must be a positive integer");
+    }
     return this.#serialized(() => {
       const existing = this.#deployments.get(normalized.id);
       if (existing) {
@@ -438,11 +444,198 @@ class MemoryGateStore {
       if (!priorCursor) {
         this.#settlementCursors.set(cursorKey, {
           deploymentId: normalized.id, chainId: normalized.chainId, splitter: normalized.splitter,
-          deploymentBlock: normalized.deploymentBlock, nextRangeFrom: normalized.nextBlock,
+          deploymentBlock: normalized.deploymentBlock, nextRangeFrom: normalized.deploymentBlock,
           checkpointBlock: null, canonicalBlockHash: null, reconciliationMetadata: {}, updatedAt: instant(this.#clock(), "clock"),
         });
       }
       return clone(normalized);
+    });
+  }
+
+  async getScannerState({ chainId, splitter } = {}) {
+    const key = `${block(chainId, "chainId").raw}:${address(splitter, "splitter")}`;
+    const cursor = this.#settlementCursors.get(key);
+    if (!cursor) return null;
+    const deployment = this.#deployments.get(cursor.deploymentId);
+    return clone({ deploymentId: cursor.deploymentId, deploymentBlock: cursor.deploymentBlock,
+      nextRangeFrom: cursor.nextRangeFrom, generation: cursor.scanGeneration ?? "0", overlap: deployment.config.overlap });
+  }
+
+  async claimSettlementLifecycle({ quoteId, staleAfterMs = 15_000 } = {}) {
+    const publicQuoteId = bytes32(quoteId, "quoteId");
+    if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs < 1 || staleAfterMs > 60_000) {
+      throw new TypeError("staleAfterMs must be from 1 to 60000");
+    }
+    return this.#serialized(() => {
+      const entry = this.#quoteEntry(publicQuoteId);
+      if (!entry || entry[1].state === "settled") return null;
+      const quote = entry[1];
+      const now = instant(this.#clock(), "clock");
+      if (!quote.lifecycleRecheckAttemptedAt) {
+        quote.lifecycleRecheckAttemptedAt = now;
+        return { attempt: true, pending: false, lifecycle: null };
+      }
+      return { attempt: false,
+        pending: !quote.lifecycleRecheck && quote.lifecycleRecheckAttemptedAt.valueOf() > now.valueOf() - staleAfterMs,
+        lifecycle: clone(quote.lifecycleRecheck ?? null) };
+    });
+  }
+
+  async recordSettlementLifecycle({ quoteId, lifecycle } = {}) {
+    const publicQuoteId = bytes32(quoteId, "quoteId");
+    if (!lifecycle || typeof lifecycle !== "object" || Array.isArray(lifecycle)) throw new TypeError("lifecycle is required");
+    return this.#serialized(() => {
+      const entry = this.#quoteEntry(publicQuoteId);
+      if (!entry || entry[1].state === "settled" || !entry[1].lifecycleRecheckAttemptedAt || entry[1].lifecycleRecheck) return false;
+      entry[1].lifecycleRecheck = clone(lifecycle);
+      return true;
+    });
+  }
+
+  async listUnsettledSettlementObservations({ chainId, splitter, limit = 50 } = {}) {
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    const deployment = [...this.#deployments.values()].find((row) =>
+      row.chainId === settlementChain && row.splitter === settlementSplitter);
+    if (!deployment) return [];
+    const ranges = [...this.#scannerRanges.values()].filter((range) => range.deploymentId === deployment.id);
+    const latestByBlock = new Map();
+    for (const range of ranges) for (const item of range.canonicalBlocks) {
+      const prior = latestByBlock.get(item.blockNumber);
+      if (!prior || BigInt(range.generation) > BigInt(prior)) latestByBlock.set(item.blockNumber, range.generation);
+    }
+    const result = [];
+    for (const range of ranges) for (const observation of range.observations) {
+      if (!observation.exactMatch || latestByBlock.get(observation.blockNumber) !== range.generation
+          || !observation.details?.settlement) continue;
+      const quote = this.#quoteEntry(observation.quoteId)?.[1];
+      if (quote && quote.state !== "settled") result.push({ quoteId: observation.quoteId,
+        settlement: observation.details.settlement });
+    }
+    return clone(result.slice(0, limit));
+  }
+
+  async recordScannerRange(range) {
+    if (!range?.deploymentId) throw new TypeError("deploymentId is required");
+    const deployment = this.#deployments.get(range.deploymentId);
+    if (!deployment) throw new Error("deployment not found");
+    const fromBlock = block(range.fromBlock, "fromBlock");
+    const throughBlock = block(range.throughBlock, "throughBlock");
+    const generation = block(range.generation, "generation");
+    if (generation.number < 1n || throughBlock.number < fromBlock.number) throw new Error("invalid scanner range");
+    if (!Array.isArray(range.canonicalBlocks)
+        || BigInt(range.canonicalBlocks.length) !== throughBlock.number - fromBlock.number + 1n) {
+      throw new Error("canonicalBlocks must cover every block in the scanner range");
+    }
+    const canonicalBlocks = range.canonicalBlocks.map((item, offset) => {
+      const blockNumber = block(item?.blockNumber, "canonicalBlocks.blockNumber");
+      if (blockNumber.number !== fromBlock.number + BigInt(offset)) throw new Error("canonicalBlocks must cover every block in order");
+      return { blockNumber: blockNumber.raw, blockHash: bytes32(item.blockHash, "canonicalBlocks.blockHash"),
+        parentHash: bytes32(item.parentHash, "canonicalBlocks.parentHash"),
+        blockTimestamp: instant(item.blockTimestamp, "canonicalBlocks.blockTimestamp") };
+    });
+    for (let index = 1; index < canonicalBlocks.length; index += 1) {
+      if (canonicalBlocks[index].parentHash !== canonicalBlocks[index - 1].blockHash) {
+        throw new Error("canonical block parent ancestry is inconsistent");
+      }
+    }
+    const canonicalBlockHash = bytes32(range.canonicalBlockHash, "canonicalBlockHash");
+    const canonicalBlockTimestamp = instant(range.canonicalBlockTimestamp, "canonicalBlockTimestamp");
+    const checkpoint = canonicalBlocks.at(-1);
+    if (checkpoint.blockHash !== canonicalBlockHash || checkpoint.blockTimestamp.valueOf() !== canonicalBlockTimestamp.valueOf()) {
+      throw new Error("canonical checkpoint must match the final canonical block");
+    }
+    if (!Array.isArray(range.observations)) throw new TypeError("observations must be a complete array");
+    const observations = clone(range.observations);
+    for (const observation of observations) {
+      const canonical = canonicalBlocks[Number(BigInt(observation.blockNumber) - fromBlock.number)];
+      if (!canonical || bytes32(observation.blockHash, "observation.blockHash") !== canonical.blockHash
+          || instant(observation.blockTimestamp, "observation.blockTimestamp").valueOf() !== canonical.blockTimestamp.valueOf()) {
+        throw new Error("scanner observation must match its canonical block evidence");
+      }
+      if (observation.kind === "exact_log" && observation.details?.settlement) {
+        observation.details.settlement.settledAt = clone(observation.details.settlement.receiptBlockTimestamp);
+      }
+    }
+    const normalized = clone({ ...range, fromBlock: fromBlock.raw, throughBlock: throughBlock.raw,
+      generation: generation.raw, canonicalBlockHash, canonicalBlockTimestamp, canonicalBlocks, observations });
+    const key = `${deployment.chainId}:${deployment.splitter}`;
+    return this.#serialized(() => {
+      const cursor = this.#settlementCursors.get(key);
+      if (!cursor) throw new Error("settlement cursor not configured");
+      const replayKey = `${deployment.id}:${generation.raw}`;
+      const replay = this.#scannerRanges.get(replayKey);
+      if (replay) {
+        if (compareShape(replay) !== compareShape(normalized)) throw new Error("conflicting scanner generation replay");
+        return { released: 0, reorged: 0 };
+      }
+      if (generation.number !== BigInt(cursor.scanGeneration ?? 0) + 1n) throw new Error("scanner generation is discontinuous");
+      if (fromBlock.number > BigInt(cursor.nextRangeFrom)) throw new Error("scanner range is discontinuous");
+      if (fromBlock.number > BigInt(cursor.deploymentBlock)) {
+        const priorNumber = (fromBlock.number - 1n).toString();
+        const prior = [...this.#scannerRanges.values()]
+          .filter((stored) => stored.deploymentId === deployment.id)
+          .sort((left, right) => BigInt(left.generation) === BigInt(right.generation) ? 0
+            : BigInt(left.generation) > BigInt(right.generation) ? -1 : 1)
+          .flatMap((stored) => stored.canonicalBlocks)
+          .find((stored) => stored.blockNumber === priorNumber);
+        if (!prior || canonicalBlocks[0].parentHash !== prior.blockHash) {
+          throw new Error("canonical scanner range does not join persisted ancestry");
+        }
+      }
+      this.#scannerRanges.set(replayKey, normalized);
+      this.#settlementCursors.set(key, { ...clone(cursor), nextRangeFrom: (throughBlock.number + 1n).toString(),
+        checkpointBlock: throughBlock.raw, canonicalBlockHash: normalized.canonicalBlockHash,
+        scanGeneration: generation.raw, updatedAt: instant(this.#clock(), "clock") });
+      const latestGenerationByBlock = new Map();
+      for (const stored of this.#scannerRanges.values()) {
+        if (stored.deploymentId !== deployment.id) continue;
+        for (const item of stored.canonicalBlocks) {
+          const current = latestGenerationByBlock.get(item.blockNumber);
+          if (current == null || BigInt(stored.generation) > BigInt(current)) {
+            latestGenerationByBlock.set(item.blockNumber, stored.generation);
+          }
+        }
+      }
+      let released = 0;
+      const releasedAt = instant(this.#clock(), "clock");
+      for (const [quoteInternalId, quote] of this.#quotes.entries()) {
+        if (quote.deploymentId !== deployment.id || quote.state !== "expired" || quote.expiresAt > canonicalBlockTimestamp) continue;
+        const reservation = [...this.#reservations.values()].find((row) => row.quoteId === quote.quoteId);
+        if (reservation?.state !== "expiry_pending_reconciliation") continue;
+        const hasCurrentPreExpiryMatch = [...this.#scannerRanges.values()].some((stored) => stored.deploymentId === deployment.id
+          && stored.observations.some((item) => item.kind === "exact_log" && item.exactMatch === true
+            && item.quoteId === quote.quoteId && instant(item.blockTimestamp, "observation.blockTimestamp") < quote.expiresAt
+            && latestGenerationByBlock.get(String(item.blockNumber)) === stored.generation));
+        if (hasCurrentPreExpiryMatch) continue;
+        this.#reservations.set(reservation.id, { ...clone(reservation), state: "released", releasedAt, updatedAt: releasedAt,
+          scannerCursor: (throughBlock.number + 1n).toString(), releaseRangeFrom: cursor.deploymentBlock,
+          releaseRangeTo: throughBlock.raw, releaseCanonicalBlockHash: canonicalBlockHash });
+        this.#quotes.set(quoteInternalId, { ...clone(quote), reservationState: "released" });
+        released += 1;
+      }
+      let reorged = 0;
+      for (const [quoteInternalId, quote] of this.#quotes.entries()) {
+        if (quote.deploymentId !== deployment.id || quote.state !== "settled"
+            || BigInt(quote.receiptBlock) < fromBlock.number || BigInt(quote.receiptBlock) > throughBlock.number) continue;
+        const exact = observations.some((item) => item.kind === "exact_log" && item.exactMatch === true
+          && item.quoteId === quote.quoteId && item.txHash === quote.txHash && item.logIndex === quote.logIndex
+          && String(item.blockNumber) === quote.receiptBlock && item.blockHash === quote.receiptBlockHash
+          && instant(item.blockTimestamp, "observation.blockTimestamp").valueOf() === quote.receiptBlockTimestamp.valueOf());
+        if (exact) continue;
+        const detectedAt = quote.settlementReorgedAt ?? instant(this.#clock(), "clock");
+        this.#quotes.set(quoteInternalId, { ...clone(quote), settlementReorgedAt: detectedAt });
+        const monitorKey = `${quote.baseChainId}:${quote.splitter}:${quote.quoteId}`;
+        const monitor = this.#monitors.get(monitorKey);
+        if (monitor) this.#monitors.set(monitorKey, { ...clone(monitor), reconciliationMetadata: {
+          ...clone(monitor.reconciliationMetadata || {}), trailingOverlapReorg: { detectedAt, generation: generation.raw,
+            receiptBlock: quote.receiptBlock, receiptBlockHash: quote.receiptBlockHash,
+            txHash: quote.txHash, logIndex: quote.logIndex },
+        } });
+        reorged += 1;
+      }
+      return { released, reorged };
     });
   }
 
@@ -605,6 +798,94 @@ class MemoryGateStore {
     return total;
   }
 
+  async recordSettlementHint({ publicId, payer, txHash, chainId, splitter } = {}) {
+    const owner = address(payer, "payer");
+    const transactionHash = bytes32(txHash, "txHash");
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    return this.#serialized(() => {
+      const submission = [...this.#submissions.values()].find((row) => row.publicId === publicId);
+      if (!submission || submission.payer !== owner) return null;
+      const quote = [...this.#quotes.values()].find((row) => row.submissionId === submission.id);
+      const deployment = quote && this.#deployments.get(quote.deploymentId);
+      const now = instant(this.#clock(), "clock");
+      if (quote && (quote.state === "expired" || quote.expiresAt <= now)) {
+        if (quote.state !== "expired") {
+          quote.state = "expired";
+          const reservation = [...this.#reservations.values()].find((row) => row.quoteId === quote.quoteId);
+          if (reservation?.state === "active") {
+            reservation.state = "expiry_pending_reconciliation";
+            reservation.updatedAt = now;
+          }
+        }
+        if (submission.status !== "EXPIRED") {
+          submission.status = "EXPIRED";
+          submission.publicStateChangedAt = now;
+        }
+        return clone(publicSubmissionProjection(submission, null));
+      }
+      if (!quote || !deployment || quote.state !== "quoted"
+          || quote.baseChainId !== settlementChain || quote.splitter !== settlementSplitter) {
+        throw new Error("settlement hint can be recorded only for a valid payable quote");
+      }
+      if (submission.pendingSettlementTxHash && submission.pendingSettlementTxHash !== transactionHash) {
+        throw new Error("conflicting settlement transaction hash");
+      }
+      if (submission.status === "SETTLEMENT_PENDING") return clone(publicSubmissionProjection(submission, null));
+      if (submission.status !== "QUOTED") throw new Error("settlement hint can be recorded only for a valid payable quote");
+      submission.pendingSettlementTxHash = transactionHash;
+      submission.status = "SETTLEMENT_PENDING";
+      submission.publicStateChangedAt = now;
+      return clone(publicSubmissionProjection(submission, null));
+    });
+  }
+
+  async listPendingSettlementHints({ limit = 50 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    return [...this.#submissions.values()].filter((row) => row.status === "SETTLEMENT_PENDING" && row.pendingSettlementTxHash)
+      .slice(0, limit).map((submission) => {
+        const quote = [...this.#quotes.values()].find((row) => row.submissionId === submission.id);
+        return clone({ publicId: submission.publicId, quoteId: quote.quoteId,
+          txHash: submission.pendingSettlementTxHash, expiresAt: quote.expiresAt });
+      });
+  }
+
+  async resolveSettlementHint({ publicId, txHash, state } = {}) {
+    const transactionHash = bytes32(txHash, "txHash");
+    if (!new Set(["payment_required", "expired"]).has(state)) throw new TypeError("invalid settlement hint state");
+    return this.#serialized(() => {
+      const submission = [...this.#submissions.values()].find((row) => row.publicId === publicId);
+      if (!submission || submission.status !== "SETTLEMENT_PENDING" || submission.pendingSettlementTxHash !== transactionHash) return false;
+      const quote = [...this.#quotes.values()].find((row) => row.submissionId === submission.id);
+      submission.pendingSettlementTxHash = null;
+      submission.publicStateChangedAt = instant(this.#clock(), "clock");
+      if (state === "expired") {
+        submission.status = "EXPIRED";
+        if (quote?.state === "quoted") quote.state = "expired";
+        const reservation = quote && [...this.#reservations.values()].find((row) => row.quoteId === quote.quoteId);
+        if (reservation?.state === "active") reservation.state = "expiry_pending_reconciliation";
+      } else submission.status = "QUOTED";
+      return true;
+    });
+  }
+
+  async findSettlementQuote(quoteId) {
+    const entry = this.#quoteEntry(bytes32(quoteId, "quoteId"));
+    if (!entry) return null;
+    const quote = entry[1];
+    const submission = this.#submissions.get(quote.submissionId);
+    const snapshot = submission && this.#snapshots.get(submission.issuanceSnapshotId);
+    const deployment = this.#deployments.get(quote.deploymentId);
+    if (!submission || !snapshot || !deployment) return null;
+    return clone({ quoteId: quote.quoteId, payer: quote.payer, voter: quote.voter,
+      attentionAmount: quote.attentionAmount, feeAmount: quote.feeAmount, gavelRecipient: deployment.gavelRecipient,
+      token: quote.token, submissionHash: submission.submissionHash, quoteVersion: quote.quoteVersion,
+      baseChainId: quote.baseChainId, splitter: quote.splitter, expiresAt: quote.expiresAt,
+      issuanceLifecycle: snapshot.eligibility, dao: snapshot.dao, proposalId: snapshot.proposalId,
+      destinationRef: `profile:${submission.profileId}`,
+      trustedSummary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
+  }
+
   async markSettlementPending(publicId, pending = true) {
     if (typeof pending !== "boolean") throw new TypeError("pending settlement marker must be boolean");
     return this.#serialized(() => {
@@ -649,56 +930,17 @@ class MemoryGateStore {
     });
   }
 
-  async releaseReservation(quoteId, evidence) {
+  async releaseReservation(quoteId, _evidence) {
     const publicQuoteId = bytes32(quoteId, "quoteId");
-    if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)
-        || !evidence.cursor || typeof evidence.cursor !== "object"
-        || !evidence.coverage || typeof evidence.coverage !== "object") {
-      throw new TypeError("structured scanner coverage evidence is required");
-    }
-    return this.#withProfileLock(`quote:${publicQuoteId}`, () => this.#serialized(async () => {
+    return this.#serialized(() => {
       const entry = this.#quoteEntry(publicQuoteId);
       if (!entry) throw new Error("quote not found");
-      const quote = entry[1];
       const reservation = [...this.#reservations.values()].find((row) => row.quoteId === publicQuoteId);
       if (!reservation) throw new Error("reservation not found");
       if (reservation.state === "released") return false;
       if (reservation.state !== "expiry_pending_reconciliation") throw new Error("reservation is not expiry pending");
-      const deployment = this.#deployments.get(quote.deploymentId);
-      const chainId = String(evidence.chainId);
-      const splitter = address(evidence.splitter, "splitter");
-      if (!deployment || evidence.deploymentId !== deployment.id || chainId !== deployment.chainId || splitter !== deployment.splitter) {
-        throw new Error("deployment coverage mismatch");
-      }
-      const cursorKey = `${chainId}:${splitter}`;
-      const storedCursor = this.#settlementCursors.get(cursorKey);
-      if (!storedCursor || storedCursor.deploymentId !== deployment.id) throw new Error("settlement cursor not configured");
-      const from = block(evidence.cursor.fromBlock, "cursor.fromBlock");
-      const through = block(evidence.cursor.throughBlock, "cursor.throughBlock");
-      const next = block(evidence.cursor.nextBlock, "cursor.nextBlock");
-      const rangeFrom = block(evidence.coverage.rangeFrom, "coverage.rangeFrom");
-      const rangeTo = block(evidence.coverage.rangeTo, "coverage.rangeTo");
-      const lastEligible = block(evidence.coverage.lastEligibleBlock, "coverage.lastEligibleBlock");
-      const canonicalBlockHash = bytes32(evidence.coverage.canonicalBlockHash, "coverage.canonicalBlockHash");
-      if (evidence.coverage.canonical !== true) throw new Error("canonical proof marker is required");
-      if (from.raw !== storedCursor.nextRangeFrom || rangeFrom.raw !== from.raw || through.raw !== rangeTo.raw
-          || next.number !== through.number + 1n) throw new Error("coverage is not authorized by the settlement cursor");
-      if (rangeTo.number < rangeFrom.number || rangeTo.number < lastEligible.number) {
-        throw new Error("coverage must be complete through the last eligible pre-expiry block");
-      }
-      const now = instant(this.#clock(), "clock");
-      this.#settlementCursors.set(cursorKey, {
-        ...clone(storedCursor), nextRangeFrom: next.raw, checkpointBlock: through.raw,
-        canonicalBlockHash, reconciliationMetadata: clone(evidence.coverage), updatedAt: now,
-      });
-      this.#reservations.set(reservation.id, {
-        ...clone(reservation), state: "released", releasedAt: now, updatedAt: now,
-        scannerCursor: next.raw, releaseRangeFrom: rangeFrom.raw, releaseRangeTo: rangeTo.raw,
-        releaseCanonicalBlockHash: canonicalBlockHash,
-      });
-      this.#quotes.set(entry[0], { ...clone(quote), reservationState: "released" });
-      return true;
-    }));
+      throw new Error("reservation release is owned by recordScannerRange");
+    });
   }
 
   #validateSettlement(quote, submission, settlement, inbox, notification, monitor) {
@@ -722,8 +964,10 @@ class MemoryGateStore {
     for (const field of Object.keys(expected)) {
       if (bindings[field] !== expected[field]) throw new Error(`settlement ${field} does not match stored quote`);
     }
-    if (evidence.oneConfirmation !== true || evidence.canonical !== true || evidence.scannerVerified !== true) {
-      throw new Error("one-confirmation canonical scanner evidence is required");
+    const confirmations = Number(evidence.confirmations);
+    if (evidence.oneConfirmation !== true || evidence.canonical !== true || evidence.scannerVerified !== true
+        || !Number.isSafeInteger(confirmations) || confirmations !== 1) {
+      throw new Error("confirmed canonical scanner evidence is required");
     }
     if (String(evidence.chainId) !== quote.baseChainId || address(evidence.splitter, "evidence.splitter") !== quote.splitter) {
       throw new Error("settlement chainId or splitter does not match stored quote");
@@ -735,7 +979,7 @@ class MemoryGateStore {
       receiptBlockHash: bytes32(settlement.receiptBlockHash, "receiptBlockHash"),
       receiptBlock: block(settlement.receiptBlock, "receiptBlock").raw,
       receiptBlockTimestamp, settledAt: instant(settlement.settledAt, "settledAt"), event: bindings,
-      evidence: { ...clone(evidence), chainId: quote.baseChainId, splitter: quote.splitter },
+      evidence: { ...clone(evidence), chainId: quote.baseChainId, splitter: quote.splitter, confirmations },
     };
     if (!Number.isInteger(settlement.logIndex) || settlement.logIndex < 0) throw new TypeError("logIndex must be a nonnegative integer");
     if (!inbox?.id || !INBOX_LIFECYCLE_SET.has(inbox.issuanceLifecycle) || !INBOX_LIFECYCLE_SET.has(inbox.currentLifecycle)
@@ -775,12 +1019,18 @@ class MemoryGateStore {
       const submission = this.#submissions.get(quote.submissionId);
       const monitorKey = `${quote.baseChainId}:${quote.splitter}:${quote.quoteId}`;
       if (quote.state === "settled") {
+        const normalizedReplay = this.#validateSettlement(quote, submission, settlement, inbox, notification, monitor);
+        const sameEvent = quote.txHash === normalizedReplay.txHash && quote.logIndex === normalizedReplay.logIndex
+          && quote.receiptBlock === normalizedReplay.receiptBlock && quote.receiptBlockHash === normalizedReplay.receiptBlockHash
+          && quote.receiptBlockTimestamp.valueOf() === normalizedReplay.receiptBlockTimestamp.valueOf();
+        if (!sameEvent) throw new Error("conflicting settlement evidence");
         const existingInbox = [...this.#inboxItems.values()].find((row) => row.submissionId === submission.id);
         const existingMonitor = this.#monitors.get(monitorKey);
         const existingNotification = existingInbox && [...this.#notifications.values()].find((row) => row.inboxId === existingInbox.id);
         if (!existingInbox || !existingMonitor || !existingNotification) throw new Error("idempotent settlement is incomplete: inbox, notification, and monitor are required");
-        const fingerprint = compareShape({ settlement, inbox, notification, monitor });
-        if (quote.settlementFingerprint !== fingerprint) throw new Error("conflicting settlement evidence");
+        if (existingInbox.id !== inbox.id || existingNotification.id !== notification.id || existingMonitor.id !== monitor.id) {
+          throw new Error("conflicting settlement side effects");
+        }
         return false;
       }
       if (quote.state !== "quoted" && quote.state !== "expired") throw new Error("quote cannot be settled");
@@ -802,23 +1052,31 @@ class MemoryGateStore {
         ...clone(inbox), submissionId: submission.id, profileId: submission.profileId,
         inboxCreatedAt: now, readAt: null, archivedAt: null,
       };
-      const stagedNotification = { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0,
-        createdAt: now, updatedAt: now };
+      const stagedNotification = { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
+        nextAttemptAt: now, claimedUntil: null, createdAt: now, updatedAt: now };
       const stagedMonitor = {
         ...clone(monitor), quoteId: quote.quoteId, chainId: quote.baseChainId, splitter: quote.splitter,
         receiptBlock: normalizedSettlement.receiptBlock, receiptBlockHash: normalizedSettlement.receiptBlockHash,
         txHash: normalizedSettlement.txHash, logIndex: normalizedSettlement.logIndex, completedAt: null,
+        claimedUntil: null, claimGeneration: 0, reconciliationMetadata: {},
       };
       await this.#beforeSettlementCommit();
       return this.#serialized(async () => {
         const current = this.#quotes.get(quoteInternalId);
         if (current?.state === "settled") {
-          if (current.settlementFingerprint !== fingerprint) throw new Error("conflicting settlement evidence");
+          const sameEvent = current.txHash === normalizedSettlement.txHash && current.logIndex === normalizedSettlement.logIndex
+            && current.receiptBlock === normalizedSettlement.receiptBlock && current.receiptBlockHash === normalizedSettlement.receiptBlockHash
+            && current.receiptBlockTimestamp.valueOf() === normalizedSettlement.receiptBlockTimestamp.valueOf();
+          if (!sameEvent) throw new Error("conflicting settlement evidence");
           return false;
         }
         if (this.#inboxItems.has(inbox.id)) throw new Error("duplicate inbox id");
         if (this.#notifications.has(notification.id)) throw new Error("duplicate notification id");
         if (this.#monitors.has(monitorKey)) throw new Error("duplicate settlement monitor");
+        const settlementCollision = [...this.#quotes.values()].some((row) => row.state === "settled"
+          && row.baseChainId === quote.baseChainId && row.splitter === quote.splitter
+          && row.txHash === normalizedSettlement.txHash && row.logIndex === normalizedSettlement.logIndex);
+        if (settlementCollision) throw new Error("duplicate settlement transaction/log identity");
         this.#quotes.set(quoteInternalId, stagedQuote);
         this.#reservations.set(reservation.id, stagedReservation);
         this.#submissions.set(submission.id, stagedSubmission);
@@ -827,6 +1085,88 @@ class MemoryGateStore {
         this.#monitors.set(monitorKey, stagedMonitor);
         return { settled: true, inboxCreatedAt: clone(now) };
       });
+    });
+  }
+
+  async claimSettlementMonitors({ chainId, splitter, headBlock, limit = 50, leaseMs = 5 * 60_000 } = {}) {
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    const head = block(headBlock, "headBlock").number;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      const claimed = [...this.#monitors.values()].filter((row) => row.chainId === settlementChain
+        && row.splitter === settlementSplitter && !row.completedAt && BigInt(row.nextCheckBlock) <= head
+        && (!row.claimedUntil || row.claimedUntil <= now))
+        .sort((left, right) => BigInt(left.nextCheckBlock) < BigInt(right.nextCheckBlock) ? -1 : 1).slice(0, limit);
+      for (const row of claimed) { row.claimedUntil = new Date(now.valueOf() + leaseMs); row.claimGeneration += 1; }
+      return clone(claimed.map(({ claimedUntil: _claim, claimGeneration, ...row }) => ({ ...row, claimToken: String(claimGeneration) })));
+    });
+  }
+
+  async advanceSettlementMonitor({ id, claimToken, progressBlock, nextCheckBlock, completed, reorged } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof completed !== "boolean" || typeof reorged !== "boolean") throw new TypeError("invalid monitor advancement");
+    const progress = block(progressBlock, "progressBlock").raw;
+    const next = completed ? null : block(nextCheckBlock, "nextCheckBlock").raw;
+    if (!completed && BigInt(next) <= BigInt(progress)) throw new Error("nextCheckBlock must advance beyond progressBlock");
+    return this.#serialized(() => {
+      const row = [...this.#monitors.values()].find((item) => item.id === id);
+      if (!row) throw new Error("settlement monitor not found");
+      const now = instant(this.#clock(), "clock");
+      if (row.claimGeneration !== Number(claimToken) || !row.claimedUntil || row.claimedUntil <= now) return false;
+      row.progressBlock = progress; row.claimedUntil = null;
+      if (next !== null) row.nextCheckBlock = next;
+      if (reorged) row.reconciliationMetadata = { ...clone(row.reconciliationMetadata ?? {}), monitorReorged: true };
+      if (completed) row.completedAt = now;
+      if (reorged) {
+        const quote = this.#quoteEntry(row.quoteId)?.[1];
+        if (quote && !quote.settlementReorgedAt) quote.settlementReorgedAt = now;
+      }
+      return true;
+    });
+  }
+
+  async claimNotificationAttempts({ limit = 20, now = this.#clock() } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    const at = instant(now, "now");
+    return this.#serialized(() => {
+      const rows = [...this.#notifications.values()].filter((row) => ["pending", "failed"].includes(row.status)
+        && (row.nextAttemptAt ?? row.createdAt) <= at && (!row.claimedUntil || row.claimedUntil <= at)
+        && row.retryCount <= this.#notificationRetryLimit).slice(0, limit);
+      for (const row of rows) {
+        row.status = "pending";
+        row.claimGeneration += 1;
+        row.claimedUntil = new Date(at.valueOf() + 30_000);
+      }
+      return clone(rows.map((row) => ({ id: row.id, claimToken: String(row.claimGeneration), retryCount: row.retryCount,
+        destinationRef: row.destinationRef, summary: row.summary })));
+    });
+  }
+
+  async completeNotification({ id, claimToken, providerOpaqueId = null } = {}) {
+    return this.#serialized(() => {
+      const row = this.#notifications.get(id);
+      if (!row) throw new Error("notification not found");
+      if (row.status === "sent") return false;
+      const now = instant(this.#clock(), "clock");
+      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      row.status = "sent"; row.providerOpaqueId = providerOpaqueId; row.claimedUntil = null;
+      row.updatedAt = now; return true;
+    });
+  }
+
+  async failNotification({ id, claimToken, errorCode, nextAttemptAt } = {}) {
+    const next = instant(nextAttemptAt, "nextAttemptAt");
+    return this.#serialized(() => {
+      const row = this.#notifications.get(id);
+      if (!row) throw new Error("notification not found");
+      if (row.status === "sent") return false;
+      const now = instant(this.#clock(), "clock");
+      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      row.status = "failed"; row.errorCode = String(errorCode); row.retryCount += 1;
+      row.nextAttemptAt = next; row.claimedUntil = null; row.updatedAt = now; return true;
     });
   }
 
