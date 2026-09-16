@@ -42,6 +42,7 @@ jobs:
       - run: npm test
         env:
           GAVEL_TEST_DATABASE_URL: postgres://postgres:gavel-ci-only@127.0.0.1:5432/gavel_ci
+      - run: npm test --workspace @gavel/cli
       - run: npm run tui:typecheck
       # The Gate web app is a separate workspace with its own Vitest suite, so
       # the root Node test run does not cover it. Type-check and build it too:

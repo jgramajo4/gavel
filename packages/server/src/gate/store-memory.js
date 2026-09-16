@@ -1186,6 +1186,52 @@ class MemoryGateStore {
     });
   }
 
+  #inboxRecord(row) {
+    const submission = this.#submissions.get(row.submissionId);
+    const snapshot = submission && this.#snapshots.get(submission.issuanceSnapshotId);
+    return clone({
+      id: row.id,
+      archivedAt: row.archivedAt ?? null,
+      createdAt: row.inboxCreatedAt,
+      issuanceLifecycle: row.issuanceLifecycle,
+      currentLifecycle: row.currentLifecycle,
+      lifecycleChanged: row.lifecycleChanged === true,
+      material: submission?.material && typeof submission.material === "object" ? submission.material : {},
+      canonicalFacts: snapshot?.canonicalFacts ?? {},
+      decodedFacts: snapshot?.decodedFacts ?? {},
+      canonicalActions: snapshot?.canonicalActions ?? [],
+      dao: snapshot?.dao ?? null,
+      proposalId: snapshot?.proposalId ?? null,
+    });
+  }
+
+  async listInboxItems(profileId) {
+    if (typeof profileId !== "string" || !profileId) throw new TypeError("profileId is required");
+    return this.#serialized(() => [...this.#inboxItems.values()]
+      .filter((row) => row.profileId === profileId)
+      .sort((left, right) => right.inboxCreatedAt - left.inboxCreatedAt)
+      .map((row) => this.#inboxRecord(row)));
+  }
+
+  async getInboxItem(profileId, id) {
+    if (typeof profileId !== "string" || !profileId || typeof id !== "string" || !id) return null;
+    return this.#serialized(() => {
+      const row = this.#inboxItems.get(id);
+      if (!row || row.profileId !== profileId) return null;
+      return this.#inboxRecord(row);
+    });
+  }
+
+  async archiveInboxItem(profileId, id) {
+    if (typeof profileId !== "string" || !profileId || typeof id !== "string" || !id) return null;
+    return this.#serialized(() => {
+      const row = this.#inboxItems.get(id);
+      if (!row || row.profileId !== profileId) return null;
+      if (row.archivedAt == null) row.archivedAt = instant(this.#clock(), "clock");
+      return this.#inboxRecord(row);
+    });
+  }
+
   async counts() {
     return {
       snapshots: this.#snapshots.size, submissions: this.#submissions.size, quotes: this.#quotes.size,

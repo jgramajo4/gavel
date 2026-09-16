@@ -31,5 +31,18 @@ capacity release.
 The Base RPC client, lifecycle reader, and optional narrow notification provider
 are injected. A notification provider must set `durableIdempotency = true` and
 durably deduplicate every external send by the supplied `idempotencyKey`; the
-worker rejects providers that cannot make that guarantee. Concrete provider
-setup and deployment remain outside PR6.
+worker rejects providers that cannot make that guarantee.
+
+PR8 adds the first concrete adapter at `src/gate/notifiers/email.js`. It speaks
+the PR6 worker interface and sends AgentMail with the `Idempotency-Key` header
+set to Gate's durable notification id. AgentMail documents that a retry with the
+same key returns the original message and does not send a second email. Keys
+expire 24 hours after the send completes.
+
+Private inbox HTTP (exact `dao_inbox` session equal to the enrolled profile
+wallet):
+
+- `GET /v1/gate/me/profile` — public profile projection for the session wallet
+- `GET /v1/gate/me/inbox`
+- `GET /v1/gate/me/inbox/:id`
+- `POST /v1/gate/me/inbox/:id/archive` — idempotent; does not change public accepted state
