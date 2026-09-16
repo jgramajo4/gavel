@@ -367,6 +367,10 @@ CREATE TABLE IF NOT EXISTS gate.submissions (
  status text NOT NULL DEFAULT 'QUOTED' CHECK(status IN('QUOTED','SETTLEMENT_PENDING','SETTLED','EXPIRED')), public_state_changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(), CHECK(payer=signed_sender)
 );
+ALTER TABLE gate.submissions ADD COLUMN IF NOT EXISTS pending_settlement_tx_hash text;
+ALTER TABLE gate.submissions DROP CONSTRAINT IF EXISTS submissions_pending_settlement_tx_hash_check;
+ALTER TABLE gate.submissions ADD CONSTRAINT submissions_pending_settlement_tx_hash_check
+  CHECK(pending_settlement_tx_hash IS NULL OR pending_settlement_tx_hash ~ '^0x[0-9a-f]{64}$');
 CREATE INDEX IF NOT EXISTS submissions_profile_idx ON gate.submissions(profile_id,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS gate.quotes (
@@ -390,16 +394,37 @@ CREATE TABLE IF NOT EXISTS gate.quotes (
  settlement_quote_version integer, settlement_source_chain_id bigint,
  settlement_splitter text CHECK(settlement_splitter IS NULL OR settlement_splitter ~ '^0x[0-9a-f]{40}$'),
  settlement_reorged_at timestamptz, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
- CHECK((state='settled')=(settled_tx_hash IS NOT NULL AND settled_log_index IS NOT NULL AND settled_at IS NOT NULL AND receipt_block IS NOT NULL
+ FOREIGN KEY(deployment_id,base_chain_id,splitter,token) REFERENCES gate.splitter_deployments(id,chain_id,splitter,token)
+);
+ALTER TABLE gate.quotes ADD COLUMN IF NOT EXISTS lifecycle_recheck_attempted_at timestamptz;
+ALTER TABLE gate.quotes ADD COLUMN IF NOT EXISTS lifecycle_recheck jsonb;
+ALTER TABLE gate.quotes DROP CONSTRAINT IF EXISTS quotes_lifecycle_recheck_check;
+ALTER TABLE gate.quotes ADD CONSTRAINT quotes_lifecycle_recheck_check CHECK(
+ lifecycle_recheck IS NULL OR (lifecycle_recheck_attempted_at IS NOT NULL AND jsonb_typeof(lifecycle_recheck)='object'));
+DO $$
+DECLARE legacy_constraint name;
+BEGIN
+  FOR legacy_constraint IN
+    SELECT c.conname FROM pg_constraint c
+    WHERE c.conrelid='gate.quotes'::regclass AND c.contype='c'
+      AND position('state' in pg_get_constraintdef(c.oid)) > 0
+      AND position('settled_tx_hash' in pg_get_constraintdef(c.oid)) > 0
+      AND position('settlement_confirmations' in pg_get_constraintdef(c.oid)) > 0
+  LOOP
+    EXECUTE format('ALTER TABLE gate.quotes DROP CONSTRAINT %I',legacy_constraint);
+  END LOOP;
+END $$;
+ALTER TABLE gate.quotes ADD CONSTRAINT quotes_settlement_complete_check CHECK(
+ (state='settled')=(settled_tx_hash IS NOT NULL AND settled_log_index IS NOT NULL AND settled_at IS NOT NULL AND receipt_block IS NOT NULL
    AND receipt_block_hash IS NOT NULL AND receipt_block_timestamp IS NOT NULL AND settlement_proof_canonical IS TRUE
    AND settlement_scanner_verified IS TRUE AND settlement_event_quote_id=quote_id AND settlement_confirmations=1
    AND settlement_payer IS NOT NULL AND settlement_voter IS NOT NULL AND settlement_attention_amount IS NOT NULL AND settlement_fee_amount IS NOT NULL
    AND settlement_gavel_recipient IS NOT NULL
    AND settlement_token IS NOT NULL AND settlement_submission_hash IS NOT NULL AND settlement_quote_version IS NOT NULL
-   AND settlement_source_chain_id IS NOT NULL AND settlement_splitter IS NOT NULL)),
- FOREIGN KEY(deployment_id,base_chain_id,splitter,token) REFERENCES gate.splitter_deployments(id,chain_id,splitter,token)
-);
+   AND settlement_source_chain_id IS NOT NULL AND settlement_splitter IS NOT NULL));
 CREATE INDEX IF NOT EXISTS quotes_expiry_idx ON gate.quotes(state,expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS quotes_settled_log_identity_idx
+  ON gate.quotes(base_chain_id,splitter,settled_tx_hash,settled_log_index) WHERE settled_tx_hash IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS gate.capacity_reservations (
  id text PRIMARY KEY, profile_id text NOT NULL REFERENCES gate.profiles(id), quote_id text NOT NULL UNIQUE REFERENCES gate.quotes(id),
@@ -430,7 +455,65 @@ CREATE TABLE IF NOT EXISTS gate.notification_attempts (
  retry_count integer NOT NULL DEFAULT 0 CHECK(retry_count>=0),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS trusted_summary jsonb;
+UPDATE gate.notification_attempts SET trusted_summary=jsonb_build_object(
+  'subject','Paid pitch ready','text','Open your private Gate inbox.') WHERE trusted_summary IS NULL;
+ALTER TABLE gate.notification_attempts ALTER COLUMN trusted_summary SET NOT NULL;
+ALTER TABLE gate.notification_attempts DROP CONSTRAINT IF EXISTS notification_trusted_summary_shape;
+ALTER TABLE gate.notification_attempts ADD CONSTRAINT notification_trusted_summary_shape CHECK(
+  jsonb_typeof(trusted_summary)='object' AND trusted_summary ?& ARRAY['subject','text']
+  AND NOT (trusted_summary - ARRAY['subject','text'] <> '{}'::jsonb)
+  AND jsonb_typeof(trusted_summary->'subject')='string' AND jsonb_typeof(trusted_summary->'text')='string');
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
+UPDATE gate.notification_attempts SET next_attempt_at=created_at WHERE next_attempt_at IS NULL;
+ALTER TABLE gate.notification_attempts ALTER COLUMN next_attempt_at SET DEFAULT clock_timestamp();
+ALTER TABLE gate.notification_attempts ALTER COLUMN next_attempt_at SET NOT NULL;
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS claimed_until timestamptz;
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS claim_generation bigint NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS notification_inbox_unique_idx ON gate.notification_attempts(inbox_id);
 CREATE INDEX IF NOT EXISTS notification_pending_idx ON gate.notification_attempts(state,created_at);
+
+DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,timestamptz,integer);
+DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,integer,integer);
+CREATE OR REPLACE FUNCTION gate.claim_notification_attempts(p_limit integer,p_retry_limit integer,p_lease_ms integer)
+RETURNS TABLE(id text,"claimToken" text,"retryCount" integer,"destinationRef" text,summary jsonb)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ WITH candidates AS (
+   SELECT n.id FROM gate.notification_attempts n
+   WHERE n.state IN('pending','failed') AND n.next_attempt_at<=clock_timestamp()
+     AND n.retry_count<=p_retry_limit AND (n.claimed_until IS NULL OR n.claimed_until<=clock_timestamp())
+     AND p_lease_ms BETWEEN 1 AND 3600000
+   ORDER BY n.next_attempt_at,n.created_at LIMIT p_limit FOR UPDATE SKIP LOCKED
+ )
+ UPDATE gate.notification_attempts n SET state='pending',claim_generation=claim_generation+1,
+   claimed_until=clock_timestamp()+make_interval(secs => p_lease_ms / 1000.0),updated_at=clock_timestamp()
+ FROM candidates c WHERE n.id=c.id
+ RETURNING n.id,n.claim_generation::text,n.retry_count,n.destination_ref_ciphertext,n.trusted_summary
+$$;
+REVOKE ALL ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) FROM PUBLIC;
+
+DROP FUNCTION IF EXISTS gate.complete_notification_attempt(text,text);
+CREATE OR REPLACE FUNCTION gate.complete_notification_attempt(p_id text,p_claim_token text,p_provider_opaque_id text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ UPDATE gate.notification_attempts SET state='sent',provider_opaque_id=p_provider_opaque_id,
+   claimed_until=NULL,updated_at=clock_timestamp() WHERE id=p_id AND state='pending'
+     AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp();
+ IF FOUND THEN RETURN true; END IF;
+ RETURN false;
+END $$;
+REVOKE ALL ON FUNCTION gate.complete_notification_attempt(text,text,text) FROM PUBLIC;
+
+DROP FUNCTION IF EXISTS gate.fail_notification_attempt(text,text,timestamptz);
+CREATE OR REPLACE FUNCTION gate.fail_notification_attempt(p_id text,p_claim_token text,p_error_code text,p_next_attempt_at timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ UPDATE gate.notification_attempts SET state='failed',error_code=p_error_code,retry_count=retry_count+1,
+   next_attempt_at=p_next_attempt_at,claimed_until=NULL,updated_at=clock_timestamp()
+ WHERE id=p_id AND state='pending' AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp();
+ RETURN FOUND;
+END $$;
+REVOKE ALL ON FUNCTION gate.fail_notification_attempt(text,text,text,timestamptz) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION gate.transition_notification(p_id text,p_state gate.notification_state,p_provider text,p_has_provider boolean,
   p_error text,p_has_error boolean,p_retry_limit integer)
@@ -504,10 +587,54 @@ CREATE TABLE IF NOT EXISTS gate.settlement_scan_ranges (
 CREATE TABLE IF NOT EXISTS gate.settlement_scan_blocks (
  id bigserial PRIMARY KEY, range_id bigint NOT NULL, deployment_id text NOT NULL, scan_generation bigint NOT NULL CHECK(scan_generation>0),
  block_number bigint NOT NULL CHECK(block_number>=0), block_hash text NOT NULL CHECK(block_hash ~ '^0x[0-9a-f]{64}$'),
+ parent_hash text,
  block_timestamp timestamptz NOT NULL, recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  FOREIGN KEY(range_id,deployment_id,scan_generation) REFERENCES gate.settlement_scan_ranges(id,deployment_id,scan_generation),
  UNIQUE(deployment_id,scan_generation,block_number)
 );
+ALTER TABLE gate.settlement_scan_blocks ADD COLUMN IF NOT EXISTS parent_hash text;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='gate.settlement_scan_blocks'::regclass
+   AND conname='settlement_scan_blocks_parent_hash_check') THEN
+  ALTER TABLE gate.settlement_scan_blocks ADD CONSTRAINT settlement_scan_blocks_parent_hash_check
+    CHECK(parent_hash IS NOT NULL AND parent_hash ~ '^0x[0-9a-f]{64}$') NOT VALID;
+ END IF;
+END $$;
+-- Scanner evidence written before parent linkage existed cannot authorize settlement or capacity release.
+-- Temporarily remove the old-version transition trigger while reverting legacy releases; recreate it immediately when upgrading.
+DROP TRIGGER IF EXISTS reservations_state_transition ON gate.capacity_reservations;
+WITH unsafe_deployments AS (
+  SELECT c.deployment_id FROM gate.settlement_cursors c WHERE c.checkpoint_block IS NOT NULL
+    AND (SELECT count(DISTINCT b.block_number) FROM gate.settlement_scan_blocks b
+      WHERE b.deployment_id=c.deployment_id AND b.parent_hash IS NOT NULL
+        AND b.block_number BETWEEN c.deployment_block AND c.checkpoint_block)
+      <>c.checkpoint_block-c.deployment_block+1
+), reverted AS (
+  UPDATE gate.capacity_reservations r SET state='expiry_pending_reconciliation',released_at=NULL,scanner_cursor=NULL,
+    release_range_from=NULL,release_range_to=NULL,release_canonical_block_hash=NULL,updated_at=clock_timestamp()
+    FROM gate.quotes q,unsafe_deployments u
+    WHERE r.quote_id=q.id AND q.deployment_id=u.deployment_id AND q.state='expired' AND r.state='released'
+    RETURNING r.quote_id
+) UPDATE gate.quotes q SET reservation_state='reserved' FROM reverted r WHERE q.id=r.quote_id;
+DO $$ BEGIN
+ IF to_regprocedure('gate.enforce_state_transition()') IS NOT NULL THEN
+  EXECUTE 'CREATE TRIGGER reservations_state_transition BEFORE UPDATE ON gate.capacity_reservations FOR EACH ROW EXECUTE FUNCTION gate.enforce_state_transition()';
+ END IF;
+END $$;
+-- Reset those deployments to their recorded start so bounded scanner cycles replace the legacy coverage canonically.
+UPDATE gate.splitter_deployments d SET scanner_cursor=d.deployment_block
+ FROM gate.settlement_cursors c WHERE c.deployment_id=d.id AND c.checkpoint_block IS NOT NULL
+   AND (SELECT count(DISTINCT b.block_number) FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=c.deployment_id AND b.parent_hash IS NOT NULL
+       AND b.block_number BETWEEN c.deployment_block AND c.checkpoint_block)
+     <>c.checkpoint_block-c.deployment_block+1;
+UPDATE gate.settlement_cursors c SET next_range_from=c.deployment_block,checkpoint_block=NULL,
+  canonical_block_hash=NULL,checkpoint_block_timestamp=NULL,updated_at=clock_timestamp()
+ WHERE c.checkpoint_block IS NOT NULL
+   AND (SELECT count(DISTINCT b.block_number) FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=c.deployment_id AND b.parent_hash IS NOT NULL
+       AND b.block_number BETWEEN c.deployment_block AND c.checkpoint_block)
+     <>c.checkpoint_block-c.deployment_block+1;
 CREATE TABLE IF NOT EXISTS gate.settlement_scan_observations (
  id bigserial PRIMARY KEY, range_id bigint NOT NULL, deployment_id text NOT NULL, scan_generation bigint NOT NULL CHECK(scan_generation>0),
  kind text NOT NULL CHECK(kind IN('exact_log','anomaly')),
@@ -546,6 +673,9 @@ DECLARE
  block_count bigint;
  p_generation bigint;
  overlap_blocks bigint;
+ expected_block bigint;
+ previous_hash text;
+ boundary_hash text;
  released_count integer := 0;
 BEGIN
  SELECT c0.* INTO c FROM gate.settlement_cursors c0 WHERE c0.deployment_id=p_deployment_id FOR UPDATE;
@@ -581,13 +711,30 @@ BEGIN
  INSERT INTO gate.settlement_scan_ranges(deployment_id,scan_generation,range_from,range_through,canonical_block_hash,canonical_block_timestamp,result_kind,observation_count,metadata,scanner_result)
    VALUES(p_deployment_id,p_generation,p_from,p_through,p_hash,p_timestamp,p_metadata->>'kind',item_count,COALESCE(p_metadata->'metadata','{}'::jsonb),p_metadata)
    RETURNING id INTO v_range_id;
- FOR block_item IN SELECT value FROM jsonb_array_elements(p_metadata->'canonicalBlocks') LOOP
-   IF (block_item->>'blockNumber')::bigint NOT BETWEEN p_from AND p_through
-      OR block_item->>'blockHash' !~ '^0x[0-9a-f]{64}$' OR (block_item->>'blockTimestamp')::timestamptz IS NULL THEN
-     RAISE EXCEPTION 'invalid canonical scanner block' USING ERRCODE='23514';
+ expected_block := p_from;
+ previous_hash := NULL;
+ boundary_hash := NULL;
+ IF p_from>c.deployment_block THEN
+   SELECT b.block_hash INTO boundary_hash FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=p_deployment_id AND b.block_number=p_from-1 AND b.parent_hash IS NOT NULL
+     ORDER BY b.scan_generation DESC LIMIT 1;
+   IF boundary_hash IS NULL OR (p_metadata->'canonicalBlocks'->0->>'parentHash')<>boundary_hash THEN
+     RAISE EXCEPTION 'canonical scanner range does not join persisted ancestry' USING ERRCODE='23514';
    END IF;
-   INSERT INTO gate.settlement_scan_blocks(range_id,deployment_id,scan_generation,block_number,block_hash,block_timestamp)
-     VALUES(v_range_id,p_deployment_id,p_generation,(block_item->>'blockNumber')::bigint,block_item->>'blockHash',(block_item->>'blockTimestamp')::timestamptz);
+ END IF;
+ FOR block_item IN SELECT value FROM jsonb_array_elements(p_metadata->'canonicalBlocks') LOOP
+   IF (block_item->>'blockNumber')::bigint<>expected_block
+      OR block_item->>'blockHash' !~ '^0x[0-9a-f]{64}$'
+      OR block_item->>'parentHash' !~ '^0x[0-9a-f]{64}$'
+      OR (block_item->>'blockTimestamp')::timestamptz IS NULL
+      OR (previous_hash IS NOT NULL AND block_item->>'parentHash'<>previous_hash) THEN
+     RAISE EXCEPTION 'invalid canonical scanner block ancestry' USING ERRCODE='23514';
+   END IF;
+   INSERT INTO gate.settlement_scan_blocks(range_id,deployment_id,scan_generation,block_number,block_hash,parent_hash,block_timestamp)
+     VALUES(v_range_id,p_deployment_id,p_generation,(block_item->>'blockNumber')::bigint,block_item->>'blockHash',
+       block_item->>'parentHash',(block_item->>'blockTimestamp')::timestamptz);
+   previous_hash := block_item->>'blockHash';
+   expected_block := expected_block+1;
  END LOOP;
  SELECT count(*) INTO block_count FROM gate.settlement_scan_blocks
    WHERE deployment_id=p_deployment_id AND scan_generation=p_generation;
@@ -616,26 +763,13 @@ BEGIN
  -- Every current canonical block from deployment through the checkpoint must exist. Latest generation wins per block.
  SELECT count(*) INTO block_count FROM (SELECT b.block_number,max(b.scan_generation)
    FROM gate.settlement_scan_blocks b WHERE b.deployment_id=p_deployment_id
+     AND b.parent_hash IS NOT NULL
      AND b.block_number BETWEEN c.deployment_block AND p_through GROUP BY b.block_number) current_blocks;
  IF block_count<>p_through-c.deployment_block+1 THEN
    RAISE EXCEPTION 'scanner block evidence does not provide contiguous deployment coverage' USING ERRCODE='23514';
  END IF;
- -- A disappeared pre-acceptance observation is no longer pending. Expired quote graphs transition together.
- WITH orphaned AS (
-   SELECT q.id,q.submission_id,q.expires_at FROM gate.quotes q JOIN gate.submissions s ON s.id=q.submission_id
-   WHERE q.deployment_id=p_deployment_id AND q.state='quoted' AND s.status='SETTLEMENT_PENDING'
-     AND NOT EXISTS(SELECT 1 FROM gate.settlement_scan_observations o
-       WHERE o.deployment_id=p_deployment_id AND o.quote_id=q.quote_id AND o.exact_match
-         AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-           WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number))
- ), expired_quotes AS (
-   UPDATE gate.quotes q SET state='expired',reservation_state='expiry_pending_reconciliation'
-     FROM orphaned o WHERE q.id=o.id AND o.expires_at<=clock_timestamp() RETURNING q.id
- ), expired_reservations AS (
-   UPDATE gate.capacity_reservations r SET state='expiry_pending_reconciliation',updated_at=clock_timestamp()
-     FROM expired_quotes e WHERE r.quote_id=e.id AND r.state='active' RETURNING r.quote_id
- ) UPDATE gate.submissions s SET status=CASE WHEN o.expires_at>clock_timestamp() THEN 'QUOTED' ELSE 'EXPIRED' END,
-     public_state_changed_at=clock_timestamp() FROM orphaned o WHERE s.id=o.submission_id;
+ -- Browser-submitted tx hashes are reconciled only by inspectTransaction(); a canonical range without a confirmed log
+ -- says nothing about whether the hinted transaction is still pending or below the one-confirmation-safe head.
  -- Accepted is final, but a canonical rewrite invalidates its current evidence and records a private operator anomaly.
  WITH reorged AS (
    UPDATE gate.quotes q SET settlement_reorged_at=COALESCE(q.settlement_reorged_at,clock_timestamp())
@@ -660,7 +794,7 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM gate.settlement_scan_observations o
        WHERE o.deployment_id=p_deployment_id AND o.quote_id=q.quote_id AND o.exact_match AND o.block_timestamp<q.expires_at
          AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-           WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number))
+           WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL))
    ORDER BY q.id FOR UPDATE OF q
  ), released AS (
    UPDATE gate.capacity_reservations r SET state='released',released_at=clock_timestamp(),updated_at=clock_timestamp(),
@@ -694,12 +828,13 @@ BEGIN
     OR c.next_range_from<>c.checkpoint_block+1
     OR (SELECT count(*) FROM (SELECT b.block_number,max(b.scan_generation)
       FROM gate.settlement_scan_blocks b WHERE b.deployment_id=p_deployment_id
+        AND b.parent_hash IS NOT NULL
         AND b.block_number BETWEEN c.deployment_block AND c.checkpoint_block GROUP BY b.block_number) current_blocks)
       <>c.checkpoint_block-c.deployment_block+1
     OR EXISTS(SELECT 1 FROM gate.settlement_scan_observations o WHERE o.deployment_id=p_deployment_id
       AND o.quote_id=q.quote_id AND o.exact_match AND o.block_timestamp<q.expires_at
       AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-        WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)) THEN
+        WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)) THEN
    RAISE EXCEPTION 'persisted canonical scanner evidence does not cover quote expiry' USING ERRCODE='23514';
  END IF;
  UPDATE gate.capacity_reservations SET state='released',released_at=clock_timestamp(),updated_at=clock_timestamp(),
@@ -717,6 +852,8 @@ CREATE TABLE IF NOT EXISTS gate.settlement_reorg_monitors (
  progress_block bigint, reconciliation_metadata jsonb NOT NULL DEFAULT '{}'::jsonb, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  UNIQUE(chain_id,splitter,quote_id), UNIQUE(chain_id,splitter,tx_hash,log_index)
 );
+ALTER TABLE gate.settlement_reorg_monitors ADD COLUMN IF NOT EXISTS claimed_until timestamptz;
+ALTER TABLE gate.settlement_reorg_monitors ADD COLUMN IF NOT EXISTS claim_generation bigint NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS settlement_monitors_due_idx ON gate.settlement_reorg_monitors(chain_id,splitter,next_check_block) WHERE completed_at IS NULL;
 
 CREATE OR REPLACE FUNCTION gate.validate_relational_bindings() RETURNS trigger
@@ -757,7 +894,7 @@ BEGIN
         AND o.tx_hash=NEW.settled_tx_hash AND o.log_index=NEW.settled_log_index AND o.block_number=NEW.receipt_block
         AND o.block_hash=NEW.receipt_block_hash AND o.block_timestamp=NEW.receipt_block_timestamp
         AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-          WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)) THEN
+          WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)) THEN
      RAISE EXCEPTION 'settlement evidence was not persisted by scanner' USING ERRCODE='23514';
    END IF;
  ELSIF TG_TABLE_NAME='capacity_reservations' THEN
@@ -775,13 +912,14 @@ BEGIN
        RAISE EXCEPTION 'release lacks persisted canonical cursor/block-time evidence' USING ERRCODE='23514'; END IF;
      IF (SELECT count(*) FROM (SELECT b.block_number,max(b.scan_generation)
           FROM gate.settlement_scan_blocks b WHERE b.deployment_id=release_cursor.deployment_id
+            AND b.parent_hash IS NOT NULL
             AND b.block_number BETWEEN release_cursor.deployment_block AND release_cursor.checkpoint_block
           GROUP BY b.block_number) current_blocks)<>release_cursor.checkpoint_block-release_cursor.deployment_block+1
         OR EXISTS(SELECT 1 FROM gate.settlement_scan_observations o JOIN gate.quotes q ON q.id=NEW.quote_id
           WHERE o.deployment_id=release_cursor.deployment_id AND o.quote_id=q.quote_id AND o.exact_match
             AND o.block_timestamp<NEW.expires_at
             AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-              WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)) THEN
+              WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)) THEN
        RAISE EXCEPTION 'release lacks contiguous persisted scanner range/log evidence' USING ERRCODE='23514'; END IF;
    END IF;
  ELSIF TG_TABLE_NAME='inbox_items' THEN
@@ -963,6 +1101,9 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,boolean,text,boolean,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.complete_notification_attempt(text,text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.fail_notification_attempt(text,text,text,timestamptz) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.record_scanner_range(text,bigint,bigint,text,timestamptz,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;

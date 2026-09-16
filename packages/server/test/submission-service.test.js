@@ -350,7 +350,7 @@ test("pending reservation liability is capped and wall-clock expiry alone never 
   assert.equal((await gate.store.counts()).quotes, 12);
 });
 
-test("scanner-proven release frees exactly one reservation slot", async () => {
+test("scanner-proven release frees eligible reservation slots", async () => {
   const gate = await harness();
   const quoteIds = [];
   for (let index = 1; index <= 12; index += 1) {
@@ -361,11 +361,17 @@ test("scanner-proven release frees exactly one reservation slot", async () => {
 
   gate.advance(11 * 60 * 1000);
   await gate.store.markExpired();
-  assert.equal(await gate.store.releaseReservation(quoteIds[0], {
-    deploymentId: "deployment-1", chainId: "8453", splitter: SPLITTER,
-    cursor: { fromBlock: "0", throughBlock: "10", nextBlock: "11" },
-    coverage: { canonical: true, rangeFrom: "0", rangeTo: "10", lastEligibleBlock: "10", canonicalBlockHash: BLOCK_HASH },
-  }), true);
+  const canonicalBlocks = Array.from({ length: 11 }, (_, blockNumber) => ({
+    blockNumber: String(blockNumber),
+    blockHash: `0x${(blockNumber + 1).toString(16).padStart(64, "0")}`,
+    parentHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
+    blockTimestamp: gate.state.now,
+  }));
+  assert.deepEqual(await gate.store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "10",
+    canonicalBlockHash: canonicalBlocks.at(-1).blockHash, canonicalBlockTimestamp: gate.state.now,
+    canonicalBlocks, observations: [],
+  }), { released: 12, reorged: 0 });
 
   const allowed = await gate.submit(submissionBody({ position: "AFTER-RELEASE" }), payerAt(0x401));
   assert.equal(allowed.state, "payment_required");
@@ -387,7 +393,7 @@ test("settled capacity denies new quotes once the rolling window is full", async
           gavelRecipient: GAVEL_RECIPIENT, gavelFeeAmount: "250000", token: TOKEN,
           submissionHash: result.quote.message.submissionHash,
         },
-        evidence: { oneConfirmation: true, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER },
+        evidence: { oneConfirmation: true, confirmations: 1, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER },
       },
       inbox: {
         id: `inbox-${index}`, issuanceLifecycle: "VOTING", currentLifecycle: "VOTING",
@@ -422,7 +428,7 @@ test("a settled sender, voter, and proposal pair is capped at two in the rolling
           quoteId, payer: PAYER, voter: VOTER, attentionAmount: "1000000", gavelRecipient: GAVEL_RECIPIENT,
           gavelFeeAmount: "250000", token: TOKEN, submissionHash: result.quote.message.submissionHash,
         },
-        evidence: { oneConfirmation: true, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER },
+        evidence: { oneConfirmation: true, confirmations: 1, canonical: true, scannerVerified: true, chainId: "8453", splitter: SPLITTER },
       },
       inbox: { id: `inbox-p-${index}`, issuanceLifecycle: "VOTING", currentLifecycle: "VOTING",
         lifecycleChanged: false, currentLifecycleUnavailable: false },

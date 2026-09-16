@@ -285,12 +285,32 @@ test("owner-bound hash lookup and resume disclose nothing to a non-owner and ref
   assert.equal(statements.every((text) => /^\s*SELECT/i.test(text)), true);
 });
 
+test("expired settlement hints atomically persist and return the coarse expired projection", async () => {
+  const updatedAt = new Date("2026-01-01T00:10:00.000Z");
+  const statements = [];
+  const client = { async query(sql) {
+    statements.push(String(sql));
+    if (/FROM gate\.submissions s JOIN gate\.quotes/.test(String(sql))) return { rows: [{
+      id: "sub", publicId: "A".repeat(22), status: "QUOTED", payer: A, quoteInternalId: "quote",
+      quote_state: "quoted", unexpired: false, baseChainId: "8453", splitter: A,
+    }] };
+    if (/RETURNING public_state_changed_at AS "updatedAt"/.test(String(sql))) return { rows: [{ updatedAt }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release() {} };
+  const store = new PostgresGateStore({ pool: { connect: async () => client } });
+  assert.deepEqual(await store.recordSettlementHint({ publicId: "A".repeat(22), payer: A,
+    txHash: H("1"), chainId: "8453", splitter: A }), {
+    publicId: "A".repeat(22), state: "expired", updatedAt,
+  });
+  assert.equal(statements.some((sql) => /capacity_reservations SET state='expiry_pending_reconciliation'/.test(sql)), true);
+});
+
 test("settlement accepts exactly the frozen eight event fields and notification starts pending", async () => {
   const store = noConnectStore();
   const base = {
     quoteId: H("1"), settlement: { txHash: H("2"), logIndex: 0, receiptBlock: "2", receiptBlockHash: H("3"), receiptBlockTimestamp: new Date(), settledAt: new Date(),
       event: { quoteId: H("1"), payer: A, voter: A, attentionAmount: "1000000", gavelRecipient: B, gavelFeeAmount: "250000", token: A, submissionHash: H("4") },
-      evidence: { chainId: "8453", splitter: A, canonical: true, scannerVerified: true, oneConfirmation: true } },
+      evidence: { chainId: "8453", splitter: A, canonical: true, scannerVerified: true, oneConfirmation: true, confirmations: 1 } },
     inbox: { id: "i", issuanceLifecycle: "VOTING", currentLifecycle: "VOTING", lifecycleChanged: false, currentLifecycleUnavailable: false },
     notification: { id: "n", channel: "email", destinationRef: "cipher", status: "pending" }, monitor: { id: "m", nextCheckBlock: "3" },
   };
@@ -331,7 +351,7 @@ test("issuance and inbox lifecycles enforce canonical ACTIVE to VOTING and exact
   const base = {
     quoteId: H("1"), settlement: { txHash: H("2"), logIndex: 0, receiptBlock: "2", receiptBlockHash: H("3"), receiptBlockTimestamp: new Date(), settledAt: new Date(),
       event: { quoteId: H("1"), payer: A, voter: A, attentionAmount: "1000000", gavelRecipient: B, gavelFeeAmount: "250000", token: A, submissionHash: H("4") },
-      evidence: { chainId: "8453", splitter: A, canonical: true, scannerVerified: true, oneConfirmation: true } },
+      evidence: { chainId: "8453", splitter: A, canonical: true, scannerVerified: true, oneConfirmation: true, confirmations: 1 } },
     inbox: { id: "i", issuanceLifecycle: "VOTING", currentLifecycle: "VOTING", lifecycleChanged: false, currentLifecycleUnavailable: false },
     notification: { id: "n", channel: "email", destinationRef: "cipher", status: "pending" }, monitor: { id: "m", nextCheckBlock: "3" },
   };
@@ -515,11 +535,14 @@ test("scanner range persistence sends complete observations in the cursor transa
   const store = new PostgresGateStore({ pool: { connect: async () => client } });
   const result = await store.recordScannerRange({ deploymentId: "d", generation: "1", fromBlock: "40", throughBlock: "41",
     canonicalBlockHash: H("2"), canonicalBlockTimestamp: new Date("2026-01-01T00:00:00Z"),
-    canonicalBlocks: ["40", "41"].map((blockNumber) => ({ blockNumber, blockHash: H("2"),
-      blockTimestamp: new Date("2026-01-01T00:00:00Z") })),
+    canonicalBlocks: [
+      { blockNumber: "40", blockHash: H("1"), parentHash: H("0"), blockTimestamp: new Date("2026-01-01T00:00:00Z") },
+      { blockNumber: "41", blockHash: H("2"), parentHash: H("1"), blockTimestamp: new Date("2026-01-01T00:00:00Z") },
+    ],
     observations: [{ kind: "exact_log", quoteId: H("3"), txHash: H("4"), logIndex: 0, blockNumber: "41",
       blockHash: H("2"), blockTimestamp: new Date("2026-01-01T00:00:00Z"), exactMatch: true }], metadata: { overlap: 64 } });
   assert.equal(result.released, 0);
+  assert.equal(result.reorged, 0);
   const call = seen.find(({ sql }) => /gate\.record_scanner_range/.test(sql));
   assert.match(call.sql, /record_scanner_range\(\$1,\$2,\$3,\$4,\$5,\$6::jsonb\)/);
   const persisted = JSON.parse(call.values[5]);
@@ -541,6 +564,114 @@ test("reservation release delegates only to persisted canonical range and log ev
   assert.equal(await store.releaseReservation(H("1"), { deploymentId: "d" }), true);
   assert.equal(seen.some(({ sql }) => /lastEligibleBlock|coverageComplete/.test(sql)), false);
   assert.match(seen.find(({ sql }) => /release_expired_reservation/.test(sql)).sql, /release_expired_reservation/);
+});
+
+test("PR6 Postgres store exposes durable settlement and worker queue methods", async () => {
+  const seen = [];
+  const pool = { async query(sql, values) {
+    const text = String(sql); seen.push({ sql: text, values });
+    if (/settlement_cursors/.test(text)) return { rows: [{ deploymentId: "d", deploymentBlock: "1", nextRangeFrom: "2", generation: "3" }] };
+    return { rows: [] };
+  } };
+  const store = new PostgresGateStore({ pool });
+  assert.deepEqual(await store.getScannerState({ chainId: "8453", splitter: A }),
+    { deploymentId: "d", deploymentBlock: "1", nextRangeFrom: "2", generation: "3" });
+  assert.equal(await store.findSettlementQuote(H("1")), null);
+  assert.deepEqual(await store.listPendingSettlementHints({ limit: 5 }), []);
+  assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: A, headBlock: "99", limit: 5 }), []);
+  assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now: new Date(0) }), []);
+  for (const method of ["recordSettlementHint", "resolveSettlementHint", "claimSettlementLifecycle", "recordSettlementLifecycle",
+    "advanceSettlementMonitor", "completeNotification", "failNotification"]) assert.equal(typeof store[method], "function", method);
+  const issuedSql = seen.map(({ sql }) => sql).join("\n");
+  assert.match(issuedSql, /SELECT id,"claimToken","retryCount","destinationRef",summary[\s\S]*gate\.claim_notification_attempts/);
+  const migrationSql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  assert.match(migrationSql, /claim_notification_attempts[\s\S]*SKIP LOCKED/);
+  assert.match(migrationSql, /GRANT EXECUTE ON FUNCTION gate\.claim_notification_attempts/);
+  assert.doesNotMatch(migrationSql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
+});
+
+test("settlement monitor SQL claims only due rows and advances with a fenced durable schedule", async () => {
+  const calls = [];
+  const client = { async query(sql, values) {
+    calls.push({ sql: String(sql), values });
+    if (/WITH candidates/.test(String(sql))) return { rows: [] };
+    if (/UPDATE gate\.settlement_reorg_monitors/.test(String(sql))) return { rows: [] };
+    return { rows: [] };
+  }, release() {} };
+  const pool = { query: client.query.bind(client), connect: async () => client };
+  const store = new PostgresGateStore({ pool });
+  await store.claimSettlementMonitors({ chainId: "8453", splitter: A, headBlock: "73", limit: 9 });
+  assert.match(calls[0].sql, /next_check_block<=\$3/);
+  assert.match(calls[0].sql, /JOIN gate\.quotes q ON q\.id=c\.quote_id[\s\S]*q\.quote_id AS "quoteId"/i);
+  assert.match(calls[0].sql, /claim_generation=claim_generation\+1/);
+  assert.match(calls[0].sql, /make_interval\(secs => \$5 \/ 1000\.0\)/);
+  assert.deepEqual(calls[0].values, ["8453", A, "73", 9, 300000]);
+  assert.equal(await store.advanceSettlementMonitor({ id: "m", claimToken: "4", progressBlock: "72",
+    nextCheckBlock: "73", completed: false, reorged: false }), false);
+  const update = calls.find((call) => /WHERE id=\$1 AND claim_generation/.test(call.sql));
+  assert.match(update.sql, /claim_generation=\$3::bigint/);
+  assert.match(update.sql, /claimed_until>clock_timestamp\(\)/);
+  assert.match(update.sql, /next_check_block=COALESCE\(\$4,next_check_block\)/);
+});
+
+test("notification SQL claims retries into pending and fences completion by token and live lease", async () => {
+  const calls = [];
+  const pool = { async query(sql, values) {
+    calls.push({ sql: String(sql), values });
+    return { rows: [{ completed: false, failed: false }] };
+  } };
+  const store = new PostgresGateStore({ pool });
+  await store.claimNotificationAttempts({ limit: 9, leaseMs: 123_000 });
+  assert.equal(await store.completeNotification({ id: "n", claimToken: "7", providerOpaqueId: "p" }), false);
+  assert.equal(await store.failNotification({ id: "n", claimToken: "7", errorCode: "TEMP", nextAttemptAt: new Date(0) }), false);
+  assert.match(calls[0].sql, /claim_notification_attempts\(\$1,\$2,\$3\)/);
+  assert.deepEqual(calls[0].values, [9, 3, 123_000]);
+  assert.deepEqual(calls[1].values, ["n", "7", "p"]);
+  assert.deepEqual(calls[2].values, ["n", "7", "TEMP", new Date(0)]);
+
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const claim = sql.match(/CREATE OR REPLACE FUNCTION gate\.claim_notification_attempts[\s\S]*?\$\$;/i)?.[0] || "";
+  const complete = sql.match(/CREATE OR REPLACE FUNCTION gate\.complete_notification_attempt[\s\S]*?END \$\$;/i)?.[0] || "";
+  const fail = sql.match(/CREATE OR REPLACE FUNCTION gate\.fail_notification_attempt[\s\S]*?END \$\$;/i)?.[0] || "";
+  assert.match(claim, /SET state='pending'[\s\S]*claim_generation=claim_generation\+1/i);
+  assert.match(claim, /clock_timestamp\(\)[\s\S]*make_interval\(secs\s*=>\s*p_lease_ms\s*\/\s*1000\.0\)/i);
+  assert.doesNotMatch(claim, /p_now/i);
+  for (const fn of [claim, complete, fail]) assert.match(fn, /SECURITY DEFINER SET search_path=pg_catalog,gate/i);
+  for (const fn of [complete, fail]) {
+    assert.match(fn, /claim_generation=p_claim_token::bigint/i);
+    assert.match(fn, /claimed_until>clock_timestamp\(\)/i);
+  }
+  assert.match(sql, /REVOKE ALL ON FUNCTION gate\.complete_notification_attempt\(text,text,text\) FROM PUBLIC/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.complete_notification_attempt\(text,text,text\) TO gavel_gate/i);
+  assert.match(sql, /DROP FUNCTION IF EXISTS gate\.claim_notification_attempts\(integer,timestamptz,integer\)/i);
+  assert.match(sql, /DROP FUNCTION IF EXISTS gate\.complete_notification_attempt\(text,text\)/i);
+  assert.match(sql, /DROP FUNCTION IF EXISTS gate\.fail_notification_attempt\(text,text,timestamptz\)/i);
+  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
+});
+
+test("scanner range leaves pending hints alone and only releases already expiry-pending reservations", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const scanner = sql.match(/CREATE OR REPLACE FUNCTION gate\.record_scanner_range[\s\S]*?END \$\$;/i)?.[0] || "";
+  assert.doesNotMatch(scanner, /status='SETTLEMENT_PENDING'|state='expiry_pending_reconciliation'[\s\S]*FROM orphaned/i);
+  assert.match(scanner, /q\.state='expired' AND r\.state='expiry_pending_reconciliation'/i);
+  assert.match(scanner, /UPDATE gate\.quotes q SET reservation_state='released'/i);
+});
+
+test("Gate migration replaces legacy settlement completeness checks with one stable confirmation-depth constraint", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const upgrade = sql.match(/DO \$\$\s*DECLARE legacy_constraint name;\s*BEGIN\s*FOR legacy_constraint IN\s*SELECT c\.conname FROM pg_constraint c\s*WHERE c\.conrelid='gate\.quotes'::regclass[\s\S]*?END \$\$;\s*ALTER TABLE gate\.quotes ADD CONSTRAINT quotes_settlement_complete_check[\s\S]*?\)\);/i)?.[0] || "";
+  assert.match(upgrade, /c\.conrelid='gate\.quotes'::regclass[\s\S]*c\.contype='c'/i);
+  assert.match(upgrade, /pg_get_constraintdef\(c\.oid\)[\s\S]*settlement_confirmations/i);
+  assert.match(upgrade, /ALTER TABLE gate\.quotes DROP CONSTRAINT %I/i);
+  assert.match(upgrade, /ADD CONSTRAINT quotes_settlement_complete_check/i);
+  assert.match(upgrade, /\(state='settled'\)=\([\s\S]*settlement_confirmations\s*=\s*1/i);
+  for (const column of [
+    "settled_tx_hash", "settled_log_index", "settled_at", "receipt_block", "receipt_block_hash",
+    "receipt_block_timestamp", "settlement_proof_canonical", "settlement_scanner_verified",
+    "settlement_event_quote_id", "settlement_payer", "settlement_voter", "settlement_attention_amount",
+    "settlement_fee_amount", "settlement_gavel_recipient", "settlement_token", "settlement_submission_hash",
+    "settlement_quote_version", "settlement_source_chain_id", "settlement_splitter",
+  ]) assert.match(upgrade, new RegExp(`\\b${column}\\b`), column);
 });
 
 test("public reader queries only dedicated views and returns state-specific receipt timestamps", async () => {
@@ -599,7 +730,8 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(publicProfiles, /\bens\b[\s\S]*\bmessage\b/i);
   assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.validate_relational_bindings/i);
   assert.doesNotMatch(sql, /DECLARE[^\n]+;\s*\nDECLARE\s/i);
-  assert.match(sql, /settlement_scanner_verified boolean/i);
+  assert.match(sql, /settlement_confirmations integer/i);
+  assert.match(sql, /settlement_confirmations\s*=\s*1/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile\(text,text,text,gate\.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.transition_notification\(text,gate\.notification_state,text,text\) TO gavel_gate/i);

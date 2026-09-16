@@ -7,6 +7,7 @@ const ROOT = path.resolve(__dirname, "../../..");
 const {
   APPLICATION_ROLES,
   GATE_ROLES,
+  GATE_REQUIRED_FUNCTIONS,
   GATE_TABLE_PRIVILEGES,
   PROVISIONED_ROLES,
   ensureRoles,
@@ -39,6 +40,12 @@ test("role inventory preserves application roles and authoritatively includes Ga
   assert.deepEqual(APPLICATION_ROLES, ["gavel_indexer", "gavel_api"]);
   assert.deepEqual(GATE_ROLES, ["gavel_gate"]);
   assert.deepEqual(PROVISIONED_ROLES, ["gavel_indexer", "gavel_api", "gavel_gate"]);
+});
+
+test("Gate privilege audit tracks the database-clock notification claim signature", () => {
+  assert.ok(GATE_REQUIRED_FUNCTIONS.includes("gate.claim_notification_attempts(integer,integer,integer)"));
+  assert.equal(GATE_REQUIRED_FUNCTIONS.some((signature) => signature.includes("timestamp with time zone")
+    && signature.includes("claim_notification_attempts")), false);
 });
 
 test("Gate privilege audit has one exact migration-matched table matrix", () => {
