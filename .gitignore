@@ -8,3 +8,5 @@ data/private/
 private/
 coverage/
 *.log
+dist/
+*.tsbuildinfo
