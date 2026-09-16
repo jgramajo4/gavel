@@ -3,7 +3,7 @@ import { GateApiError, freezeQuote, type GateApi } from '../api';
 import { useSession } from '../session';
 import { SettlementState } from '../components/SettlementState';
 import { formatExpiry, formatUsdc, sumAtomic } from '../format';
-import { payQuote, type Eip1193Provider, type PaymentPhase } from '../wallet';
+import { isQuotePayable, payQuote, type Eip1193Provider, type PaymentPhase } from '../wallet';
 import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../types';
 
 /**
@@ -22,6 +22,12 @@ import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../type
  * Posting the transaction hash returns 202 and means only that the hint was
  * recorded. Acceptance is displayed strictly when the public status endpoint
  * says `accepted`.
+ *
+ * React state and `history.state` are display caches, never payment authority.
+ * Pressing Pay re-fetches the owner-bound persisted quote from the frozen
+ * resume endpoint and pays THAT object, so a tampered tab cannot get a mutated
+ * amount, splitter, or chain in front of the wallet. Resume issues nothing,
+ * signs nothing, and extends nothing.
  */
 
 const TERMINAL: PublicReceiptState[] = ['accepted', 'expired', 'rejected_by_policy', 'malformed'];
@@ -49,9 +55,19 @@ export interface CheckoutProps {
   publicId?: string;
   onResume?(receipt: SubmissionReceipt): void;
   pollIntervalMs?: number;
+  /** Injectable clock in milliseconds, so expiry behaviour is deterministic. */
+  now?: () => number;
 }
 
-export function Checkout({ api, wallet, receipt, publicId, onResume, pollIntervalMs = 4000 }: CheckoutProps) {
+export function Checkout({
+  api,
+  wallet,
+  receipt,
+  publicId,
+  onResume,
+  pollIntervalMs = 4000,
+  now = Date.now,
+}: CheckoutProps) {
   const { session } = useSession();
   const [quote, setQuote] = useState<IssuedQuote | null>(receipt?.quote ? freezeQuote(receipt.quote) : null);
   const [id, setId] = useState<string | null>(receipt?.publicId ?? publicId ?? null);
@@ -114,18 +130,34 @@ export function Checkout({ api, wallet, receipt, publicId, onResume, pollInterva
     setError(null);
     setBusy(true);
     try {
-      const result = await payQuote(wallet, quote, setPhase);
+      // 1. Re-authorize. The rendered quote is a display cache; the persisted,
+      //    owner-bound quote is the only thing that may reach the wallet.
+      const authoritative = await api.resumeSubmission(session.token, `/v1/submissions/${id}/resume`);
+      if (!authoritative) {
+        setPhase('failed');
+        setError('This quote could not be confirmed with the server. Nothing was signed or sent.');
+        return;
+      }
+      setState(authoritative.state);
+      if (authoritative.acceptedAt) setAcceptedAt(authoritative.acceptedAt);
+      if (!authoritative.quote || authoritative.state !== 'payment_required') {
+        // Expired or otherwise non-payable. Never reissue, refresh, or extend.
+        setPhase('idle');
+        return;
+      }
+      const payable = freezeQuote(authoritative.quote);
+      setQuote(payable);
+
+      // 2. Pay the server's object. payQuote re-checks version and expiry
+      //    before it touches the wallet.
+      const result = await payQuote(wallet, payable, setPhase, { now });
       setTxHash(result.txHash);
-      // 202: the hash is recorded as a hint. It is not payment or acceptance.
+      // 3. 202: the hash is recorded as a hint. Not payment, not acceptance.
       const hint = await api.recordSettlementHint(session.token, id, result.txHash, result.chainId);
       setState(hint.state);
       void pollStatus();
     } catch (cause: unknown) {
-      if (isUserRejection(cause)) {
-        setPhase('rejected');
-      } else {
-        setPhase('failed');
-      }
+      setPhase(isUserRejection(cause) ? 'rejected' : 'failed');
       if (cause instanceof GateApiError) {
         if (cause.state === 'expired') setState('expired');
         setError(cause.message);
@@ -135,7 +167,7 @@ export function Checkout({ api, wallet, receipt, publicId, onResume, pollInterva
     } finally {
       setBusy(false);
     }
-  }, [api, wallet, quote, id, session, pollStatus]);
+  }, [api, wallet, quote, id, session, pollStatus, now]);
 
   if (!quote) {
     return (
@@ -153,7 +185,14 @@ export function Checkout({ api, wallet, receipt, publicId, onResume, pollInterva
   }
 
   const total = sumAtomic(quote.message.attentionAmount, quote.message.gavelFeeAmount);
-  const payable = state === 'payment_required' && phase !== 'broadcast' && phase !== 'broadcasting';
+  // An expired or unsupported quote offers no pay control at all: the splitter
+  // would revert, so asking for a signature would only waste the user's gas.
+  const quotePayable = isQuotePayable(quote, Math.floor(now() / 1000));
+  const payable =
+    quotePayable && state === 'payment_required' && phase !== 'broadcast' && phase !== 'broadcasting';
+  // Only an unpaid quote goes stale. Once the server has moved the submission
+  // on — pending settlement, or accepted — its state outranks the clock.
+  const displayState = !quotePayable && state === 'payment_required' ? 'expired' : state;
 
   return (
     <div className="page page-checkout">
@@ -184,7 +223,12 @@ export function Checkout({ api, wallet, receipt, publicId, onResume, pollInterva
         </button>
       ) : null}
 
-      <SettlementState state={state} phase={phase} txHash={txHash} acceptedAt={acceptedAt} />
+      <SettlementState
+        state={displayState}
+        phase={phase}
+        txHash={txHash}
+        acceptedAt={acceptedAt}
+      />
 
       {error ? (
         <p role="alert" className="notice notice-error">

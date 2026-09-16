@@ -1,7 +1,6 @@
 import type {
   AuthChallenge,
   DuplicateReceipt,
-  InboxItem,
   IssuedQuote,
   PublicGateProfile,
   SubmissionReceipt,
@@ -32,14 +31,6 @@ export class GateApiError extends Error {
   }
 }
 
-/** Raised when a route this UI needs is not served by the deployed backend. */
-export class GateEndpointUnavailableError extends GateApiError {
-  constructor(path: string) {
-    super(501, 'ENDPOINT_NOT_AVAILABLE', `This Gate deployment does not serve ${path}.`, null);
-    this.name = 'GateEndpointUnavailableError';
-  }
-}
-
 export interface DirectoryFilters {
   dao?: string;
   availability?: string;
@@ -67,9 +58,11 @@ export interface GateApi {
     txHash: string,
     chainId: string,
   ): Promise<SubmissionReceipt>;
-  listInbox(token: string): Promise<InboxItem[]>;
-  archiveInboxItem(token: string, id: string): Promise<void>;
 }
+
+// There is deliberately no inbox client here. The merged backend serves no
+// private inbox route, and a speculative one would quietly become an undeclared
+// contract the moment some future response returned 200.
 
 const RESUME_PATH = /^\/v1\/submissions\/[A-Za-z0-9_-]{22}\/resume$/;
 
@@ -200,26 +193,6 @@ export function createGateApi(
       })) as SubmissionReceipt;
     },
 
-    // --- Not served by the merged backend -----------------------------------
-    // PR4/PR5/PR6 expose no private voter inbox route. These two methods call
-    // the routes the frozen spec implies so the UI is ready the moment they
-    // land, and surface a first-class "unavailable" state until then. Nothing
-    // here invents a response: an unserved route yields
-    // GateEndpointUnavailableError, which VoterInbox renders as a gap notice.
-    async listInbox(token) {
-      const { status, body } = await call('GET', '/v1/gate/me/inbox', { token });
-      if (status === 404 || status === 501) throw new GateEndpointUnavailableError('/v1/gate/me/inbox');
-      if (status < 200 || status >= 300) throw errorFrom(status, body);
-      return isRecord(body) && Array.isArray(body.items) ? (body.items as InboxItem[]) : [];
-    },
-
-    async archiveInboxItem(token, id) {
-      const { status, body } = await call('POST', `/v1/gate/me/inbox/${id}/archive`, { token });
-      if (status === 404 || status === 501) {
-        throw new GateEndpointUnavailableError('/v1/gate/me/inbox/:id/archive');
-      }
-      if (status < 200 || status >= 300) throw errorFrom(status, body);
-    },
   };
 }
 

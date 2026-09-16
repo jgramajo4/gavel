@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { AbiCoder, Interface, Signature, keccak256, toUtf8Bytes } from 'ethers';
-import { encodeSettleCall, planPayment, payQuote, readTokenDomain, WalletError } from './wallet';
+import {
+  assertPayableQuote,
+  encodeSettleCall,
+  isQuotePayable,
+  planPayment,
+  payQuote,
+  readTokenDomain,
+  WalletError,
+} from './wallet';
 import { stubWallet } from './test/harness';
-import { PAYER, SPLITTER, TEST_CHAIN_ID, USDC, VOTER, quote } from './test/fixtures';
+import { NOW_SECONDS, PAYER, QUOTE_EXPIRY_SECONDS, SPLITTER, TEST_CHAIN_ID, USDC, VOTER, quote } from './test/fixtures';
+
+const at = (seconds: number) => ({ now: () => seconds * 1000 });
 
 const AUTH_SIGNATURE = `0x${'22'.repeat(32)}${'33'.repeat(32)}1c`;
 const TX_HASH = `0x${'fe'.repeat(32)}`;
@@ -114,7 +124,7 @@ describe('payment boundary', () => {
 
   it('reports phases without claiming acceptance', async () => {
     const phases: string[] = [];
-    const result = await payQuote(token(), quote, (phase) => phases.push(phase));
+    const result = await payQuote(token(), quote, (phase) => phases.push(phase), at(NOW_SECONDS));
     expect(phases).toEqual(['authorizing', 'broadcasting', 'broadcast']);
     expect(result).toEqual({ txHash: TX_HASH, chainId: String(TEST_CHAIN_ID) });
     expect(phases).not.toContain('accepted');
@@ -124,5 +134,51 @@ describe('payment boundary', () => {
     const wallet = token(undefined, { eth_signTypedData_v4: () => '0xdeadbeef' });
     await expect(payQuote(wallet, quote)).rejects.toMatchObject({ code: 'BAD_SIGNATURE' });
     await expect(payQuote(wallet, quote)).rejects.not.toMatchObject({ message: expect.stringContaining('deadbeef') });
+  });
+});
+
+describe('quote payability gate', () => {
+  it('allows a quote one second before expiry', () => {
+    expect(isQuotePayable(quote, QUOTE_EXPIRY_SECONDS - 1)).toBe(true);
+    expect(() => assertPayableQuote(quote, QUOTE_EXPIRY_SECONDS - 1)).not.toThrow();
+  });
+
+  it('refuses a quote exactly at expiry', () => {
+    // `validBefore == expiry`, so the splitter rejects at the boundary too.
+    expect(isQuotePayable(quote, QUOTE_EXPIRY_SECONDS)).toBe(false);
+    expect(() => assertPayableQuote(quote, QUOTE_EXPIRY_SECONDS)).toThrow(WalletError);
+  });
+
+  it('refuses a quote after expiry', () => {
+    expect(isQuotePayable(quote, QUOTE_EXPIRY_SECONDS + 1)).toBe(false);
+    expect(() => assertPayableQuote(quote, QUOTE_EXPIRY_SECONDS + 3600)).toThrow(WalletError);
+  });
+
+  it('refuses an unsupported quote version', () => {
+    const unsupported = { ...quote, message: { ...quote.message, quoteVersion: '2' } };
+    expect(isQuotePayable(unsupported, NOW_SECONDS)).toBe(false);
+    expect(() => assertPayableQuote(unsupported, NOW_SECONDS)).toThrow(WalletError);
+  });
+
+  it('refuses a malformed expiry', () => {
+    const malformed = { ...quote, message: { ...quote.message, expiry: 'soon' } };
+    expect(isQuotePayable(malformed, NOW_SECONDS)).toBe(false);
+  });
+
+  it('makes no wallet call at all when refusing an expired quote', async () => {
+    const wallet = token();
+    await expect(payQuote(wallet, quote, undefined, at(QUOTE_EXPIRY_SECONDS))).rejects.toMatchObject({
+      code: 'QUOTE_EXPIRED',
+    });
+    expect(wallet.calls).toHaveLength(0);
+  });
+
+  it('makes no wallet call at all when refusing an unsupported quote version', async () => {
+    const wallet = token();
+    const unsupported = { ...quote, message: { ...quote.message, quoteVersion: '2' } };
+    await expect(payQuote(wallet, unsupported, undefined, at(NOW_SECONDS))).rejects.toMatchObject({
+      code: 'UNSUPPORTED_QUOTE_VERSION',
+    });
+    expect(wallet.calls).toHaveLength(0);
   });
 });

@@ -31,6 +31,47 @@ export class WalletError extends Error {
   }
 }
 
+/** The only quote version this client knows how to build calldata for. */
+export const SUPPORTED_QUOTE_VERSION = '1';
+
+/**
+ * Refuses a quote the browser must not sign for.
+ *
+ * The splitter sets `validBefore = expiry` and reverts when
+ * `block.timestamp >= expiry`, so a signature produced at or after expiry is
+ * dead on arrival: it costs gas, leaks a pointless authorization, and tells the
+ * user nothing. This runs before any chain switch, any token read, and any
+ * signing request, so a refusal touches the wallet zero times.
+ */
+export function assertPayableQuote(quote: IssuedQuote, nowSeconds: number | bigint): void {
+  if (String(quote.message.quoteVersion) !== SUPPORTED_QUOTE_VERSION) {
+    throw new WalletError(
+      'UNSUPPORTED_QUOTE_VERSION',
+      'This quote uses a version this app cannot pay. Request a new quote.',
+    );
+  }
+  let expiry: bigint;
+  let now: bigint;
+  try {
+    expiry = BigInt(quote.message.expiry);
+    now = BigInt(nowSeconds);
+  } catch {
+    throw new WalletError('INVALID_EXPIRY', 'This quote has an unreadable expiry and cannot be paid.');
+  }
+  if (expiry <= now) {
+    throw new WalletError('QUOTE_EXPIRED', 'This quote has expired and can no longer be paid.');
+  }
+}
+
+export function isQuotePayable(quote: IssuedQuote, nowSeconds: number | bigint): boolean {
+  try {
+    assertPayableQuote(quote, nowSeconds);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const RECEIVE_WITH_AUTHORIZATION_TYPES = {
   ReceiveWithAuthorization: [
     { name: 'from', type: 'address' },
@@ -243,7 +284,10 @@ export async function payQuote(
   provider: Eip1193Provider,
   quote: IssuedQuote,
   onPhase: (phase: PaymentPhase) => void = () => {},
+  { now = Date.now }: { now?: () => number } = {},
 ): Promise<PaymentResult> {
+  // Expiry and version are checked first so a refusal never reaches the wallet.
+  assertPayableQuote(quote, Math.floor(now() / 1000));
   const plan = planPayment(quote);
   await ensureChain(provider, plan.chainId);
   const payer = getAddress(quote.message.payer);

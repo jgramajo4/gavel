@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from 'react';
 import { validateMarkdown, type MarkdownToken } from '../gate-domain';
+import { ExternalLink } from './ExternalLink';
 
 /**
  * Renders the frozen CommonMark allowlist — and nothing else.
@@ -81,16 +82,9 @@ function renderNode(node: Node): ReactNode {
     case 'em_open':
       return <em>{renderNodes(children)}</em>;
     case 'link_open': {
-      // The validator has already proven this destination is absolute HTTPS.
-      const href = token.attrGet('href') ?? '';
-      return (
-        <a className="external-link" href={href} rel="noopener noreferrer" target="_blank">
-          {renderNodes(children)}
-          <span className="external-indicator" aria-label="external link">
-            ↗
-          </span>
-        </a>
-      );
+      // The validator already proved this destination is absolute HTTPS.
+      // ExternalLink re-checks anyway: one render-time allowlist, no exceptions.
+      return <ExternalLink href={token.attrGet('href') ?? ''}>{renderNodes(children)}</ExternalLink>;
     }
     default:
       // Unreachable for validated content; refusing is safer than guessing.

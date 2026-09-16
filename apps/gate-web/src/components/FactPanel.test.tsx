@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { FactPanel } from './FactPanel';
-import { inboxItem } from '../test/fixtures';
+import { canonicalFacts, decodedFacts, enrichedFacts } from '../test/fixtures';
 
 describe('FactPanel', () => {
   const renderPanel = () =>
     render(
       <FactPanel
-        canonicalFacts={inboxItem.canonicalFacts}
-        decodedFacts={inboxItem.decodedFacts}
-        enrichedFacts={inboxItem.enrichedFacts}
+        canonicalFacts={canonicalFacts}
+        decodedFacts={decodedFacts}
+        enrichedFacts={enrichedFacts}
       />,
     );
 

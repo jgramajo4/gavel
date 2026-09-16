@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createGateApi, GateEndpointUnavailableError } from './api';
+import { createGateApi } from './api';
 import { stubFetch } from './test/harness';
 import { duplicateReceipt, quotedReceipt, VOTER } from './test/fixtures';
 
@@ -41,10 +41,5 @@ describe('GateApi', () => {
     await api.resumeSubmission(token, '/v1/submissions/AAAAAAAAAAAAAAAAAAAAAA/resume');
     expect((seen[0].headers as Record<string, string>).authorization).toBe(`Bearer ${token}`);
     expect(seen[0].credentials).toBe('omit');
-  });
-
-  it('marks the unserved inbox route as unavailable rather than empty', async () => {
-    const api = createGateApi('', stubFetch([{ method: 'GET', match: /inbox$/, status: 404, body: null }]));
-    await expect(api.listInbox(token)).rejects.toBeInstanceOf(GateEndpointUnavailableError);
   });
 });

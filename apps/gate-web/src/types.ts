@@ -6,8 +6,6 @@
 
 export type Availability = 'accepting_now' | 'paused' | 'closed';
 export type NormalizedLifecycle = 'PRE_VOTE' | 'VOTING' | 'CLOSED';
-/** `UNKNOWN` appears only when the server could not read the current lifecycle. */
-export type InboxLifecycle = NormalizedLifecycle | 'UNKNOWN';
 
 export type PublicReceiptState =
   | 'payment_required'
@@ -184,23 +182,7 @@ export interface EnrichedFact {
 
 export type Fact = CanonicalFact | DecodedFact | EnrichedFact;
 
-/** Owner-bound private inbox item. See `api.ts` for the unserved-endpoint gap. */
-export interface InboxItem {
-  id: string;
-  dao: 'nouns';
-  proposalId: string;
-  position: string;
-  /** Raw advocate text, byte-for-byte as submitted. Never rewritten. */
-  pitch: string;
-  disclosures: string;
-  /** Advocate-provided references. Never fetched, previewed, or summarized. */
-  evidenceUrls: string[];
-  canonicalFacts: CanonicalFact[];
-  decodedFacts: DecodedFact[];
-  enrichedFacts: EnrichedFact[];
-  issuanceLifecycle: NormalizedLifecycle;
-  currentLifecycle: InboxLifecycle;
-  lifecycleChanged: boolean;
-  inboxCreatedAt: string;
-  archivedAt?: string | null;
-}
+// There is deliberately no `InboxItem` type. Declaring the shape of a route the
+// backend does not serve would make this file the de facto contract for it.
+// Fact provenance types above stay: they come from the frozen `@gavel/gate`
+// fact schema and are rendered by FactPanel, not by an inbox response parser.

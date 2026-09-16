@@ -31,6 +31,17 @@ Every signed and submitted value is derived from the persisted, server-signed
 quote: voter, fee, token, splitter, amount, quote ID, and submission hash all
 come from `quote.message` and `quote.domain`.
 
+React state and `history.state` are display caches, never payment authority.
+Pressing Pay re-fetches the owner-bound quote from the authenticated resume
+endpoint and pays *that* object, so a tampered tab cannot get a mutated amount,
+splitter, or chain in front of the wallet. Resume issues nothing, signs nothing,
+and extends nothing.
+
+Payment is refused before the wallet is touched when `quoteVersion !== "1"` or
+`expiry <= now`. The splitter sets `validBefore = expiry` and reverts at
+`block.timestamp >= expiry`, so a signature produced at or after expiry is dead
+on arrival. The pay control disappears once a quote is unpayable.
+
 **Chain IDs are never hard-coded.** The chain comes from `quote.domain.chainId`,
 which the server signed over, so a Base Sepolia deployment works with no code
 change. The API origin comes from `VITE_GATE_API_URL`.
@@ -48,10 +59,11 @@ a receipt, one confirmation, or the 202 itself.
 These are deferred backend items this app is written against but cannot
 exercise today. None of them is worked around with invented data.
 
-1. **No private inbox API.** PR4–PR6 serve no voter inbox route. `api.ts` calls
-   `GET /v1/gate/me/inbox` and `POST /v1/gate/me/inbox/:id/archive`, the routes
-   the frozen spec implies, and `VoterInbox` renders a first-class
-   "this deployment does not serve …" notice until they exist.
+1. **No private inbox API.** PR4–PR6 serve no voter inbox route, so this app
+   ships no inbox client at all — no methods, no response types, no parser.
+   `/inbox` is a static product-gap page that issues zero requests. A
+   speculative client would become that route's undeclared contract the first
+   time some future response returned 200. The inbox lands with its backend.
 2. **No deployment metadata endpoint.** The splitter address, token, and chain
    are only observable inside an issued quote. Before a quote exists there is no
    way to tell a user which chain to connect to.

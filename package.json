@@ -19,7 +19,7 @@
   "scripts": {
     "gavel": "node packages/cli/bin/gavel.js",
     "indexer": "node packages/governance-index/bin/gavel-indexer.js",
-    "test": "node --test \"test/**/*.test.js\" \"packages/*/test/**/*.test.js\"",
+    "test": "node --test test/*.test.js packages/*/test/*.test.js",
     "test:history": "node --test test/history*.test.js",
     "test:profile": "node --test test/profile.test.js",
     "test:prediction": "node --test test/prediction.test.js",

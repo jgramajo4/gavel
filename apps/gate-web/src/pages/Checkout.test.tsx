@@ -3,7 +3,17 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Checkout } from './Checkout';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
-import { PAYER, SPLITTER, TEST_CHAIN_ID, USDC, VOTER, quote, quotedReceipt } from '../test/fixtures';
+import {
+  PAYER,
+  QUOTE_EXPIRY_SECONDS,
+  SPLITTER,
+  TEST_CHAIN_ID,
+  USDC,
+  VOTER,
+  nowMs,
+  quote,
+  quotedReceipt,
+} from '../test/fixtures';
 import { encodeSettleCall } from '../wallet';
 
 const session = {
@@ -60,6 +70,14 @@ function tokenWallet(overrides: Record<string, (params?: unknown) => unknown> = 
 }
 
 const statusRoute = (body: unknown) => ({ method: 'GET', match: /\/status$/, status: 200, body });
+/** Payment always re-authorizes against the persisted quote, so every flow that
+ *  reaches the wallet must stub the owner-bound resume endpoint. */
+const resumeRoute = (body: unknown = quotedReceipt, status = 200) => ({
+  method: 'GET',
+  match: /\/resume$/,
+  status,
+  body,
+});
 const settlementRoute = {
   method: 'POST',
   match: /\/settlement$/,
@@ -70,7 +88,7 @@ const settlementRoute = {
 describe('Checkout', () => {
   it('shows the immutable quote summary with a separate $0.25 Gavel fee', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt)]);
-    renderApp(<Checkout api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
 
     expect(await screen.findByTestId('total-amount')).toHaveTextContent('5.25 USDC');
     expect(screen.getByTestId('attention-amount')).toHaveTextContent('5.00 USDC');
@@ -83,7 +101,7 @@ describe('Checkout', () => {
 
   it('shows the full settlement context the server bound this quote to', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt)]);
-    renderApp(<Checkout api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
 
     expect(screen.getByTestId('chain-id')).toHaveTextContent(String(TEST_CHAIN_ID));
@@ -102,17 +120,17 @@ describe('Checkout', () => {
     const otherChain = { ...quote, domain: { ...quote.domain, chainId: 11155111 } };
     const { api } = stubApi([statusRoute(quotedReceipt)]);
     renderApp(
-      <Checkout api={api} wallet={tokenWallet()} receipt={{ ...quotedReceipt, quote: otherChain }} />,
+      <Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={{ ...quotedReceipt, quote: otherChain }} />,
       { session },
     );
     expect(await screen.findByTestId('chain-id')).toHaveTextContent('11155111');
   });
 
   it('contains no ERC-20 approve path anywhere in the flow', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    const { container } = renderApp(<Checkout api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
     expect(container.textContent).not.toMatch(/approve|allowance|spending cap|unlock token/i);
 
@@ -132,10 +150,10 @@ describe('Checkout', () => {
   });
 
   it('signs an EIP-3009 authorization built only from the persisted quote', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
@@ -158,10 +176,10 @@ describe('Checkout', () => {
   });
 
   it('treats every quote field as immutable server state', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    const { container } = renderApp(<Checkout api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
 
     // Nothing in checkout may edit a quote field.
@@ -185,7 +203,7 @@ describe('Checkout', () => {
     ]);
     const onResume = vi.fn();
     renderApp(
-      <Checkout api={api} wallet={tokenWallet()} publicId={quotedReceipt.publicId} onResume={onResume} />,
+      <Checkout now={nowMs} api={api} wallet={tokenWallet()} publicId={quotedReceipt.publicId} onResume={onResume} />,
       { session },
     );
     await screen.findByTestId('total-amount');
@@ -200,9 +218,9 @@ describe('Checkout', () => {
   });
 
   it('does not show accepted after a 202 settlement receipt', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
@@ -215,23 +233,24 @@ describe('Checkout', () => {
     const { api } = stubApi([
       settlementRoute,
       statusRoute({ publicId: quotedReceipt.publicId, state: 'accepted', acceptedAt: '2026-09-16T10:06:00.000Z' }),
+      resumeRoute(),
     ]);
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={tokenWallet()} receipt={quotedReceipt} pollIntervalMs={5} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} pollIntervalMs={5} />, { session });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/accepted/i), { timeout: 3000 });
   });
 
   it('does not show accepted when the wallet rejects the transaction', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt)]);
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
     const wallet = tokenWallet({
       eth_sendTransaction: () => {
         throw Object.assign(new Error('User rejected the request.'), { code: 4001 });
       },
     });
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
@@ -244,6 +263,7 @@ describe('Checkout', () => {
   it('reports an expired quote without silently reissuing one', async () => {
     const { api, calls } = stubApi([
       statusRoute(quotedReceipt),
+      resumeRoute(),
       {
         method: 'POST',
         match: /\/settlement$/,
@@ -252,7 +272,7 @@ describe('Checkout', () => {
       },
     ]);
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
@@ -260,10 +280,10 @@ describe('Checkout', () => {
   });
 
   it('keeps the pay control reachable and labelled for keyboard users', async () => {
-    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
     await screen.findByTestId('total-amount');
 
     expect(screen.getByRole('region', { name: /quote summary/i })).toBeInTheDocument();
@@ -272,5 +292,154 @@ describe('Checkout', () => {
     expect(pay).toHaveFocus();
     await user.keyboard('{Enter}');
     await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+  });
+});
+
+describe('Checkout quote payability', () => {
+  const expiredNow = () => QUOTE_EXPIRY_SECONDS * 1000;
+
+  it('offers no pay control once the quote has expired', async () => {
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    const wallet = tokenWallet();
+    renderApp(<Checkout now={expiredNow} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    await screen.findByTestId('total-amount');
+
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(screen.getByRole('status')).toHaveTextContent(/expired/i);
+    expect(wallet.calls).toHaveLength(0);
+  });
+
+  it('still offers payment one second before expiry', async () => {
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    renderApp(
+      <Checkout
+        now={() => (QUOTE_EXPIRY_SECONDS - 1) * 1000}
+        api={api}
+        wallet={tokenWallet()}
+        receipt={quotedReceipt}
+      />,
+      { session },
+    );
+    await screen.findByTestId('total-amount');
+    expect(screen.getByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
+  });
+
+  it('keeps showing accepted after the quote expiry passes', async () => {
+    // A settled submission does not become "expired" because its quote's clock
+    // ran out; the server's public state is what the UI reports.
+    const accepted = { publicId: quotedReceipt.publicId, state: 'accepted' as const, acceptedAt: '2026-09-16T10:06:00.000Z' };
+    const { api } = stubApi([statusRoute(accepted), resumeRoute()]);
+    renderApp(
+      <Checkout now={expiredNow} api={api} wallet={tokenWallet()} receipt={{ ...accepted, quote }} />,
+      { session },
+    );
+    await screen.findByTestId('total-amount');
+    expect(screen.getByRole('status')).toHaveTextContent(/accepted/i);
+    expect(screen.getByRole('status').textContent).not.toMatch(/expired/i);
+  });
+
+  it('offers no pay control for an unsupported quote version', async () => {
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    const unsupported = { ...quote, message: { ...quote.message, quoteVersion: '2' } };
+    renderApp(
+      <Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={{ ...quotedReceipt, quote: unsupported }} />,
+      { session },
+    );
+    await screen.findByTestId('total-amount');
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+  });
+});
+
+describe('Checkout pay-time quote authority', () => {
+  async function payWith(localQuote: typeof quote, resumed: unknown = quotedReceipt) {
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute(resumed)]);
+    const wallet = tokenWallet();
+    const user = userEvent.setup();
+    renderApp(
+      <Checkout now={nowMs} api={api} wallet={wallet} receipt={{ ...quotedReceipt, quote: localQuote }} />,
+      { session },
+    );
+    await screen.findByTestId('total-amount');
+    await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
+    return { wallet, calls };
+  }
+
+  function signedMessage(wallet: ReturnType<typeof tokenWallet>) {
+    const [signCall] = wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4');
+    const [, payload] = signCall.params as [string, string];
+    return JSON.parse(payload);
+  }
+
+  function sentTransaction(wallet: ReturnType<typeof tokenWallet>) {
+    const [[tx]] = wallet.calls
+      .filter((call) => call.method === 'eth_sendTransaction')
+      .map((call) => call.params as [{ to: string; data: string }]);
+    return tx;
+  }
+
+  it('re-authorizes against the persisted quote before touching the wallet', async () => {
+    const { wallet, calls } = await payWith(quote);
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+
+    const resumeIndex = calls.findIndex((call) => call.endsWith('/resume'));
+    expect(resumeIndex).toBeGreaterThanOrEqual(0);
+    expect(sentTransaction(wallet).data).toBe(encodeSettleCall(quote, AUTH_SIGNATURE));
+  });
+
+  it('ignores a mutated amount held in local state', async () => {
+    const mutated = { ...quote, message: { ...quote.message, attentionAmount: '999000000' }, totalAmount: '999250000' };
+    const { wallet } = await payWith(mutated);
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+
+    expect(signedMessage(wallet).message.value).toBe('5250000');
+    expect(sentTransaction(wallet).data).toBe(encodeSettleCall(quote, AUTH_SIGNATURE));
+    expect(screen.getByTestId('attention-amount')).toHaveTextContent('5.00 USDC');
+  });
+
+  it('ignores a mutated splitter held in local state', async () => {
+    const attacker = '0xdEAD00000000000000000000000000000000BEEF';
+    const mutated = { ...quote, domain: { ...quote.domain, verifyingContract: attacker } };
+    const { wallet } = await payWith(mutated);
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+
+    expect(signedMessage(wallet).message.to).toBe(SPLITTER);
+    expect(sentTransaction(wallet).to).toBe(SPLITTER);
+    expect(screen.getByTestId('splitter')).toHaveTextContent(SPLITTER);
+  });
+
+  it('ignores a mutated chain ID held in local state', async () => {
+    const mutated = { ...quote, domain: { ...quote.domain, chainId: 1 } };
+    const { wallet } = await payWith(mutated);
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+
+    expect(signedMessage(wallet).domain.chainId).toBe(TEST_CHAIN_ID);
+    expect(screen.getByTestId('chain-id')).toHaveTextContent(String(TEST_CHAIN_ID));
+  });
+
+  it('does not pay when the resume endpoint refuses', async () => {
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute(null, 404)]);
+    const wallet = tokenWallet();
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    await screen.findByTestId('total-amount');
+    await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(wallet.calls.some((call) => call.method === 'eth_signTypedData_v4')).toBe(false);
+    expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
+  });
+
+  it('does not pay when the resumed quote is expired', async () => {
+    const expired = { publicId: quotedReceipt.publicId, state: 'expired', updatedAt: '2026-09-16T10:20:00.000Z' };
+    const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute(expired)]);
+    const wallet = tokenWallet();
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    await screen.findByTestId('total-amount');
+    await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
+    expect(wallet.calls.some((call) => call.method === 'eth_signTypedData_v4')).toBe(false);
+    expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
   });
 });

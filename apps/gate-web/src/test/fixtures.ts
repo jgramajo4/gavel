@@ -1,6 +1,8 @@
 import type {
+  CanonicalFact,
+  DecodedFact,
   DuplicateReceipt,
-  InboxItem,
+  EnrichedFact,
   IssuedQuote,
   PublicGateProfile,
   SubmissionReceipt,
@@ -14,6 +16,13 @@ export const VOTER = '0x4444444444444444444444444444444444444444';
 /** A Base-Sepolia quote: the app must never assume chain 8453. */
 export const TEST_CHAIN_ID = 84532;
 
+/** Quote expiry and a fixed "now" five minutes inside it. Checkout and the
+ *  payment boundary take an injected clock so expiry tests never depend on the
+ *  machine's wall clock. */
+export const QUOTE_EXPIRY_SECONDS = 1793577600;
+export const NOW_SECONDS = QUOTE_EXPIRY_SECONDS - 300;
+export const nowMs = () => NOW_SECONDS * 1000;
+
 export const quote: IssuedQuote = Object.freeze({
   domain: { name: 'GavelGateSplitter', version: '1', chainId: TEST_CHAIN_ID, verifyingContract: SPLITTER },
   message: {
@@ -24,7 +33,7 @@ export const quote: IssuedQuote = Object.freeze({
     gavelFeeAmount: '250000',
     submissionHash: `0x${'cd'.repeat(32)}`,
     token: USDC,
-    expiry: '1793577600',
+    expiry: String(QUOTE_EXPIRY_SECONDS),
     quoteVersion: '1',
   },
   totalAmount: '5250000',
@@ -113,57 +122,50 @@ export const PRIVATE_FIXTURE_FIELDS = Object.freeze({
 
 export const pollutedProfile = { ...acceptingProfile, ...PRIVATE_FIXTURE_FIELDS } as PublicGateProfile;
 
-export const inboxItem: InboxItem = {
-  id: 'inbox-1',
-  dao: 'nouns',
-  proposalId: '812',
-  position: 'FOR',
-  pitch: '# Fund the client\n\nThis proposal **pays** for a year of work.',
-  disclosures: 'I am paid by the proposer.',
-  evidenceUrls: ['https://example.org/budget', 'https://example.org/thread'],
-  canonicalFacts: [
-    {
-      source: 'canonical',
-      kind: 'raw_action',
-      displayLabel: 'Raw canonical action',
+/**
+ * Proposal facts for FactPanel. These come from the frozen `@gavel/gate` fact
+ * schema — canonical actions, the allowlist decoder, and display-only
+ * enrichment — not from any inbox response.
+ */
+export const canonicalFacts: CanonicalFact[] = [
+  {
+    source: 'canonical',
+    kind: 'raw_action',
+    displayLabel: 'Raw canonical action',
+    actionIndex: 1,
+    target: '0x8888888888888888888888888888888888888888',
+    valueWei: '0',
+    calldata: '0xdeadbeef',
+    signature: 'unknownCall(bytes)',
+    canonicalEvidence: {
       actionIndex: 1,
       target: '0x8888888888888888888888888888888888888888',
       valueWei: '0',
       calldata: '0xdeadbeef',
       signature: 'unknownCall(bytes)',
-      canonicalEvidence: {
-        actionIndex: 1,
-        target: '0x8888888888888888888888888888888888888888',
-        valueWei: '0',
-        calldata: '0xdeadbeef',
-        signature: 'unknownCall(bytes)',
-      },
     },
-  ],
-  decodedFacts: [
-    {
-      source: 'decoded',
-      kind: 'native_eth_transfer',
-      displayLabel: 'Native ETH transfer',
-      decoderVersion: 'gate-facts/1',
+  },
+];
+
+export const decodedFacts: DecodedFact[] = [
+  {
+    source: 'decoded',
+    kind: 'native_eth_transfer',
+    displayLabel: 'Native ETH transfer',
+    decoderVersion: 'gate-facts/1',
+    actionIndex: 0,
+    amountWei: '75000000000000000000',
+    recipient: '0x9999999999999999999999999999999999999999',
+    canonicalEvidence: {
       actionIndex: 0,
-      amountWei: '75000000000000000000',
-      recipient: '0x9999999999999999999999999999999999999999',
-      canonicalEvidence: {
-        actionIndex: 0,
-        target: '0x9999999999999999999999999999999999999999',
-        valueWei: '75000000000000000000',
-        calldata: '0x',
-        signature: '',
-      },
+      target: '0x9999999999999999999999999999999999999999',
+      valueWei: '75000000000000000000',
+      calldata: '0x',
+      signature: '',
     },
-  ],
-  enrichedFacts: [
-    { source: 'enriched', displayLabel: 'Recipient ENS', value: 'builder.eth', verifiable: false },
-  ],
-  issuanceLifecycle: 'VOTING',
-  currentLifecycle: 'CLOSED',
-  lifecycleChanged: true,
-  inboxCreatedAt: '2026-09-16T10:05:00.000Z',
-  archivedAt: null,
-};
+  },
+];
+
+export const enrichedFacts: EnrichedFact[] = [
+  { source: 'enriched', displayLabel: 'Recipient ENS', value: 'builder.eth', verifiable: false },
+];
