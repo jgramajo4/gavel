@@ -5,6 +5,7 @@
   "description": "A private, history-first AI governance copilot.",
   "license": "GPL-3.0-only",
   "workspaces": [
+    "apps/*",
     "packages/*",
     "integrations/*"
   ],
@@ -18,7 +19,7 @@
   "scripts": {
     "gavel": "node packages/cli/bin/gavel.js",
     "indexer": "node packages/governance-index/bin/gavel-indexer.js",
-    "test": "node --test",
+    "test": "node --test test/*.test.js packages/*/test/*.test.js",
     "test:history": "node --test test/history*.test.js",
     "test:profile": "node --test test/profile.test.js",
     "test:prediction": "node --test test/prediction.test.js",
@@ -29,7 +30,11 @@
     "test:safe-live": "node --test test/safe-live-integration.test.js",
     "tui": "npm run dev --workspace @gavel/tui",
     "tui:build": "npm run build --workspace @gavel/tui",
-    "tui:typecheck": "npm run typecheck --workspace @gavel/tui"
+    "tui:typecheck": "npm run typecheck --workspace @gavel/tui",
+    "gate-web": "npm run dev --workspace @gavel/gate-web",
+    "gate-web:build": "npm run build --workspace @gavel/gate-web",
+    "gate-web:test": "npm test --workspace @gavel/gate-web",
+    "gate-web:typecheck": "npm run typecheck --workspace @gavel/gate-web"
   },
   "dependencies": {
     "ethers": "^6.15.0",
