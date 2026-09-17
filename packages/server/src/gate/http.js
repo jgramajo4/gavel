@@ -77,7 +77,7 @@ function bearerToken(request) {
   return match[1];
 }
 
-function createGateHttpServer({ authService, profileService, submissionService, settlementService,
+function createGateHttpServer({ authService, profileService, submissionService, settlementService, inboxService,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
@@ -92,6 +92,10 @@ function createGateHttpServer({ authService, profileService, submissionService, 
   }
   if (settlementService !== undefined && typeof settlementService.submitTxHash !== "function") {
     throw new TypeError("complete settlementService is required");
+  }
+  if (inboxService !== undefined && (typeof inboxService.listInbox !== "function"
+      || typeof inboxService.getInbox !== "function" || typeof inboxService.archiveInbox !== "function")) {
+    throw new TypeError("complete inboxService is required");
   }
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new TypeError("maxBodyBytes must be a positive integer");
   if (!challengeLimiter || typeof challengeLimiter.allow !== "function") throw new TypeError("challengeLimiter.allow is required");
@@ -130,6 +134,41 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
         const body = await readJson(request, maxBodyBytes);
         return sendJson(response, 200, await profileService.updateProfile({ ...body, session }));
+      }
+      if (request.method === "GET" && path === "/v1/gate/me/profile") {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "dao_inbox" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        const profile = await profileService.getPublicProfile(session.wallet);
+        return profile
+          ? sendJson(response, 200, profile)
+          : sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Gate profile not found" } });
+      }
+      if (inboxService && request.method === "GET" && path === "/v1/gate/me/inbox") {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "dao_inbox" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        return sendJson(response, 200, await inboxService.listInbox({ session }));
+      }
+      const inboxItem = /^\/v1\/gate\/me\/inbox\/([^/]+)$/.exec(path);
+      if (inboxService && request.method === "GET" && inboxItem) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "dao_inbox" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        return sendJson(response, 200, await inboxService.getInbox({ session, id: decodeURIComponent(inboxItem[1]) }));
+      }
+      const inboxArchive = /^\/v1\/gate\/me\/inbox\/([^/]+)\/archive$/.exec(path);
+      if (inboxService && request.method === "POST" && inboxArchive) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "dao_inbox" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        return sendJson(response, 200, await inboxService.archiveInbox({
+          session, id: decodeURIComponent(inboxArchive[1]),
+        }));
       }
       if (request.method === "GET" && path === "/v1/gates") {
         const minVotingPower = url.searchParams.get("minVotingPower");

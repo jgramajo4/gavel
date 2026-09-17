@@ -981,6 +981,39 @@ class PostgresGateStore {
     invariant(row, "notification not found"); return clone(row);
   }
 
+  #inboxSelect() {
+    return `SELECT i.id,i.archived_at AS "archivedAt",i.inbox_created_at AS "createdAt",
+      i.issuance_lifecycle AS "issuanceLifecycle",i.current_lifecycle AS "currentLifecycle",
+      i.lifecycle_changed AS "lifecycleChanged",s.material,
+      ps.canonical_facts AS "canonicalFacts",ps.decoded_facts AS "decodedFacts",
+      ps.canonical_actions AS "canonicalActions",ps.dao,ps.proposal_id AS "proposalId"
+      FROM gate.inbox_items i
+      JOIN gate.submissions s ON s.id=i.submission_id
+      JOIN gate.proposal_snapshots ps ON ps.id=s.issuance_snapshot_id`;
+  }
+
+  async listInboxItems(profileId) {
+    if (typeof profileId !== "string" || !profileId) throw new TypeError("profileId is required");
+    return clone((await this.pool.query(`${this.#inboxSelect()}
+      WHERE i.profile_id=$1 ORDER BY i.inbox_created_at DESC,i.id ASC`, [profileId])).rows);
+  }
+
+  async getInboxItem(profileId, id) {
+    if (typeof profileId !== "string" || !profileId || typeof id !== "string" || !id) return null;
+    const row = (await this.pool.query(`${this.#inboxSelect()} WHERE i.profile_id=$1 AND i.id=$2`,
+      [profileId, id])).rows[0];
+    return row ? clone(row) : null;
+  }
+
+  async archiveInboxItem(profileId, id) {
+    if (typeof profileId !== "string" || !profileId || typeof id !== "string" || !id) return null;
+    const updated = (await this.pool.query(`UPDATE gate.inbox_items
+      SET archived_at=COALESCE(archived_at,clock_timestamp())
+      WHERE profile_id=$1 AND id=$2 RETURNING id`, [profileId, id])).rows[0];
+    if (!updated) return null;
+    return this.getInboxItem(profileId, id);
+  }
+
   async counts() {
     return clone((await this.pool.query(`SELECT (SELECT count(*)::int FROM gate.proposal_snapshots) AS snapshots,
       (SELECT count(*)::int FROM gate.submissions) AS submissions,(SELECT count(*)::int FROM gate.quotes) AS quotes,

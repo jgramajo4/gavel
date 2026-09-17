@@ -41,6 +41,7 @@ const {
   resolveExecutionReadiness,
   runChronologicalBacktest,
 } = require("../../core");
+const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
 
 const DATA_DIR = resolveDataDir();
 const SUPPORTED_DAOS = Object.freeze(["nouns", "ens", "railgun-eth"]);
@@ -107,6 +108,10 @@ Usage:
                              [--rpc <url>] [--safe-api-url <url>]
   gavel safe delegate setup --safe <address> [--chain-id <id>] [--identity <local:label>]
                             [--rpc <url>] [--safe-api-url <url>]
+  gavel gate profile [--json]
+  gavel gate inbox [--json]
+  gavel gate inbox show <id> [--json]
+  gavel gate inbox archive <id>
 
 Commands:
   history   Fetch indexed governance history (Nouns defaults to its subgraph when no index is configured).
@@ -122,6 +127,8 @@ Commands:
   execution prepare   Validate live against the DAO and emit a canonical ValidatedExecutionIntent.
   execution submit    Re-validate live, then hand the intent to a configured execution backend.
   identity create     Create a locally held, encrypted Safe proposal identity.
+  gate profile        Fetch the authenticated Gate public profile projection.
+  gate inbox          List, show, or archive the authenticated private Gate inbox.
 
 Execution boundary:
   Execution commands operate only on Gavel-generated intents. There is no
@@ -1296,6 +1303,78 @@ async function identityCreateCommand(argv) {
   );
 }
 
+async function gateCommand(argv) {
+  const [subcommand, ...rest] = argv;
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    process.stdout.write(usage());
+    return;
+  }
+  const token = typeof process.env.GAVEL_GATE_SESSION === "string" ? process.env.GAVEL_GATE_SESSION.trim() : "";
+  if (!token) throw new Error("authentication required: set GAVEL_GATE_SESSION");
+  const baseUrl = process.env.GAVEL_GATE_URL || "http://127.0.0.1:8788";
+  const client = createGateClient({ baseUrl, token });
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    options: { json: { type: "boolean", default: false } },
+  });
+
+  function writeJson(document) {
+    process.stdout.write(`${JSON.stringify({ schemaVersion: "gavel.gate/1", ...document }, null, 2)}\n`);
+  }
+
+  try {
+    if (subcommand === "profile") {
+      const profile = await client.profile();
+      if (values.json) {
+        writeJson({ command: "profile", profile });
+        return;
+      }
+      process.stdout.write(`${profile.wallet || ""}  ${profile.availability || ""}\n`);
+      return;
+    }
+    if (subcommand === "inbox") {
+      const action = positionals[0];
+      if (action && !["show", "archive"].includes(action)) {
+        throw new Error("gate inbox accepts the subcommands show and archive");
+      }
+      if (action === "show") {
+        const item = await client.showInbox(positionals[1]);
+        if (values.json) {
+          writeJson({ command: "inbox.show", item });
+          return;
+        }
+        process.stdout.write(`${sanitizeHumanText(item.id)}  ${item.archived ? "archived" : "unread"}\n`);
+        process.stdout.write(`${sanitizeHumanText(item.pitch)}\n`);
+        return;
+      }
+      if (action === "archive") {
+        const result = await client.archiveInbox(positionals[1]);
+        process.stdout.write(`${result.id} archived\n`);
+        return;
+      }
+      const listed = await client.listInbox();
+      if (values.json) {
+        writeJson({ command: "inbox.list", items: listed.items });
+        return;
+      }
+      if (listed.items.length === 0) {
+        process.stdout.write("No Gate inbox items.\n");
+        return;
+      }
+      for (const item of listed.items) {
+        const proposal = item.canonicalFacts?.proposalId ? `#${item.canonicalFacts.proposalId}` : "";
+        process.stdout.write(`${item.id}  ${proposal}  ${item.archived ? "archived" : "unread"}\n`);
+      }
+      return;
+    }
+    throw new Error("gate accepts the subcommands profile and inbox");
+  } catch (error) {
+    if (error instanceof GateClientError) throw new Error(error.message);
+    throw error;
+  }
+}
+
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
@@ -1330,6 +1409,7 @@ async function main() {
     }
     return safeDelegateCommand(subcommand, rest);
   }
+  if (command === "gate") return gateCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }
 

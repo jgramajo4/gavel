@@ -7,6 +7,9 @@
   "bin": {
     "gavel": "bin/gavel.js"
   },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "engines": {
     "node": ">=20"
   },

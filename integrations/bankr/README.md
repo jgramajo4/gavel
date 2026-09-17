@@ -42,3 +42,20 @@ Bankr Agent Profiles and project updates are public publishing features, not
 private Gavel storage. After creating a voter profile, require zero command
 exits and successful artifact metadata, then restore it from a new task. See
 [`../../docs/storage/PROFILE_STORAGE.md`](../../docs/storage/PROFILE_STORAGE.md).
+
+## Gate
+
+Bankr may host the Gavel CLI, including `gavel gate profile` and
+`gavel gate inbox`. That does not make Bankr the settlement authority.
+
+Do not claim:
+
+- Bankr owns payment settlement;
+- a Bankr or email notification proves delivery;
+- Bankr can bypass Gate quote or settlement verification;
+- Bankr supports follow-up, reply, XMTP, Telegram, or policy editing.
+
+Lobbyists pay the attention price plus Gavel's fixed fee through the Gate
+splitter. The voter receives 100% of the attention price. Gavel receives only
+the disclosed fixed fee. Inbox creation on the Gate backend is the paid-service
+completion condition; notification is private and best-effort.

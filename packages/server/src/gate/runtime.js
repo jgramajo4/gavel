@@ -121,6 +121,7 @@ function createGateServerRuntime(options = {}) {
     authService: options.authService,
     profileService: options.profileService,
     ...(options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
+    ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
   };
   const server = factories.createGateHttpServer(httpOptions);
