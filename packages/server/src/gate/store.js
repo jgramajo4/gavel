@@ -975,7 +975,7 @@ class PostgresGateStore {
   async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
-    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","destinationRef",summary
+    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","destinationRef",summary
       FROM gate.claim_notification_attempts($1,$2,$3)`,
     [limit, this.notificationRetryLimit, leaseMs])).rows;
     return clone(rows);
@@ -997,6 +997,14 @@ class PostgresGateStore {
     const row = (await this.pool.query("SELECT gate.fail_notification_attempt($1,$2,$3,$4) AS failed",
       [id, claimToken, errorCode, exactDate(nextAttemptAt, "nextAttemptAt")])).rows[0];
     return Boolean(row?.failed);
+  }
+
+  async reconcileNotification({ id, claimToken, errorCode } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof errorCode !== "string" || !errorCode) throw new TypeError("notification id, claimToken, and errorCode are required");
+    const row = (await this.pool.query("SELECT gate.reconcile_notification_attempt($1,$2,$3) AS reconciled",
+      [id, claimToken, errorCode])).rows[0];
+    return Boolean(row?.reconciled);
   }
 
   async updateNotification(id, patch = {}) {

@@ -1,10 +1,6 @@
-const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{1,256}$/;
 const SEND_TIMEOUT_MS = 10_000;
-
-function redact(value) {
-  return String(value ?? "provider error").replace(EMAIL, "[redacted]").replace(/\s+/g, " ").slice(0, 180);
-}
+const AGENTMAIL_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function opaqueId(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : null;
@@ -28,13 +24,14 @@ function createAgentMailSender({
   const root = String(apiUrl).replace(/\/+$/, "");
 
   async function send({ to, subject, text, idempotencyKey } = {}) {
+    if (!IDEMPOTENCY_KEY.test(String(idempotencyKey ?? ""))) {
+      throw Object.assign(new Error("invalid idempotency key"), { code: "INVALID_IDEMPOTENCY_KEY" });
+    }
     const headers = {
       authorization: `Bearer ${apiKey}`,
       "content-type": "application/json",
     };
-    if (IDEMPOTENCY_KEY.test(String(idempotencyKey || ""))) {
-      headers["Idempotency-Key"] = String(idempotencyKey);
-    }
+    headers["Idempotency-Key"] = String(idempotencyKey);
     const response = await fetchImpl(
       `${root}/v0/inboxes/${encodeURIComponent(fromInbox)}/messages/send`,
       {
@@ -47,29 +44,41 @@ function createAgentMailSender({
     );
     let body = null;
     try { body = await response.json(); } catch { body = null; }
-    if (response.status === 409) return { messageId: messageIdFrom(body) };
+    if (response.status === 409) {
+      throw Object.assign(new Error("provider idempotency conflict"), { code: "PROVIDER_IDEMPOTENCY_CONFLICT" });
+    }
     if (!response.ok) throw Object.assign(new Error("provider error"), { code: "PROVIDER_ERROR" });
     return { messageId: messageIdFrom(body) };
   }
 
   send.durableIdempotency = true;
+  send.idempotencyWindowMs = AGENTMAIL_IDEMPOTENCY_WINDOW_MS;
+  send.idempotencySafetyMs = timeoutMs;
   return send;
 }
 
-function createEmailNotifier({ send, resolveDestination, logger = { error() {} } } = {}) {
+function createEmailNotifier({ send, resolveDestination, logger = { error() {} }, clock = () => new Date() } = {}) {
   if (typeof send !== "function") throw new TypeError("email send function is required");
   if (typeof resolveDestination !== "function") throw new TypeError("destination resolver is required");
 
-  async function provider({ idempotencyKey, destinationRef, summary } = {}) {
+  async function provider({ idempotencyKey, dedupeDeadline, destinationRef, summary } = {}) {
     let destination;
     try {
       destination = await resolveDestination(destinationRef);
-    } catch (error) {
-      logger.error?.(redact(error?.message));
+    } catch {
+      logger.error?.("source=email_notifier code=DESTINATION_UNAVAILABLE");
       throw Object.assign(new Error("destination unavailable"), { code: "DESTINATION_UNAVAILABLE" });
     }
     if (typeof destination !== "string" || !destination.includes("@")) {
       throw Object.assign(new Error("destination unavailable"), { code: "DESTINATION_INVALID" });
+    }
+    if (dedupeDeadline !== undefined && Number.isSafeInteger(send.idempotencySafetyMs)) {
+      const beforeSend = new Date(clock());
+      const deadline = new Date(dedupeDeadline);
+      if (Number.isNaN(beforeSend.valueOf()) || Number.isNaN(deadline.valueOf())
+          || beforeSend.valueOf() + send.idempotencySafetyMs >= deadline.valueOf()) {
+        throw Object.assign(new Error("provider idempotency window expired"), { code: "PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED" });
+      }
     }
     try {
       const result = await send({
@@ -80,14 +89,19 @@ function createEmailNotifier({ send, resolveDestination, logger = { error() {} }
       });
       return { providerOpaqueId: opaqueId(result?.messageId ?? result?.providerOpaqueId) };
     } catch (error) {
-      logger.error?.(redact(error?.message));
+      const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.code)
+        ? error.code
+        : "PROVIDER_ERROR";
+      logger.error?.(`source=email_notifier code=${code}`);
       throw Object.assign(new Error("provider error"), {
-        code: typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : "PROVIDER_ERROR",
+        code,
       });
     }
   }
 
   provider.durableIdempotency = send.durableIdempotency === true;
+  provider.idempotencyWindowMs = send.idempotencyWindowMs;
+  provider.idempotencySafetyMs = send.idempotencySafetyMs;
   return provider;
 }
 

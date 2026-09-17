@@ -1079,7 +1079,8 @@ class MemoryGateStore {
         inboxCreatedAt: now, readAt: null, archivedAt: null,
       };
       const stagedNotification = { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
-        nextAttemptAt: now, claimedUntil: null, createdAt: now, updatedAt: now };
+        nextAttemptAt: now, claimedUntil: null, firstAttemptAt: null, dedupeDeadline: null,
+        manualReconciliationAt: null, createdAt: now, updatedAt: now };
       const stagedMonitor = {
         ...clone(monitor), quoteId: quote.quoteId, chainId: quote.baseChainId, splitter: quote.splitter,
         receiptBlock: normalizedSettlement.receiptBlock, receiptBlockHash: normalizedSettlement.receiptBlockHash,
@@ -1154,19 +1155,23 @@ class MemoryGateStore {
     });
   }
 
-  async claimNotificationAttempts({ limit = 20, now = this.#clock() } = {}) {
+  async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000, now = this.#clock() } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
     const at = instant(now, "now");
     return this.#serialized(() => {
       const rows = [...this.#notifications.values()].filter((row) => ["pending", "failed"].includes(row.status)
         && (row.nextAttemptAt ?? row.createdAt) <= at && (!row.claimedUntil || row.claimedUntil <= at)
-        && row.retryCount <= this.#notificationRetryLimit).slice(0, limit);
+        && !row.manualReconciliationAt && row.retryCount <= this.#notificationRetryLimit).slice(0, limit);
       for (const row of rows) {
         row.status = "pending";
         row.claimGeneration += 1;
-        row.claimedUntil = new Date(at.valueOf() + 30_000);
+        row.claimedUntil = new Date(at.valueOf() + leaseMs);
+        row.firstAttemptAt ??= at;
+        row.dedupeDeadline ??= new Date(row.firstAttemptAt.valueOf() + 24 * 60 * 60 * 1000);
       }
       return clone(rows.map((row) => ({ id: row.id, claimToken: String(row.claimGeneration), retryCount: row.retryCount,
+        firstAttemptAt: row.firstAttemptAt, dedupeDeadline: row.dedupeDeadline,
         destinationRef: row.destinationRef, summary: row.summary })));
     });
   }
@@ -1177,7 +1182,8 @@ class MemoryGateStore {
       if (!row) throw new Error("notification not found");
       if (row.status === "sent") return false;
       const now = instant(this.#clock(), "clock");
-      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
       row.status = "sent"; row.providerOpaqueId = providerOpaqueId; row.claimedUntil = null;
       row.updatedAt = now; return true;
     });
@@ -1190,9 +1196,28 @@ class MemoryGateStore {
       if (!row) throw new Error("notification not found");
       if (row.status === "sent") return false;
       const now = instant(this.#clock(), "clock");
-      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
       row.status = "failed"; row.errorCode = String(errorCode); row.retryCount += 1;
       row.nextAttemptAt = next; row.claimedUntil = null; row.updatedAt = now; return true;
+    });
+  }
+
+  async reconcileNotification({ id, claimToken, errorCode } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof errorCode !== "string" || !errorCode) throw new TypeError("notification id, claimToken, and errorCode are required");
+    return this.#serialized(() => {
+      const row = this.#notifications.get(id);
+      if (!row) throw new Error("notification not found");
+      const now = instant(this.#clock(), "clock");
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      row.status = "failed";
+      row.errorCode = errorCode;
+      row.manualReconciliationAt = now;
+      row.claimedUntil = null;
+      row.updatedAt = now;
+      return true;
     });
   }
 
@@ -1200,6 +1225,9 @@ class MemoryGateStore {
     return this.#withProfileLock(`notification:${id}`, async () => {
       const row = this.#notifications.get(id);
       if (!row) throw new Error("notification not found");
+      if (row.manualReconciliationAt && patch.status !== undefined && patch.status !== "failed") {
+        throw new Error("manual reconciliation notification state is terminal");
+      }
       const transition = notificationTransition(row, patch, this.#notificationRetryLimit);
       const updated = { ...clone(row), ...clone(transition),
         updatedAt: instant(this.#clock(), "clock") };

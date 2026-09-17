@@ -540,7 +540,8 @@ test("PR6 memory worker claims only due monitors, advances schedule durably, and
     nextCheckBlock: null, completed: true, reorged: false }), true);
   assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "999", limit: 5 }), []);
   const jobs = await store.claimNotificationAttempts({ limit: 5, now });
-  assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext",
+  assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0,
+    firstAttemptAt: now, dedupeDeadline: new Date(now.valueOf() + 24 * 60 * 60 * 1000), destinationRef: "vault:ciphertext",
     summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } }]);
   assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
   const retryAt = new Date("2026-01-01T00:07:00.000Z");
@@ -555,6 +556,26 @@ test("PR6 memory worker claims only due monitors, advances schedule durably, and
   assert.equal((await store.counts()).notifications, 1);
 });
 
+test("memory notification reconciliation is terminal and preserves the first-attempt dedupe deadline", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("8");
+  await store.issue(issuance("manual-reconciliation", { quoteId, submissionHash: hash("9") }));
+  await store.settle(settlementCommand("manual-reconciliation", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("9") } },
+  }));
+  const first = (await store.claimNotificationAttempts({ now }))[0];
+  assert.equal(first.firstAttemptAt.toISOString(), "2026-01-01T00:06:00.000Z");
+  assert.equal(first.dedupeDeadline.toISOString(), "2026-01-02T00:06:00.000Z");
+  assert.equal(await store.reconcileNotification({ id: first.id, claimToken: first.claimToken,
+    errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT" }), true);
+  now = new Date("2026-01-01T00:07:00.000Z");
+  assert.deepEqual(await store.claimNotificationAttempts({ now }), []);
+  assert.equal(await store.completeNotification({ id: first.id, claimToken: first.claimToken,
+    providerOpaqueId: "must-not-send" }), false);
+  await assert.rejects(store.updateNotification(first.id, { status: "pending" }), /manual reconciliation.*terminal/i);
+});
+
 test("notification completions require the current unexpired claim and retries return to pending", async () => {
   let now = new Date("2026-01-01T00:06:00.000Z");
   const store = await setupStore({ clock: () => now });
@@ -563,9 +584,9 @@ test("notification completions require the current unexpired claim and retries r
   await store.settle(settlementCommand("claim-owner", quoteId, {
     settlement: { event: { quoteId, submissionHash: hash("7") } },
   }));
-  const first = (await store.claimNotificationAttempts({ now }))[0];
+  const first = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   now = new Date("2026-01-01T00:06:31.000Z");
-  const second = (await store.claimNotificationAttempts({ now }))[0];
+  const second = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   assert.notEqual(second.claimToken, first.claimToken);
   assert.equal(await store.completeNotification({ id: first.id, claimToken: first.claimToken, providerOpaqueId: "stale" }), false);
   assert.equal(await store.failNotification({ id: first.id, claimToken: first.claimToken, errorCode: "STALE",
@@ -573,8 +594,24 @@ test("notification completions require the current unexpired claim and retries r
   assert.equal(await store.failNotification({ id: second.id, claimToken: second.claimToken, errorCode: "TEMP",
     nextAttemptAt: new Date("2026-01-01T00:07:00.000Z") }), true);
   now = new Date("2026-01-01T00:07:00.000Z");
-  const retry = (await store.claimNotificationAttempts({ now }))[0];
+  const retry = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   assert.equal(await store.completeNotification({ id: retry.id, claimToken: retry.claimToken, providerOpaqueId: "sent" }), true);
+});
+
+test("memory notification claims honor the requested lease duration", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("a");
+  await store.issue(issuance("notification-lease", { quoteId, submissionHash: hash("b") }));
+  await store.settle(settlementCommand("notification-lease", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("b") } },
+  }));
+  const first = (await store.claimNotificationAttempts({ now, leaseMs: 120_000 }))[0];
+  now = new Date("2026-01-01T00:07:00.000Z");
+  assert.deepEqual(await store.claimNotificationAttempts({ now, leaseMs: 120_000 }), []);
+  now = new Date("2026-01-01T00:08:01.000Z");
+  const reclaimed = (await store.claimNotificationAttempts({ now, leaseMs: 120_000 }))[0];
+  assert.notEqual(reclaimed.claimToken, first.claimToken);
 });
 
 test("expiry updates public submission state and release requires cursor-authorized complete canonical coverage", async () => {

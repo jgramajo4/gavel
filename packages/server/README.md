@@ -63,10 +63,16 @@ redirects. That flag is justified by AgentMail's primary docs, not by a mock:
 Those pages document send-path idempotency via `Idempotency-Key` (not
 `clientId`, which is create-only): a retry with the same key returns the
 original message and sends no second email; the same key with a different body
-is `409 Conflict`; keys expire 24 hours after the send completes. This adapter
-has not live-probed AgentMail. A `409` is treated as a completed send, not a
-retryable failure. An unusable `message_id` is dropped (`null`) instead of
-failing a send that already went out.
+is `409 Conflict`; keys expire 24 hours after the send completes. This guarantee
+is time-bounded, not perpetual. The first attempt and 24-hour deadline are
+persisted; retries stop before the deadline and enter private manual
+reconciliation. A `409` follows the same terminal reconciliation path and is
+never treated as a successful or automatically retryable send. Missing or
+invalid keys fail before any fetch. Operator alerts contain only a stable error
+code and source, never the key, destination, body, response, or headers. Legacy
+claimed attempts with unknowable provider history also require reconciliation.
+This adapter has not live-probed AgentMail. An unusable `message_id` is dropped
+(`null`) instead of failing a send that already went out.
 
 The adapter is not composed into `createGateServerRuntime` in this PR. There is
 no `resolveDestination` decryptor and no `AGENTMAIL_*` wiring.

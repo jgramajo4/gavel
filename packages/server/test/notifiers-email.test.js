@@ -7,13 +7,21 @@ const SUMMARY = { subject: "Paid pitch ready", text: "Open your private Gate inb
 const DESTINATION = "voter@secret.example";
 
 function durableWorker(provider, attempts) {
+  provider.idempotencyWindowMs ??= 24 * 60 * 60 * 1000;
+  provider.idempotencySafetyMs ??= 10_000;
   return createNotificationWorker({
     store: {
-      async claimNotificationAttempts() { return attempts; },
+      async claimNotificationAttempts() { return attempts.map((attempt) => ({
+        firstAttemptAt: new Date("2026-01-01T00:00:00Z"),
+        dedupeDeadline: new Date("2026-01-02T00:00:00Z"),
+        ...attempt,
+      })); },
       async completeNotification() { return true; },
       async failNotification() { return true; },
+      async reconcileNotification() { return true; },
     },
     provider,
+    operatorAlert: async () => {},
     clock: () => new Date("2026-01-01T00:00:00Z"),
   });
 }
@@ -57,6 +65,36 @@ test("provider throw stays private and retryable without leaking destination", a
     id: "notice-1", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext", summary: SUMMARY,
   }]);
   assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 0, failed: 1 });
+});
+
+test("upstream exception text never reaches notifier logs", async () => {
+  const cases = [
+    {
+      resolveDestination: async () => { throw new Error("decrypt failed ref=vault:ciphertext-secret"); },
+      send: async () => ({ messageId: "unused" }),
+      expectedLog: "source=email_notifier code=DESTINATION_UNAVAILABLE",
+    },
+    {
+      resolveDestination: async () => DESTINATION,
+      send: async () => { throw new Error("send failed key=notice-secret body=body-secret"); },
+      expectedLog: "source=email_notifier code=PROVIDER_ERROR",
+    },
+  ];
+  for (const sample of cases) {
+    const logs = [];
+    const provider = createEmailNotifier({
+      resolveDestination: sample.resolveDestination,
+      send: sample.send,
+      logger: { error(message) { logs.push(String(message)); } },
+    });
+    await assert.rejects(provider({
+      idempotencyKey: "notice-secret",
+      destinationRef: "vault:ciphertext-secret",
+      summary: { subject: "subject-secret", text: "body-secret" },
+    }));
+    assert.deepEqual(logs, [sample.expectedLog]);
+    assert.equal(JSON.stringify(logs).includes("secret"), false);
+  }
 });
 
 test("idempotency key is stable across retries and does not double-send when the provider confirms", async () => {
@@ -130,7 +168,7 @@ test("overlong provider ids are dropped instead of turning a successful send int
   assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 1, failed: 0 });
 });
 
-test("AgentMail 409 is a completed send, not a retryable failure", async () => {
+test("AgentMail 409 is a private idempotency conflict, never a completed send", async () => {
   const send = createAgentMailSender({
     apiUrl: "https://api.agentmail.to", apiKey: "am_test", fromInbox: "agent@gavel.example",
     fetchImpl: async () => ({
@@ -138,11 +176,34 @@ test("AgentMail 409 is a completed send, not a retryable failure", async () => {
     }),
   });
   assert.equal(send.durableIdempotency, true);
-  const result = await send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey: "notice-1" });
-  assert.deepEqual(result, { messageId: "am_existing" });
+  await assert.rejects(
+    send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey: "notice-1" }),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_IDEMPOTENCY_CONFLICT");
+      assert.equal(String(error.message).includes("notice-1"), false);
+      assert.equal(String(error.message).includes(DESTINATION), false);
+      assert.equal(String(error.message).includes("am_existing"), false);
+      return true;
+    },
+  );
 });
 
-test("AgentMail send times out, rejects redirects, and omits an empty idempotency header", async () => {
+test("AgentMail rejects missing and invalid idempotency keys before zero fetches", async () => {
+  let fetches = 0;
+  const send = createAgentMailSender({
+    apiUrl: "https://api.agentmail.to", apiKey: ["am", "test"].join("_"), fromInbox: "agent@gavel.example",
+    fetchImpl: async () => { fetches += 1; throw new Error("must not fetch"); },
+  });
+  for (const idempotencyKey of [undefined, "", "spaces are invalid", "x".repeat(257)]) {
+    await assert.rejects(send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey }),
+      (error) => error.code === "INVALID_IDEMPOTENCY_KEY"
+        && !String(error.message).includes(DESTINATION)
+        && (!idempotencyKey || !String(error.message).includes(String(idempotencyKey))));
+  }
+  assert.equal(fetches, 0);
+});
+
+test("AgentMail send times out and rejects redirects", async () => {
   let captured;
   const send = createAgentMailSender({
     apiUrl: "https://api.agentmail.to", apiKey: "am_test", fromInbox: "agent@gavel.example",
@@ -151,8 +212,6 @@ test("AgentMail send times out, rejects redirects, and omits an empty idempotenc
   await send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey: "notice-1" });
   assert.equal(captured.redirect, "error");
   assert.equal(typeof captured.signal?.aborted, "boolean");
-  await send({ to: DESTINATION, subject: "s", text: "t" });
-  assert.equal(Object.hasOwn(captured.headers, "Idempotency-Key"), false);
 });
 
 test("AgentMail sender stamps Idempotency-Key and returns only an opaque id", async () => {
@@ -171,6 +230,28 @@ test("AgentMail sender stamps Idempotency-Key and returns only an opaque id", as
   assert.match(captured.url, /\/v0\/inboxes\/agent%40gavel.example\/messages\/send$/);
   assert.deepEqual(result, { messageId: "am_1" });
   assert.equal(JSON.stringify(result).includes(DESTINATION), false);
+  assert.equal(send.idempotencyWindowMs, 24 * 60 * 60 * 1000);
+  assert.equal(send.idempotencySafetyMs, 10_000);
+});
+
+test("slow destination resolution cannot begin an AgentMail fetch beyond the dedupe safety boundary", async () => {
+  let now = new Date("2026-01-01T00:00:00Z");
+  let fetches = 0;
+  const provider = createEmailNotifier({
+    clock: () => now,
+    resolveDestination: async () => {
+      now = new Date("2026-01-01T00:00:12Z");
+      return DESTINATION;
+    },
+    send: createAgentMailSender({
+      apiKey: ["agent", "mail", "test"].join("-"), fromInbox: "agent@gavel.example", timeoutMs: 10_000,
+      fetchImpl: async () => { fetches += 1; throw new Error("must not fetch"); },
+    }),
+  });
+  await assert.rejects(provider({ idempotencyKey: "notice-1", destinationRef: "ref", summary: SUMMARY,
+    dedupeDeadline: new Date("2026-01-01T00:00:20Z") }),
+  (error) => error.code === "PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED");
+  assert.equal(fetches, 0);
 });
 
 test("notification failure does not require a public accepted-state mutation", async () => {

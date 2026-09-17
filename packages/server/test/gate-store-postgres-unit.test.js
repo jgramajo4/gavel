@@ -686,9 +686,9 @@ test("PR6 Postgres store exposes durable settlement and worker queue methods", a
   assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: A, headBlock: "99", limit: 5 }), []);
   assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now: new Date(0) }), []);
   for (const method of ["recordSettlementHint", "resolveSettlementHint", "claimSettlementLifecycle", "recordSettlementLifecycle",
-    "advanceSettlementMonitor", "completeNotification", "failNotification"]) assert.equal(typeof store[method], "function", method);
+    "advanceSettlementMonitor", "completeNotification", "failNotification", "reconcileNotification"]) assert.equal(typeof store[method], "function", method);
   const issuedSql = seen.map(({ sql }) => sql).join("\n");
-  assert.match(issuedSql, /SELECT id,"claimToken","retryCount","destinationRef",summary[\s\S]*gate\.claim_notification_attempts/);
+  assert.match(issuedSql, /SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","destinationRef",summary[\s\S]*gate\.claim_notification_attempts/);
   const migrationSql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   assert.match(migrationSql, /claim_notification_attempts[\s\S]*SKIP LOCKED/);
   assert.match(migrationSql, /GRANT EXECUTE ON FUNCTION gate\.claim_notification_attempts/);
@@ -719,35 +719,47 @@ test("settlement monitor SQL claims only due rows and advances with a fenced dur
   assert.match(update.sql, /next_check_block=COALESCE\(\$4,next_check_block\)/);
 });
 
-test("notification SQL claims retries into pending and fences completion by token and live lease", async () => {
+test("notification SQL persists a 24-hour dedupe deadline and terminally fences manual reconciliation", async () => {
   const calls = [];
   const pool = { async query(sql, values) {
     calls.push({ sql: String(sql), values });
-    return { rows: [{ completed: false, failed: false }] };
+    return { rows: [{ completed: false, failed: false, reconciled: false }] };
   } };
   const store = new PostgresGateStore({ pool });
   await store.claimNotificationAttempts({ limit: 9, leaseMs: 123_000 });
   assert.equal(await store.completeNotification({ id: "n", claimToken: "7", providerOpaqueId: "p" }), false);
   assert.equal(await store.failNotification({ id: "n", claimToken: "7", errorCode: "TEMP", nextAttemptAt: new Date(0) }), false);
+  assert.equal(await store.reconcileNotification({ id: "n", claimToken: "7",
+    errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT" }), false);
   assert.match(calls[0].sql, /claim_notification_attempts\(\$1,\$2,\$3\)/);
   assert.deepEqual(calls[0].values, [9, 3, 123_000]);
   assert.deepEqual(calls[1].values, ["n", "7", "p"]);
   assert.deepEqual(calls[2].values, ["n", "7", "TEMP", new Date(0)]);
+  assert.deepEqual(calls[3].values, ["n", "7", "PROVIDER_IDEMPOTENCY_CONFLICT"]);
 
   const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const claim = sql.match(/CREATE OR REPLACE FUNCTION gate\.claim_notification_attempts[\s\S]*?\$\$;/i)?.[0] || "";
   const complete = sql.match(/CREATE OR REPLACE FUNCTION gate\.complete_notification_attempt[\s\S]*?END \$\$;/i)?.[0] || "";
   const fail = sql.match(/CREATE OR REPLACE FUNCTION gate\.fail_notification_attempt[\s\S]*?END \$\$;/i)?.[0] || "";
+  const reconcile = sql.match(/CREATE OR REPLACE FUNCTION gate\.reconcile_notification_attempt[\s\S]*?END \$\$;/i)?.[0] || "";
   assert.match(claim, /SET state='pending'[\s\S]*claim_generation=claim_generation\+1/i);
   assert.match(claim, /clock_timestamp\(\)[\s\S]*make_interval\(secs\s*=>\s*p_lease_ms\s*\/\s*1000\.0\)/i);
+  assert.match(claim, /first_attempt_at=COALESCE\(first_attempt_at,statement_timestamp\(\)\)/i);
+  assert.match(claim, /dedupe_deadline=COALESCE\(dedupe_deadline,statement_timestamp\(\)\+interval '24 hours'\)/i);
+  assert.match(claim, /manual_reconciliation_at IS NULL/i);
   assert.doesNotMatch(claim, /p_now/i);
-  for (const fn of [claim, complete, fail]) assert.match(fn, /SECURITY DEFINER SET search_path=pg_catalog,gate/i);
-  for (const fn of [complete, fail]) {
+  for (const fn of [claim, complete, fail, reconcile]) assert.match(fn, /SECURITY DEFINER SET search_path=pg_catalog,gate/i);
+  for (const fn of [complete, fail, reconcile]) {
     assert.match(fn, /claim_generation=p_claim_token::bigint/i);
     assert.match(fn, /claimed_until>clock_timestamp\(\)/i);
   }
+  assert.match(reconcile, /state='failed'[\s\S]*manual_reconciliation_at=clock_timestamp\(\)/i);
+  assert.match(sql, /manual_reconciliation_at IS NOT NULL[\s\S]*manual reconciliation is terminal/i);
+  assert.match(sql, /UPDATE gate\.notification_attempts[\s\S]*state='failed'[\s\S]*error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN'[\s\S]*claim_generation>0/i);
+  assert.match(sql, /sha256:gate-001-v3-agentmail-idempotency/i);
   assert.match(sql, /REVOKE ALL ON FUNCTION gate\.complete_notification_attempt\(text,text,text\) FROM PUBLIC/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.complete_notification_attempt\(text,text,text\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.reconcile_notification_attempt\(text,text,text\) TO gavel_gate/i);
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.claim_notification_attempts\(integer,timestamptz,integer\)/i);
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.complete_notification_attempt\(text,text\)/i);
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.fail_notification_attempt\(text,text,timestamptz\)/i);

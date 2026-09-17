@@ -137,7 +137,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
     await pool.query(migration);
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v3-closed-base-environments",
+      migration_checksum: "sha256:gate-001-v3-agentmail-idempotency",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -394,6 +394,22 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     const receipt = await createPublicGateReader(pool).getSubmission(first.publicId);
     assert.deepEqual(Object.keys(receipt).sort(), ["acceptedAt", "publicId", "state"].sort());
     assert.equal(receipt.state, "accepted");
+
+    const notificationJob = (await store.claimNotificationAttempts({ limit: 1 }))[0];
+    assert.ok(notificationJob.firstAttemptAt instanceof Date);
+    assert.equal(notificationJob.dedupeDeadline.valueOf() - notificationJob.firstAttemptAt.valueOf(), 24 * 60 * 60 * 1000);
+    await pool.query(migration);
+    assert.deepEqual((await pool.query(`SELECT manual_reconciliation_at,error_code
+      FROM gate.notification_attempts WHERE id=$1`, [notificationJob.id])).rows[0], {
+      manual_reconciliation_at: null, error_code: null,
+    });
+    assert.equal(await store.reconcileNotification({ id: notificationJob.id, claimToken: notificationJob.claimToken,
+      errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT" }), true);
+    assert.deepEqual(await store.claimNotificationAttempts({ limit: 1 }), []);
+    assert.deepEqual((await pool.query(`SELECT state::text,manual_reconciliation_at IS NOT NULL AS manual,error_code
+      FROM gate.notification_attempts WHERE id=$1`, [notificationJob.id])).rows[0], {
+      state: "failed", manual: true, error_code: "PROVIDER_IDEMPOTENCY_CONFLICT",
+    });
 
     const rewrittenAt = new Date();
     const rewritten = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "5", throughBlock: "8",

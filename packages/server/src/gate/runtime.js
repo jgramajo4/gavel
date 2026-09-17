@@ -284,6 +284,7 @@ async function createGateServerRuntime(options = {}) {
     if (options.notificationProvider) {
       notificationWorker = factories.createNotificationWorker({
         store: options.store, provider: options.notificationProvider, leaseMs: config.notificationLeaseMs,
+        operatorAlert: options.operatorAlert,
       });
       jobs.push(notificationWorker.runOnce);
     }

@@ -296,7 +296,10 @@ test("canonical server composes only after authoritative deployment parity", asy
   assert.equal(calls[1][1].adapter, adapter);
   assert.equal(calls[1][1].lifecycleReader, input.lifecycleReader);
   assert.equal(calls[1][1].operatorAlert, input.operatorAlert);
-  assert.deepEqual(calls[2][1], { store: input.store, provider: runtime.notificationProvider, leaseMs: 300_000 });
+  assert.deepEqual(calls[2][1], {
+    store: input.store, provider: runtime.notificationProvider, leaseMs: 300_000,
+    operatorAlert: input.operatorAlert,
+  });
   assert.equal(calls[3][1].settlementService, settlementService);
   assert.equal(calls[3][1].authService, input.authService);
   assert.equal(calls[3][1].profileService, input.profileService);
