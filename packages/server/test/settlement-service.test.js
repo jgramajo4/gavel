@@ -63,8 +63,9 @@ function fakeHarness(options = {}) {
       if (options.hintError) throw options.hintError;
       return { publicId: value.publicId, state: "pending_settlement", updatedAt: new Date(0) };
     },
-    async getScannerState() { calls.push(["cursor"]); return { deploymentId: "deployment-1", deploymentBlock: "5",
-      nextRangeFrom: options.nextRangeFrom ?? "10", generation: "4", overlap: options.storeOverlap ?? 64 }; },
+    async getScannerState() { calls.push(["cursor"]); return { deploymentId: "deployment-1",
+      deploymentBlock: options.deploymentBlock ?? "5", nextRangeFrom: options.nextRangeFrom ?? "10",
+      generation: options.generation ?? "4", overlap: options.storeOverlap ?? 64 }; },
     async findSettlementQuote(id) { calls.push(["quote", id]); return id === QUOTE_ID ? state.q : null; },
     async recordScannerRange(value) {
       calls.push(["range", value]);
@@ -75,6 +76,7 @@ function fakeHarness(options = {}) {
     async listUnsettledSettlementObservations() { calls.push(["unsettled"]); return state.unsettled; },
     async claimSettlementLifecycle(value) {
       calls.push(["claimLifecycle", value]);
+      if (options.lifecycleClaimPending) return { attempt: false, pending: true, lifecycle: null };
       if (!state.lifecycleAttempted) { state.lifecycleAttempted = true; return { attempt: true, pending: false, lifecycle: null }; }
       return { attempt: false, pending: false, lifecycle: state.persistedLifecycle };
     },
@@ -520,4 +522,53 @@ test("24. scanner persists lifecycle-attempt state and never retries the read af
   delete options.settleError;
   assert.equal((await h.service.scanOnce()).accepted, 1);
   assert.equal(h.lifecycleCalls(), 1);
+});
+
+test("25. a lagging safe head drains a current-generation durable observation without scanning or moving the cursor", async () => {
+  const durable = candidate({ settledAt: new Date(101_000) });
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n,
+    unsettled: [{ quoteId: QUOTE_ID, settlement: durable }], candidates: [] });
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.equal(h.state.settlement.settlement, durable);
+  assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
+  assert.deepEqual(h.operatorAlerts, []);
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.equal(h.calls.filter(([name]) => name === "settle").length, 1);
+  assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
+});
+
+test("25a. durable observations settle while the safe head is before deployment", async () => {
+  const h = fakeHarness({ deploymentBlock: "5", nextRangeFrom: "100", safeHead: 4n,
+    unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
+});
+
+test("25b. a shallow head regression neither fabricates canonical coverage nor releases capacity", async () => {
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 35n,
+    unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
+  assert.deepEqual(h.operatorAlerts, []);
+});
+
+test("25c. a pending lifecycle claim remains retryable when the safe head is lagging", async () => {
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, lifecycleClaimPending: true,
+    unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.equal(h.calls.filter(([name]) => name === "claimLifecycle").length, 1);
+  assert.equal(h.calls.some(([name]) => name === "settle" || name === "scan" || name === "range"), false);
+  assert.equal(h.state.unsettled.length, 1);
+});
+
+test("25d. a lagging safe head with no durable observations is a no-op", async () => {
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, unsettled: [], candidates: [] });
+
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.equal(h.calls.some(([name]) => name === "scan" || name === "range" || name === "settle"), false);
 });

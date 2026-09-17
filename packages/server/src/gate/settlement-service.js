@@ -159,7 +159,10 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     const window = requested && Object.freeze({ fromBlock: requested.fromBlock,
       throughBlock: requested.throughBlock - requested.fromBlock + 1n > BigInt(adapter.maxBlockRange)
         ? requested.fromBlock + BigInt(adapter.maxBlockRange) - 1n : requested.throughBlock });
-    if (!window) return { scanned: 0, accepted, anomalies: 0 };
+    if (!window || window.throughBlock < window.fromBlock) {
+      accepted += await settleDurableObservations();
+      return { scanned: 0, accepted, anomalies: 0 };
+    }
     const scanned = await adapter.scanRange(window);
     const unique = new Map();
     for (const item of scanned.candidates || []) unique.set(`${item.txHash}:${item.logIndex}`, item);
