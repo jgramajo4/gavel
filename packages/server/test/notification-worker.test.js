@@ -14,10 +14,12 @@ function harness({ provider = async () => ({ providerOpaqueId: "opaque-1" }), at
   const calls = [];
   const rawJobs = attempts ?? [{ id: "notice-1", claimToken: "1", status: "pending", retryCount: 0,
     firstAttemptAt: new Date("2026-01-01T00:00:00Z"), dedupeDeadline: new Date("2026-01-02T00:00:00Z"), destinationRef: "private:1",
+    profileId: "profile-1",
     summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } }];
   const jobs = rawJobs.map((job) => ({
     firstAttemptAt: new Date("2026-01-01T00:00:00Z"),
     dedupeDeadline: new Date("2026-01-02T00:00:00Z"),
+    profileId: "profile-1",
     ...job,
   }));
   const store = {
@@ -42,8 +44,9 @@ test("21. notifier receives only trusted pre-rendered summary and an opaque priv
   const h = harness({ provider: async (value) => { received = value; return { providerOpaqueId: "opaque" }; } });
   await h.worker.runOnce();
   assert.deepEqual(received, { idempotencyKey: "notice-1", dedupeDeadline: new Date("2026-01-02T00:00:00Z"),
-    destinationRef: "private:1", summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
-  assert.deepEqual(Object.keys(received).sort(), ["dedupeDeadline", "destinationRef", "idempotencyKey", "summary"]);
+    profileId: "profile-1", destinationRef: "private:1",
+    summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
+  assert.deepEqual(Object.keys(received).sort(), ["dedupeDeadline", "destinationRef", "idempotencyKey", "profileId", "summary"]);
   assert.deepEqual(Object.keys(received.summary).sort(), ["subject", "text"]);
   assert.deepEqual(h.calls.find(([name]) => name === "claim")[1], { limit: 5, leaseMs: 300_000 });
   for (const forbidden of ["signer", "wallet", "shell", "fetch", "url", "agent", "authorization"]) {
@@ -100,7 +103,7 @@ test("27. lost claim ownership is not reported as a completed delivery", async (
     store: {
       async claimNotificationAttempts() { return [{ id: "notice-1", claimToken: "stale", retryCount: 0,
         firstAttemptAt: new Date("2026-01-01T00:00:00Z"), dedupeDeadline: new Date("2026-01-02T00:00:00Z"),
-        destinationRef: "private:1", summary: { subject: "s", text: "t" } }]; },
+        profileId: "profile-1", destinationRef: "private:1", summary: { subject: "s", text: "t" } }]; },
       async completeNotification() { return false; },
       async failNotification() { return false; },
       async reconcileNotification() { return false; },
@@ -117,8 +120,8 @@ test("28. a failure-recording error is isolated from later jobs", async () => {
   const worker = createNotificationWorker({
     store: {
       async claimNotificationAttempts() { return [
-        { id: "broken", claimToken: "1", retryCount: 0, destinationRef: "private:1", summary: { subject: "s", text: "t" } },
-        { id: "healthy", claimToken: "2", retryCount: 0, destinationRef: "private:2", summary: { subject: "s", text: "t" } },
+        { id: "broken", claimToken: "1", retryCount: 0, profileId: "profile-1", destinationRef: "private:1", summary: { subject: "s", text: "t" } },
+        { id: "healthy", claimToken: "2", retryCount: 0, profileId: "profile-1", destinationRef: "private:2", summary: { subject: "s", text: "t" } },
       ].map((job) => ({ firstAttemptAt: new Date("2026-01-01T00:00:00Z"),
         dedupeDeadline: new Date("2026-01-02T00:00:00Z"), ...job })); },
       async completeNotification(value) { completed.push(value.id); return true; },
@@ -181,7 +184,7 @@ test("elapsed time inside a claimed batch is rechecked before every provider cal
     return {};
   });
   const common = { retryCount: 0, firstAttemptAt: new Date("2025-12-31T00:00:11Z"),
-    dedupeDeadline: new Date("2026-01-01T00:00:11Z"), destinationRef: "private:1",
+    dedupeDeadline: new Date("2026-01-01T00:00:11Z"), profileId: "profile-1", destinationRef: "private:1",
     summary: { subject: "s", text: "t" } };
   const worker = createNotificationWorker({
     provider, clock: () => now, operatorAlert: async () => {},

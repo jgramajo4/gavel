@@ -1,10 +1,16 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createNotificationWorker } = require("../src/gate/notification-worker");
-const { createEmailNotifier, createAgentMailSender } = require("../src/gate/notifiers/email");
+const {
+  createEmailNotifier,
+  createAgentMailSender,
+  createDeliverySettingsCipher,
+  probeAgentMail,
+} = require("../src/gate/notifiers/email");
 
 const SUMMARY = { subject: "Paid pitch ready", text: "Open your private Gate inbox." };
 const DESTINATION = "voter@secret.example";
+const PROFILE_ID = "profile-1";
 
 function durableWorker(provider, attempts) {
   provider.idempotencyWindowMs ??= 24 * 60 * 60 * 1000;
@@ -14,6 +20,7 @@ function durableWorker(provider, attempts) {
       async claimNotificationAttempts() { return attempts.map((attempt) => ({
         firstAttemptAt: new Date("2026-01-01T00:00:00Z"),
         dedupeDeadline: new Date("2026-01-02T00:00:00Z"),
+        profileId: PROFILE_ID,
         ...attempt,
       })); },
       async completeNotification() { return true; },
@@ -254,6 +261,24 @@ test("slow destination resolution cannot begin an AgentMail fetch beyond the ded
   assert.equal(fetches, 0);
 });
 
+test("expired sends do not decrypt delivery settings", async () => {
+  let decryptions = 0;
+  let sends = 0;
+  const send = Object.assign(async () => { sends += 1; return { messageId: "unexpected" }; }, {
+    durableIdempotency: true, idempotencyWindowMs: 86_400_000, idempotencySafetyMs: 10_000,
+  });
+  const provider = createEmailNotifier({
+    clock: () => new Date("2026-01-02T00:00:00Z"),
+    resolveDestination: async () => { decryptions += 1; return DESTINATION; },
+    send,
+  });
+  await assert.rejects(provider({ idempotencyKey: "notice-1", destinationRef: "ciphertext", summary: SUMMARY,
+    dedupeDeadline: new Date("2026-01-02T00:00:05Z") }),
+  (error) => error.code === "PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED");
+  assert.equal(decryptions, 0);
+  assert.equal(sends, 0);
+});
+
 test("notification failure does not require a public accepted-state mutation", async () => {
   const publicState = { accepted: true };
   const provider = createEmailNotifier({
@@ -262,4 +287,102 @@ test("notification failure does not require a public accepted-state mutation", a
   });
   await assert.rejects(provider({ idempotencyKey: "n", destinationRef: "ref", summary: SUMMARY }));
   assert.equal(publicState.accepted, true);
+});
+
+test("delivery destination uses a versioned authenticated envelope and decrypts with the matching key id", async () => {
+  const encodedKey = `primary:${Buffer.alloc(32, 7).toString("base64url")}`;
+  const cipher = createDeliverySettingsCipher({ encodedKey });
+  const ciphertext = cipher.encryptDestination(PROFILE_ID, DESTINATION);
+  assert.match(ciphertext, /^gg1\.primary\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  assert.equal(cipher.resolveDestination(PROFILE_ID, ciphertext), DESTINATION);
+  assert.equal(ciphertext.includes(DESTINATION), false);
+});
+
+test("tampered delivery ciphertext and a wrong key fail privately before send", async () => {
+  const cipher = createDeliverySettingsCipher({ encodedKey: `primary:${Buffer.alloc(32, 7).toString("base64url")}` });
+  const ciphertext = cipher.encryptDestination(PROFILE_ID, DESTINATION);
+  const wrongKey = createDeliverySettingsCipher({ encodedKey: `primary:${Buffer.alloc(32, 8).toString("base64url")}` });
+  const samples = [wrongKey, ...[2, 3, 4].map((part) => ({
+    resolveDestination(profileId, value) {
+      const pieces = value.split("."); pieces[part] += "!";
+      return cipher.resolveDestination(profileId, pieces.join("."));
+    },
+  }))];
+  for (const sample of samples) {
+    assert.throws(() => sample.resolveDestination(PROFILE_ID, ciphertext), (error) => {
+      assert.equal(error.code, "DESTINATION_UNAVAILABLE");
+      assert.equal(String(error.message).includes(DESTINATION), false);
+      assert.equal(String(error.message).includes(ciphertext), false);
+      return true;
+    });
+  }
+});
+
+test("delivery envelopes are bound to immutable profile identity and require it", () => {
+  const cipher = createDeliverySettingsCipher({ encodedKey: `primary:${Buffer.alloc(32, 7).toString("base64url")}` });
+  assert.throws(() => cipher.encryptDestination(undefined, DESTINATION), /profile identity/i);
+  const ciphertext = cipher.encryptDestination(PROFILE_ID, DESTINATION);
+  assert.equal(cipher.resolveDestination(PROFILE_ID, ciphertext), DESTINATION);
+  assert.throws(() => cipher.resolveDestination("profile-2", ciphertext), (error) => {
+    assert.equal(error.code, "DESTINATION_UNAVAILABLE");
+    assert.equal(String(error.message).includes(PROFILE_ID), false);
+    assert.equal(String(error.message).includes("profile-2"), false);
+    assert.equal(String(error.message).includes(ciphertext), false);
+    return true;
+  });
+  assert.throws(() => cipher.resolveDestination(undefined, ciphertext), /destination unavailable/i);
+});
+
+test("worker carries profile identity through authenticated decryption before sender invocation", async () => {
+  const cipher = createDeliverySettingsCipher({
+    encodedKey: `primary:${Buffer.alloc(32, 7).toString("base64url")}`,
+    randomBytesImpl: () => Buffer.alloc(12, 3),
+  });
+  const envelope = cipher.encryptDestination(PROFILE_ID, DESTINATION);
+  const sent = [];
+  const send = Object.assign(async (value) => { sent.push(value); return { messageId: "opaque" }; }, {
+    durableIdempotency: true,
+    idempotencyWindowMs: 24 * 60 * 60 * 1000,
+    idempotencySafetyMs: 10_000,
+  });
+  const provider = createEmailNotifier({
+    resolveDestination: (destinationRef, profileId) => cipher.resolveDestination(profileId, destinationRef),
+    send, clock: () => new Date("2026-01-01T00:00:00Z"),
+  });
+  const worker = durableWorker(provider, [{
+    id: "notice-1", claimToken: "1", retryCount: 0, profileId: PROFILE_ID,
+    destinationRef: envelope, summary: SUMMARY,
+  }]);
+
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 1, failed: 0 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, DESTINATION);
+  assert.equal(JSON.stringify(sent).includes(envelope), false);
+});
+
+test("AgentMail non-send probe performs a bounded redacted inbox GET", async () => {
+  let captured;
+  let bodyReads = 0;
+  const passed = await probeAgentMail({
+    apiUrl: "https://api.agentmail.to", apiKey: "private-api-key", fromInbox: "gate@gavel.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return { ok: true, status: 200, async json() { bodyReads += 1; return { secret: true }; } };
+    },
+  });
+  assert.deepEqual(passed, { result: "pass", statusClass: "2xx" });
+  assert.equal(captured.url, "https://api.agentmail.to/v0/inboxes/gate%40gavel.example");
+  assert.equal(captured.options.method, "GET");
+  assert.equal(captured.options.redirect, "error");
+  assert.equal(typeof captured.options.signal?.aborted, "boolean");
+  assert.match(captured.options.headers.authorization, /^Bearer /);
+  assert.equal(bodyReads, 0);
+
+  const failed = await probeAgentMail({
+    apiKey: "private-api-key", fromInbox: "gate@gavel.example",
+    fetchImpl: async () => ({ ok: false, status: 401,
+      async text() { bodyReads += 1; return "private response"; } }),
+  });
+  assert.deepEqual(failed, { result: "fail", statusClass: "4xx" });
+  assert.equal(bodyReads, 0);
 });

@@ -331,6 +331,13 @@ test("10. canonical expected log settles without any submitted transaction hash"
   assert.equal(h.calls.some(([name]) => name === "hint"), false);
 });
 
+test("settlement acceptance omits email atomically when no encrypted delivery setting exists", async () => {
+  const h = fakeHarness({ quote: { destinationRef: null } });
+  assert.equal((await h.service.scanOnce()).accepted, 1);
+  assert.equal(h.state.settlement.notification, undefined);
+  assert.equal(h.state.settlement.inbox.id.length > 0, true);
+});
+
 test("11. scanner resumes durable cursor and rescans the default 64-block overlap", async () => {
   const h = fakeHarness({ candidates: [] });
   await h.service.scanOnce();

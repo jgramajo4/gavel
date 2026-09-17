@@ -389,6 +389,10 @@ test("settlement resolves public quoteId, verifies every event binding and scann
 test("PR6 memory store persists owner-bound settlement hints and exposes only private settlement material", async () => {
   let now = new Date("2026-01-01T00:01:00.000Z");
   const store = await setupStore({ clock: () => now });
+  const envelope = "gg1.primary.AAAAAAAAAAAAAAAA.ciphertext.AAAAAAAAAAAAAAAAAAAAAA";
+  await store.withProfileTransaction(ADDR.wallet1, async (transaction) => {
+    await transaction.setDeliverySetting("profile-1", envelope);
+  });
   const quoteId = hash("2");
   const issued = await store.issue(issuance("pr6-hint", { quoteId, submissionHash: hash("3") }));
   assert.equal(await store.recordSettlementHint({ publicId: issued.publicId, payer: ADDR.payer2,
@@ -401,11 +405,12 @@ test("PR6 memory store persists owner-bound settlement hints and exposes only pr
   }]);
   const privateQuote = await store.findSettlementQuote(quoteId);
   assert.deepEqual(Object.keys(privateQuote).sort(), ["attentionAmount", "baseChainId", "dao", "destinationRef",
-    "expiresAt", "feeAmount", "gavelRecipient", "issuanceLifecycle", "payer", "proposalId", "quoteId",
+    "expiresAt", "feeAmount", "gavelRecipient", "issuanceLifecycle", "payer", "profileId", "proposalId", "quoteId",
     "quoteVersion", "splitter", "submissionHash", "token", "trustedSummary", "voter"].sort());
   assert.deepEqual(privateQuote.trustedSummary,
     { subject: "Paid pitch ready", text: "Open your private Gate inbox." });
-  assert.equal(privateQuote.destinationRef, "profile:profile-1");
+  assert.equal(privateQuote.profileId, "profile-1");
+  assert.equal(privateQuote.destinationRef, envelope);
   now = new Date("2026-01-01T00:02:00.000Z");
   assert.equal(await store.resolveSettlementHint({ publicId: issued.publicId, txHash: hash("8"), state: "payment_required" }), true);
   assert.deepEqual(await store.listPendingSettlementHints({ limit: 10 }), []);
@@ -417,6 +422,16 @@ test("PR6 memory store persists owner-bound settlement hints and exposes only pr
   assert.equal(expired.updatedAt.toISOString(), issued.quote.expiresAt.toISOString());
   assert.equal((await store.getSubmission(issued.publicId)).state, "expired");
   assert.equal(await store.countLiabilities("profile-1"), 1000000n);
+});
+
+test("settlement lookup carries profile identity and has no plaintext destination fallback", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("no-delivery", { quoteId, submissionHash: hash("3") }));
+  const quote = await store.findSettlementQuote(quoteId);
+  assert.equal(quote.profileId, "profile-1");
+  assert.equal(quote.destinationRef, null);
+  assert.equal(JSON.stringify(quote).includes("profile:profile-1"), false);
 });
 
 test("PR6 memory store recovers durable latest exact observations and owns overlap config", async () => {
@@ -541,7 +556,8 @@ test("PR6 memory worker claims only due monitors, advances schedule durably, and
   assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "999", limit: 5 }), []);
   const jobs = await store.claimNotificationAttempts({ limit: 5, now });
   assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0,
-    firstAttemptAt: now, dedupeDeadline: new Date(now.valueOf() + 24 * 60 * 60 * 1000), destinationRef: "vault:ciphertext",
+    firstAttemptAt: now, dedupeDeadline: new Date(now.valueOf() + 24 * 60 * 60 * 1000), profileId: "profile-1",
+    destinationRef: "vault:ciphertext",
     summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } }]);
   assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
   const retryAt = new Date("2026-01-01T00:07:00.000Z");
@@ -742,8 +758,11 @@ test("settlement accepts only the frozen QuoteSettled event and enqueues pending
   const failedJob = settlementCommand("failed-job", quoteId, {
     settlement: { event: { quoteId, submissionHash: hash("6") } }, notification: { status: "failed" },
   });
-  await assert.rejects(store.settle(failedJob), /initially be pending/);
-  assert.equal((await store.counts()).inboxItems, 0);
+  assert.equal((await store.settle(failedJob)).settled, true);
+  assert.deepEqual(await store.counts(),
+    { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 0, monitors: 1 });
+  assert.equal(await store.settle(failedJob), false,
+    "replaying a settlement whose optional notification was omitted must be idempotent");
 });
 
 test("settlement lifecycle fields use one vocabulary and exact availability semantics", async () => {

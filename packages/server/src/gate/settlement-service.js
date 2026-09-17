@@ -140,8 +140,10 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
       const ids = settlementIdentity({ chainId: adapter.chainId, splitter: adapter.splitter, quoteId: quote.quoteId });
       const result = await store.settle({ quoteId: quote.quoteId, settlement,
         inbox: { id: ids.inboxId, ...inbox },
-        notification: { id: ids.notificationId, channel: "private", destinationRef: quote.destinationRef,
-          summary: quote.trustedSummary, status: "pending" },
+        ...(quote.destinationRef == null ? {} : { notification: {
+          id: ids.notificationId, channel: "private", destinationRef: quote.destinationRef,
+          summary: quote.trustedSummary, status: "pending",
+        } }),
         monitor: { id: ids.monitorId, nextCheckBlock: (BigInt(settlement.receiptBlock) + 1n).toString() } });
       if (result !== false) accepted += 1;
     }

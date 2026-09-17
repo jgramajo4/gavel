@@ -258,6 +258,13 @@ class PostgresGateStore {
             "profile transaction wallet mismatch");
           return this.#mutateProfile(input, client);
         },
+        setDeliverySetting: async (profileId, ciphertext) => {
+          invariant(typeof profileId === "string" && profileId.length > 0, "delivery setting profile is required");
+          invariant(typeof ciphertext === "string" && ciphertext.length <= 1024
+            && /^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(ciphertext),
+          "delivery setting must be a canonical encrypted envelope");
+          await client.query("SELECT gate.set_delivery_setting($1,$2,$3)", [profileId, canonicalWallet, ciphertext]);
+        },
       }));
     });
   }
@@ -715,7 +722,7 @@ class PostgresGateStore {
       q.fee_amount::text AS "feeAmount",d.gavel_recipient AS "gavelRecipient",q.token,s.submission_hash AS "submissionHash",
       q.quote_version AS "quoteVersion",q.base_chain_id::text AS "baseChainId",q.splitter,q.expires_at AS "expiresAt",
       ps.normalized_eligibility AS "issuanceLifecycle",ps.dao,ps.proposal_id::text AS "proposalId",
-      COALESCE(ds.ciphertext,'profile:'||s.profile_id) AS "destinationRef",
+      s.profile_id AS "profileId",ds.ciphertext AS "destinationRef",
       jsonb_build_object('subject','Paid pitch ready','text','Open your private Gate inbox.') AS "trustedSummary"
       FROM gate.quotes q JOIN gate.submissions s ON s.id=q.submission_id
       JOIN gate.proposal_snapshots ps ON ps.id=s.issuance_snapshot_id
@@ -856,7 +863,7 @@ class PostgresGateStore {
         && e.confirmations === 1,
       "canonical one-confirmation scanner evidence is required");
     invariant(e.quoteId === publicQuoteId, "settlement quoteId does not match public quote");
-    if (!notification?.id || notification.status !== "pending") throw new TypeError("notification must start pending");
+
     if (!inbox?.id || typeof inbox.lifecycleChanged !== "boolean" || typeof inbox.currentLifecycleUnavailable !== "boolean") {
       throw new TypeError("inbox lifecycle flags must be boolean");
     }
@@ -900,10 +907,11 @@ class PostgresGateStore {
           && quote.settlement_event_quote_id === e.quoteId;
         invariant(evidenceMatches, "conflicting settlement evidence");
         const related = (await client.query(`SELECT i.id AS inbox_id,n.id AS notification_id,m.id AS monitor_id
-          FROM gate.inbox_items i JOIN gate.notification_attempts n ON n.inbox_id=i.id
+          FROM gate.inbox_items i LEFT JOIN gate.notification_attempts n ON n.inbox_id=i.id
           JOIN gate.settlement_reorg_monitors m ON m.quote_id=$2 WHERE i.submission_id=$1`,
         [quote.submission_internal_id, quote.id])).rows[0];
-        invariant(related && related.inbox_id === inbox.id && related.notification_id === notification.id
+        invariant(related && related.inbox_id === inbox.id
+          && (related.notification_id == null || notification == null || related.notification_id === notification.id)
           && related.monitor_id === monitor.id, "conflicting settlement side effects");
         return false;
       }
@@ -925,10 +933,19 @@ class PostgresGateStore {
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING inbox_created_at AS "inboxCreatedAt"`, [inbox.id, quote.submission_internal_id,
         quote.profile_id, inbox.issuanceLifecycle, inbox.currentLifecycle, inbox.lifecycleChanged === true,
         inbox.currentLifecycleUnavailable === true, inbox.privateUnavailabilityReason ?? null])).rows[0];
-      await client.query(`INSERT INTO gate.notification_attempts
-        (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,clock_timestamp())`,
-      [notification.id, inbox.id, notification.channel, notification.destinationRef,
-        JSON.stringify(notification.summary ?? { subject: "Paid pitch ready", text: "Open your private Gate inbox." }), notification.status]);
+      if (notification) {
+        await client.query("SAVEPOINT optional_notification");
+        try {
+          await client.query(`INSERT INTO gate.notification_attempts
+            (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,clock_timestamp())`,
+          [notification.id, inbox.id, notification.channel, notification.destinationRef,
+            JSON.stringify(notification.summary ?? { subject: "Paid pitch ready", text: "Open your private Gate inbox." }), notification.status]);
+          await client.query("RELEASE SAVEPOINT optional_notification");
+        } catch {
+          await client.query("ROLLBACK TO SAVEPOINT optional_notification");
+          await client.query("RELEASE SAVEPOINT optional_notification");
+        }
+      }
       await client.query(`INSERT INTO gate.settlement_reorg_monitors(id,chain_id,splitter,quote_id,receipt_block,receipt_block_hash,tx_hash,log_index,next_check_block)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(chain_id,splitter,quote_id) DO NOTHING`,
       [monitor.id, e.sourceChainId, e.splitter, quote.id, e.receiptBlock, e.receiptBlockHash, e.txHash, e.logIndex, nextCheckBlock]);
@@ -975,7 +992,7 @@ class PostgresGateStore {
   async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
-    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","destinationRef",summary
+    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","profileId","destinationRef",summary
       FROM gate.claim_notification_attempts($1,$2,$3)`,
     [limit, this.notificationRetryLimit, leaseMs])).rows;
     return clone(rows);

@@ -21,7 +21,17 @@ const tokenReads = new Interface([
   "function DOMAIN_SEPARATOR() view returns (bytes32)",
 ]);
 const durableProvider = () => Object.assign(() => {}, { durableIdempotency: true });
+const ENCRYPTION_KEY = `primary:${Buffer.alloc(32, 7).toString("base64url")}`;
+const notifierEnv = (overrides = {}) => ({
+  GAVEL_GATE_NOTIFIER_MODE: "agentmail",
+  GAVEL_GATE_ENCRYPTION_KEY: ENCRYPTION_KEY,
+  AGENTMAIL_API_KEY: "agentmail-api-key-placeholder",
+  AGENTMAIL_FROM_INBOX: "gate@gavel.example",
+  AGENTMAIL_API_URL: "https://api.agentmail.to",
+  ...overrides,
+});
 const productionEnv = (overrides = {}) => ({
+  GAVEL_GATE_NOTIFIER_MODE: "disabled",
   GAVEL_GATE_ENVIRONMENT: "production",
   GAVEL_GATE_BASE_CHAIN_ID: "8453",
   GAVEL_GATE_BASE_USDC: CANONICAL_BASE_USDC,
@@ -53,12 +63,19 @@ function services() {
     domainSeparator, tokenName: "USD Coin", tokenVersion: "2", tokenDomainSeparator };
   return {
     authService: {},
-    profileService: {},
+    profileService: { withDestinationEncryption() { return this; } },
     submissionService: { runtimeIdentity: {
       deploymentId: deployment.id, chainId: deployment.chainId, splitter: deployment.splitter,
       token: deployment.token, codeHash: deployment.contractCodeHash, quoteSigner: deployment.signer,
     } },
-    store: { async markExpired() {}, async getDeployment() { return deployment; } },
+    store: {
+      async markExpired() {},
+      async getDeployment() { return deployment; },
+      async claimNotificationAttempts() { return []; },
+      async completeNotification() { return true; },
+      async failNotification() { return true; },
+      async reconcileNotification() { return true; },
+    },
     baseClient: {
       attestation,
       async getChainId() { return "8453"; },
@@ -82,6 +99,76 @@ test("the server package exports the canonical runtime composition", () => {
   const runtime = require("..");
   assert.equal(typeof runtime.createGateServerRuntime, "function");
   assert.equal(typeof runtime.settlementRuntimeConfigFromEnv, "function");
+});
+
+test("notifier configuration has explicit disabled and AgentMail modes and rejects partial configuration", () => {
+  const { notifierRuntimeConfigFromEnv } = loadRuntime();
+  assert.throws(() => notifierRuntimeConfigFromEnv({}), /GAVEL_GATE_NOTIFIER_MODE.*required/i);
+  assert.throws(() => notifierRuntimeConfigFromEnv({ GAVEL_GATE_NOTIFIER_MODE: "" }), /GAVEL_GATE_NOTIFIER_MODE.*required/i);
+  assert.deepEqual(notifierRuntimeConfigFromEnv({ GAVEL_GATE_NOTIFIER_MODE: "disabled" }), { mode: "disabled" });
+  assert.deepEqual(notifierRuntimeConfigFromEnv(notifierEnv()), {
+    mode: "agentmail",
+    encryptionKey: ENCRYPTION_KEY,
+    apiKey: "agentmail-api-key-placeholder",
+    fromInbox: "gate@gavel.example",
+    apiUrl: "https://api.agentmail.to",
+  });
+  for (const [name, env] of [
+    ["mode", { AGENTMAIL_API_KEY: "set" }],
+    ["api key", notifierEnv({ AGENTMAIL_API_KEY: "" })],
+    ["inbox", notifierEnv({ AGENTMAIL_FROM_INBOX: "" })],
+    ["encryption key", notifierEnv({ GAVEL_GATE_ENCRYPTION_KEY: "" })],
+  ]) assert.throws(() => notifierRuntimeConfigFromEnv(env), /notifier|AgentMail|encryption/i, name);
+});
+
+test("both notifier modes reject injected providers and disabled rejects every notifier secret", async () => {
+  const { createGateServerRuntime, notifierRuntimeConfigFromEnv } = loadRuntime();
+  const injected = durableProvider();
+  await assert.rejects(createGateServerRuntime({ ...services(), env: productionEnv(), notificationProvider: injected }),
+    /disabled notifier mode cannot include a notification provider/i);
+  await assert.rejects(createGateServerRuntime({ ...services(), env: { ...productionEnv(), ...notifierEnv() }, notificationProvider: injected }),
+    /AgentMail notifier mode cannot include an injected notification provider/i);
+  for (const [name, value] of [
+    ["GAVEL_GATE_ENCRYPTION_KEY", ENCRYPTION_KEY],
+    ["AGENTMAIL_API_KEY", "configured"],
+    ["AGENTMAIL_FROM_INBOX", "gate@gavel.example"],
+    ["AGENTMAIL_API_URL", "https://api.agentmail.to"],
+  ]) assert.throws(() => notifierRuntimeConfigFromEnv({ GAVEL_GATE_NOTIFIER_MODE: "disabled", [name]: value }),
+    /disabled notifier mode cannot include/i, name);
+});
+
+test("AgentMail startup validates exact key encoding, sender inbox syntax, and allowlisted HTTPS origins", () => {
+  const { notifierRuntimeConfigFromEnv } = loadRuntime();
+  for (const apiUrl of [
+    "https://api.agentmail.to", "https://x402.api.agentmail.to",
+    "https://mpp.api.agentmail.to", "https://api.agentmail.eu",
+  ]) assert.equal(notifierRuntimeConfigFromEnv(notifierEnv({ AGENTMAIL_API_URL: apiUrl })).apiUrl, apiUrl);
+  for (const apiUrl of ["http://api.agentmail.to", "https://agentmail.to", "https://api.agentmail.to/v0", "https://api.agentmail.to?x=1"])
+    assert.throws(() => notifierRuntimeConfigFromEnv(notifierEnv({ AGENTMAIL_API_URL: apiUrl })), /allowlisted HTTPS origin/i);
+  for (const encryptionKey of [Buffer.alloc(32).toString("hex"), `primary:${Buffer.alloc(31).toString("base64url")}`,
+    `primary:${Buffer.alloc(33).toString("base64url")}`, `bad key:${Buffer.alloc(32).toString("base64url")}`])
+    assert.throws(() => notifierRuntimeConfigFromEnv(notifierEnv({ GAVEL_GATE_ENCRYPTION_KEY: encryptionKey })),
+      /base64url-encoded-32-byte-key/i);
+  for (const fromInbox of ["not-an-inbox", "a@bad..example", "a@-bad.example", "a bad@example.com"])
+    assert.throws(() => notifierRuntimeConfigFromEnv(notifierEnv({ AGENTMAIL_FROM_INBOX: fromInbox })), /valid inbox address/i);
+});
+
+test("AgentMail probe command emits only pass or fail and status class", async () => {
+  const { runAgentMailProbe } = require("../bin/agentmail-probe");
+  const output = [];
+  let received;
+  const exitCode = await runAgentMailProbe({
+    env: notifierEnv(),
+    probe: async (options) => { received = options; return { result: "pass", statusClass: "2xx" }; },
+    stdout: { write(value) { output.push(String(value)); } },
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(received, {
+    apiUrl: "https://api.agentmail.to", apiKey: "agentmail-api-key-placeholder", fromInbox: "gate@gavel.example",
+  });
+  assert.deepEqual(output, ['{"result":"pass","statusClass":"2xx"}\n']);
+  assert.equal(output.join("").includes("agentmail-api-key-placeholder"), false);
+  assert.equal(output.join("").includes("gate@gavel.example"), false);
 });
 
 test("production settlement config requires exact Base mainnet and canonical native USDC", () => {
@@ -276,11 +363,13 @@ test("canonical server composes only after authoritative deployment parity", asy
   input.store.markExpired = async () => { calls.push("expire"); };
   const runtime = await createGateServerRuntime({
     ...input,
-    env: productionEnv(),
-    notificationProvider: durableProvider(),
+    env: { ...productionEnv(), ...notifierEnv() },
     factories: {
       createBaseSettlementAdapter(options) { calls.push(["adapter", options]); return adapter; },
       createSettlementService(options) { calls.push(["service", options]); return settlementService; },
+      createDeliverySettingsCipher() { return { encryptDestination: async () => "gg1.primary.nonce.cipher.tag", resolveDestination: async () => "private@example.com" }; },
+      createAgentMailSender() { return Object.assign(async () => ({}), { durableIdempotency: true }); },
+      createEmailNotifier() { return durableProvider(); },
       createNotificationWorker(options) { calls.push(["worker", options]); return notificationWorker; },
       createGateHttpServer(options) { calls.push(["http", options]); return server; },
     },
@@ -296,24 +385,42 @@ test("canonical server composes only after authoritative deployment parity", asy
   assert.equal(calls[1][1].adapter, adapter);
   assert.equal(calls[1][1].lifecycleReader, input.lifecycleReader);
   assert.equal(calls[1][1].operatorAlert, input.operatorAlert);
-  assert.deepEqual(calls[2][1], {
-    store: input.store, provider: runtime.notificationProvider, leaseMs: 300_000,
-    operatorAlert: input.operatorAlert,
-  });
-  assert.equal(calls[3][1].settlementService, settlementService);
-  assert.equal(calls[3][1].authService, input.authService);
-  assert.equal(calls[3][1].profileService, input.profileService);
-  assert.equal(calls[3][1].submissionService, input.submissionService);
+  assert.equal(calls[2][1].settlementService, settlementService);
+  assert.equal(calls[2][1].authService, input.authService);
+  assert.equal(calls[2][1].profileService, input.profileService);
+  assert.equal(calls[2][1].submissionService, input.submissionService);
 
   await runtime.runOnce();
-  assert.deepEqual(calls.slice(-5).sort(), ["expire", "monitor", "notify", "reconcile", "scan"]);
+  assert.deepEqual(calls.slice(-4).sort(), ["expire", "monitor", "reconcile", "scan"]);
+});
+
+test("valid AgentMail env pins notifier security components against factory replacement", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const input = services();
+  const calls = [];
+  const runtime = await createGateServerRuntime({
+    ...input,
+    env: { ...productionEnv(), ...notifierEnv() },
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return { scanOnce() {}, reconcileSubmitted() {}, monitorOnce() {} }; },
+      createDeliverySettingsCipher() { calls.push("cipher"); throw new Error("cipher override used"); },
+      createAgentMailSender() { calls.push("sender"); throw new Error("sender override used"); },
+      createEmailNotifier() { calls.push("email"); throw new Error("notifier override used"); },
+      createNotificationWorker() { calls.push("worker"); throw new Error("worker override used"); },
+      createGateHttpServer() { return {}; },
+    },
+  });
+  assert.deepEqual(calls, []);
+  assert.equal(runtime.notificationProvider.durableIdempotency, true);
+  assert.equal(typeof runtime.notificationWorker.runOnce, "function");
 });
 
 test("an unconfigured runtime exposes neither settlement nor quote issuance", async () => {
   const { createGateServerRuntime } = loadRuntime();
   let httpOptions;
   const runtime = await createGateServerRuntime({
-    ...services(), env: {},
+    ...services(), env: { GAVEL_GATE_NOTIFIER_MODE: "disabled" },
     factories: {
       createBaseSettlementAdapter() { throw new Error("adapter must stay disabled"); },
       createSettlementService() { throw new Error("service must stay disabled"); },
@@ -464,11 +571,50 @@ test("configured settlement rejects each mismatched onchain deployment attestati
   }
 });
 
+test("AgentMail runtime binds profile writes and notifier reads to the exact same cipher", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const input = services();
+
+  const boundProfileService = { updateProfile() {}, listPublicProfiles() {}, getPublicProfile() {} };
+  let boundWith;
+  input.profileService = {
+    withDestinationEncryption(value) { boundWith = value; return boundProfileService; },
+  };
+  let httpOptions;
+  await createGateServerRuntime({
+    ...input,
+    env: { ...productionEnv(), ...notifierEnv() },
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return { scanOnce() {}, reconcileSubmitted() {}, monitorOnce() {} }; },
+      createGateHttpServer(options) { httpOptions = options; return {}; },
+    },
+  });
+  assert.equal(typeof boundWith, "function");
+  assert.match(boundWith("profile-1", "private@example.com"), /^gg1\.primary\./);
+  assert.equal(httpOptions.profileService, boundProfileService);
+});
+
+test("AgentMail runtime fails closed when profile writes cannot bind the runtime cipher", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const input = services();
+  input.profileService = {};
+  await assert.rejects(createGateServerRuntime({
+    ...input,
+    env: { ...productionEnv(), ...notifierEnv() },
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return { scanOnce() {}, reconcileSubmitted() {}, monitorOnce() {} }; },
+      createGateHttpServer() { return {}; },
+    },
+  }), /profile service.*encryption/i);
+});
+
 test("start and stop own one serialized interval per composed job", async () => {
   const { createGateServerRuntime } = loadRuntime();
   const scheduled = []; const cleared = [];
   const runtime = await createGateServerRuntime({
-    ...services(), env: productionEnv(), notificationProvider: durableProvider(),
+    ...services(), env: { ...productionEnv(), ...notifierEnv() },
     scheduler: {
       setInterval(callback, delay) { scheduled.push({ callback, delay }); return scheduled.length; },
       clearInterval(id) { cleared.push(id); },
@@ -476,7 +622,6 @@ test("start and stop own one serialized interval per composed job", async () => 
     factories: {
       createBaseSettlementAdapter() { return {}; },
       createSettlementService() { return { scanOnce: async () => {}, reconcileSubmitted: async () => {}, monitorOnce: async () => {} }; },
-      createNotificationWorker() { return { runOnce: async () => {} }; },
       createGateHttpServer() { return {}; },
     },
   });

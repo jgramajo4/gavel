@@ -41,6 +41,11 @@ test("Gate migration declares every private persistence table and immutable rela
   assert.match(sql, /clock_timestamp\(\)/i);
   assert.match(sql, /payer\s*=\s*signed_sender/i);
   assert.match(sql, /protect_immutable_issuance/i);
+  assert.match(sql, /delivery_settings_envelope_check[\s\S]*length\(ciphertext\)\s*<=\s*1024/i);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.set_delivery_setting\(p_profile_id text,p_wallet text,p_ciphertext text\)[\s\S]*SECURITY DEFINER SET search_path=pg_catalog,gate/i);
+  assert.match(sql, /set_delivery_setting[\s\S]*p\.id=p_profile_id[\s\S]*p\.wallet=p_wallet/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.set_delivery_setting\(text,text,text\) TO gavel_gate/i);
+  assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*gate\.delivery_settings[^;]*TO gavel_gate/i);
   assert.doesNotMatch(sql, /GRANT[^;]*ON\s+gate\.[^;]*TO\s+(?:gavel_api|gavel_indexer)/i);
 });
 

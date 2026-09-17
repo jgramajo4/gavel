@@ -221,6 +221,33 @@ test("profile mutation preserves omitted wallet kind and marks unauthoritative d
   assert.equal(downgrade.values[11], false);
 });
 
+test("Postgres profile transaction writes delivery settings only through a parameterized least-privilege function", async () => {
+  const calls = [];
+  const client = { async query(sql, values) {
+    calls.push({ sql: String(sql), values });
+    if (/FROM gate\.profiles WHERE wallet/.test(sql)) return { rows: [{ id: "p", wallet: A }] };
+    if (/gate\.set_delivery_setting/.test(sql)) return { rows: [{ set_delivery_setting: null }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }, release() {} };
+  const store = new PostgresGateStore({ pool: { connect: async () => client } });
+  const envelope = "gg1.primary.AAAAAAAAAAAAAAAA.ciphertext.AAAAAAAAAAAAAAAAAAAAAA";
+  await store.withProfileTransaction(A, async (transaction) => {
+    await transaction.setDeliverySetting("p", envelope);
+  });
+  const write = calls.find((call) => /gate\.set_delivery_setting/.test(call.sql));
+  assert.deepEqual(write.values, ["p", A, envelope]);
+  assert.doesNotMatch(write.sql, /INSERT INTO|UPDATE gate\.delivery_settings/i);
+});
+
+test("settlement quote SQL returns bound profile identity and never synthesizes a plaintext fallback", async () => {
+  const calls = [];
+  const store = new PostgresGateStore({ pool: { async query(sql, values) { calls.push({ sql: String(sql), values }); return { rows: [] }; } } });
+  assert.equal(await store.findSettlementQuote(H("1")), null);
+  assert.match(calls[0].sql, /s\.profile_id AS "profileId"/i);
+  assert.match(calls[0].sql, /ds\.ciphertext AS "destinationRef"/i);
+  assert.doesNotMatch(calls[0].sql, /COALESCE|profile:/i);
+});
+
 test("profile listing enforces a bounded stable SQL page", async () => {
   const calls = [];
   const store = new PostgresGateStore({ pool: { async query(sql, values) { calls.push({ sql: String(sql), values }); return { rows: [] }; } } });
@@ -397,11 +424,17 @@ test("settlement accepts exactly the frozen eight event fields and notification 
   for (const mutate of [
     (x) => { delete x.settlement.event.gavelRecipient; },
     (x) => { x.settlement.event.quoteVersion = 1; },
-    (x) => { x.notification.status = "sent"; },
   ]) {
     const invalid = structuredClone(base); mutate(invalid);
     await assert.rejects(store.settle(invalid), /exactly|pending/i);
   }
+});
+
+test("PostgreSQL settlement isolates optional notification failures behind a savepoint", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/gate/store.js"), "utf8");
+  const migration = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  assert.match(source, /SAVEPOINT optional_notification[\s\S]*ROLLBACK TO SAVEPOINT optional_notification/);
+  assert.match(migration, /qstate='settled'[\s\S]*notice_count NOT BETWEEN 0 AND 1/);
 });
 
 test("issuance and inbox lifecycles enforce canonical ACTIVE to VOTING and exact unavailable/change semantics", async () => {
@@ -688,7 +721,7 @@ test("PR6 Postgres store exposes durable settlement and worker queue methods", a
   for (const method of ["recordSettlementHint", "resolveSettlementHint", "claimSettlementLifecycle", "recordSettlementLifecycle",
     "advanceSettlementMonitor", "completeNotification", "failNotification", "reconcileNotification"]) assert.equal(typeof store[method], "function", method);
   const issuedSql = seen.map(({ sql }) => sql).join("\n");
-  assert.match(issuedSql, /SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","destinationRef",summary[\s\S]*gate\.claim_notification_attempts/);
+  assert.match(issuedSql, /SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","profileId","destinationRef",summary[\s\S]*gate\.claim_notification_attempts/);
   const migrationSql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   assert.match(migrationSql, /claim_notification_attempts[\s\S]*SKIP LOCKED/);
   assert.match(migrationSql, /GRANT EXECUTE ON FUNCTION gate\.claim_notification_attempts/);

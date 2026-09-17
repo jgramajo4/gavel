@@ -137,7 +137,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
     await pool.query(migration);
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v3-agentmail-idempotency",
+      migration_checksum: "sha256:gate-001-v3-bound-delivery-settings",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -378,14 +378,20 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
       FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [settledQuoteId])).rows[0],
     { quote_state: "quoted", quote_reservation_state: "reserved", reservation_state: "active" });
-    const rollbackCommand = structuredClone(settleCommand);
-    rollbackCommand.notification.summary = { subject: "missing-text" };
-    await assert.rejects(store.settle(rollbackCommand));
+    const isolatedNotificationFailure = structuredClone(settleCommand);
+    isolatedNotificationFailure.notification.summary = { subject: "missing-text" };
+    assert.equal((await store.settle(isolatedNotificationFailure)).settled, true);
     assert.deepEqual(await store.counts(),
-      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0 });
+      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 0, monitors: 1 });
+    assert.equal(await store.settle(isolatedNotificationFailure), false,
+      "replaying a settlement whose optional notification insert failed must be idempotent");
+    await pool.query(`INSERT INTO gate.notification_attempts
+      (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at)
+      VALUES($1,$2,$3,$4,$5::jsonb,'pending',clock_timestamp())`,
+    [settleCommand.notification.id, settleCommand.inbox.id, settleCommand.notification.channel,
+      settleCommand.notification.destinationRef, JSON.stringify({ subject: "Paid pitch ready", text: "Open your private Gate inbox." })]);
     const concurrentSettlement = await Promise.all([store.settle(settleCommand), store.settle(settleCommand)]);
-    assert.equal(concurrentSettlement.filter((result) => result?.settled === true).length, 1);
-    assert.equal(concurrentSettlement.filter((result) => result === false).length, 1);
+    assert.deepEqual(concurrentSettlement, [false, false]);
     assert.deepEqual(await store.counts(),
       { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 1, monitors: 1 });
     await assert.rejects(store.settle({ ...settleCommand, settlement: { ...settlement, txHash: hash("e") } }), /conflicting/);

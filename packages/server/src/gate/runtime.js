@@ -4,12 +4,25 @@ const { Interface, TypedDataEncoder, keccak256 } = require("ethers");
 const { createBaseSettlementAdapter } = require("./base-settlement-adapter");
 const { createGateHttpServer } = require("./http");
 const { createNotificationWorker } = require("./notification-worker");
+const { createAgentMailSender, createDeliverySettingsCipher, createEmailNotifier } = require("./notifiers/email");
 const { createSettlementService } = require("./settlement-service");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const DECIMAL = /^[1-9][0-9]*$/;
 const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const AGENTMAIL_ORIGINS = new Set([
+  "https://api.agentmail.to",
+  "https://x402.api.agentmail.to",
+  "https://mpp.api.agentmail.to",
+  "https://api.agentmail.eu",
+]);
+const INBOX_LOCAL = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/;
+const INBOX_DOMAIN_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+const NOTIFIER_CONFIG_KEYS = Object.freeze([
+  "GAVEL_GATE_NOTIFIER_MODE", "GAVEL_GATE_ENCRYPTION_KEY", "AGENTMAIL_API_KEY",
+  "AGENTMAIL_FROM_INBOX", "AGENTMAIL_API_URL",
+]);
 const SETTLEMENT_CONFIG_KEYS = Object.freeze([
   "GAVEL_GATE_ENVIRONMENT",
   "GAVEL_GATE_SPLITTER",
@@ -36,8 +49,50 @@ function positive(value, name, fallback) {
 }
 
 function validAddress(value) { return typeof value === "string" && ADDRESS.test(value); }
+function validInboxAddress(value) {
+  if (typeof value !== "string" || value.length > 254) return false;
+  const parts = value.split("@");
+  if (parts.length !== 2) return false;
+  const [local, domain] = parts;
+  return local.length > 0 && local.length <= 64 && INBOX_LOCAL.test(local)
+    && !local.startsWith(".") && !local.endsWith(".") && !local.includes("..")
+    && domain.length > 0 && domain.length <= 253
+    && domain.split(".").every((label) => INBOX_DOMAIN_LABEL.test(label));
+}
 function sameAddress(actual, expected) {
   return validAddress(actual) && validAddress(expected) && actual.toLowerCase() === expected.toLowerCase();
+}
+
+function notifierRuntimeConfigFromEnv(env = process.env) {
+  const mode = env.GAVEL_GATE_NOTIFIER_MODE;
+  if (typeof mode !== "string" || mode === "") {
+    throw new TypeError("GAVEL_GATE_NOTIFIER_MODE is required and must be exactly disabled or agentmail");
+  }
+  if (mode !== "disabled" && mode !== "agentmail") {
+    throw new TypeError("GAVEL_GATE_NOTIFIER_MODE must be exactly disabled or agentmail");
+  }
+  if (mode === "disabled") {
+    const unexpected = NOTIFIER_CONFIG_KEYS.slice(1)
+      .some((name) => typeof env[name] === "string" && env[name] !== "");
+    if (unexpected) throw new TypeError("disabled notifier mode cannot include AgentMail or encryption configuration");
+    return Object.freeze({ mode });
+  }
+  if (typeof env.AGENTMAIL_API_KEY !== "string" || env.AGENTMAIL_API_KEY === "") {
+    throw new TypeError("AGENTMAIL_API_KEY is required for AgentMail notifier mode");
+  }
+  if (!validInboxAddress(env.AGENTMAIL_FROM_INBOX)) {
+    throw new TypeError("AGENTMAIL_FROM_INBOX must be a valid inbox address");
+  }
+  createDeliverySettingsCipher({ encodedKey: env.GAVEL_GATE_ENCRYPTION_KEY });
+  const apiUrl = env.AGENTMAIL_API_URL || "https://api.agentmail.to";
+  let parsed;
+  try { parsed = new URL(apiUrl); } catch { throw new TypeError("AGENTMAIL_API_URL must be an allowlisted HTTPS origin"); }
+  if (!AGENTMAIL_ORIGINS.has(parsed.origin) || parsed.href !== `${parsed.origin}/`
+      || parsed.username || parsed.password) {
+    throw new TypeError("AGENTMAIL_API_URL must be an allowlisted HTTPS origin");
+  }
+  return Object.freeze({ mode, encryptionKey: env.GAVEL_GATE_ENCRYPTION_KEY,
+    apiKey: env.AGENTMAIL_API_KEY, fromInbox: env.AGENTMAIL_FROM_INBOX, apiUrl: parsed.origin });
 }
 
 function authoritativeDeploymentMatches(deployment, config) {
@@ -214,11 +269,21 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
 }
 
 async function createGateServerRuntime(options = {}) {
-  const config = settlementRuntimeConfigFromEnv(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  const config = settlementRuntimeConfigFromEnv(env);
+  const notifierConfig = notifierRuntimeConfigFromEnv(env);
+  if (notifierConfig.mode === "agentmail" && !config) {
+    throw new TypeError("AgentMail notifier mode requires configured settlement runtime");
+  }
+  if (notifierConfig.mode === "disabled" && options.notificationProvider !== undefined) {
+    throw new TypeError("disabled notifier mode cannot include a notification provider");
+  }
+  if (notifierConfig.mode === "agentmail" && options.notificationProvider !== undefined) {
+    throw new TypeError("AgentMail notifier mode cannot include an injected notification provider");
+  }
   const factories = {
     createBaseSettlementAdapter,
     createSettlementService,
-    createNotificationWorker,
     createGateHttpServer,
     ...options.factories,
   };
@@ -233,6 +298,8 @@ async function createGateServerRuntime(options = {}) {
   let adapter = null;
   let settlementService = null;
   let notificationWorker = null;
+  let notificationProvider = options.notificationProvider;
+  let profileService = options.profileService;
   const jobs = [];
 
   if (config) {
@@ -243,7 +310,7 @@ async function createGateServerRuntime(options = {}) {
     if (typeof options.operatorAlert !== "function") throw new TypeError("operatorAlert is required for configured settlement");
     if (typeof options.store.getDeployment !== "function") throw new TypeError("store.getDeployment is required for configured settlement");
     if (typeof options.baseClient.getChainId !== "function") throw new TypeError("baseClient.getChainId is required for configured settlement");
-    if (options.notificationProvider !== undefined && typeof options.notificationProvider !== "function") {
+    if (notificationProvider !== undefined && typeof notificationProvider !== "function") {
       throw new TypeError("notificationProvider must be a function");
     }
     const deployment = await boundedRpc(
@@ -281,9 +348,43 @@ async function createGateServerRuntime(options = {}) {
     });
     jobs.push(() => options.store.markExpired(), settlementService.scanOnce,
       settlementService.reconcileSubmitted, settlementService.monitorOnce);
-    if (options.notificationProvider) {
-      notificationWorker = factories.createNotificationWorker({
-        store: options.store, provider: options.notificationProvider, leaseMs: config.notificationLeaseMs,
+    if (notifierConfig.mode === "agentmail") {
+      const { encryptDestination, resolveDestination: decryptDestination } = createDeliverySettingsCipher({
+        encodedKey: notifierConfig.encryptionKey,
+      });
+      if (typeof encryptDestination !== "function" || typeof decryptDestination !== "function"
+          || typeof profileService?.withDestinationEncryption !== "function") {
+        throw new TypeError("profile service destination encryption binding is required in AgentMail mode");
+      }
+      const probeProfileId = "gavel-gate-notifier-startup-probe";
+      const probeDestination = "notifier-probe@example.invalid";
+      const probeEnvelope = await encryptDestination(probeProfileId, probeDestination);
+      if (await decryptDestination(probeProfileId, probeEnvelope) !== probeDestination) {
+        throw new TypeError("delivery settings cipher startup round trip failed");
+      }
+      profileService = profileService.withDestinationEncryption(encryptDestination);
+      const send = createAgentMailSender({
+        apiUrl: notifierConfig.apiUrl,
+        apiKey: notifierConfig.apiKey,
+        fromInbox: notifierConfig.fromInbox,
+      });
+      const sink = options.notifierLogger;
+      const logger = Object.freeze({
+        error(message) {
+          const redacted = /^source=email_notifier code=[A-Z0-9_]{1,64}$/.test(String(message))
+            ? String(message) : "source=email_notifier code=REDACTED";
+          try { sink?.error?.(redacted); } catch {}
+        },
+      });
+      notificationProvider = createEmailNotifier({
+        send,
+        resolveDestination: (destinationRef, profileId) => decryptDestination(profileId, destinationRef),
+        logger,
+      });
+    }
+    if (notificationProvider) {
+      notificationWorker = createNotificationWorker({
+        store: options.store, provider: notificationProvider, leaseMs: config.notificationLeaseMs,
         operatorAlert: options.operatorAlert,
       });
       jobs.push(notificationWorker.runOnce);
@@ -292,7 +393,7 @@ async function createGateServerRuntime(options = {}) {
 
   const httpOptions = {
     authService: options.authService,
-    profileService: options.profileService,
+    profileService,
     ...(!config || options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
     ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
@@ -327,11 +428,12 @@ async function createGateServerRuntime(options = {}) {
     adapter,
     settlementService,
     notificationWorker,
-    notificationProvider: options.notificationProvider,
+    notificationProvider,
     runOnce: () => Promise.all(jobs.map(invoke)),
     start,
     stop,
   });
 }
 
-module.exports = { createGateServerRuntime, readOnchainDeployment, settlementRuntimeConfigFromEnv };
+module.exports = { createGateServerRuntime, notifierRuntimeConfigFromEnv, readOnchainDeployment,
+  settlementRuntimeConfigFromEnv };

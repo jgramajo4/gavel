@@ -114,6 +114,7 @@ class MemoryGateStore {
   #reservations;
   #inboxItems;
   #notifications;
+  #deliverySettings;
   #monitors;
   #authNonces;
   #authSessions;
@@ -143,6 +144,7 @@ class MemoryGateStore {
     this.#reservations = new Map();
     this.#inboxItems = new Map();
     this.#notifications = new Map();
+    this.#deliverySettings = new Map();
     this.#monitors = new Map();
     this.#authNonces = new Map();
     this.#authSessions = new Map();
@@ -309,6 +311,7 @@ class MemoryGateStore {
         const profiles = structuredClone(this.#profiles);
         const policies = structuredClone(this.#policies);
         const nonces = structuredClone(this.#authNonces);
+        const deliverySettings = structuredClone(this.#deliverySettings);
         try {
           const auth = this.#authTransactionView();
           const transaction = Object.freeze({
@@ -321,12 +324,22 @@ class MemoryGateStore {
               }
               return this.#mutateProfileUnsafe(input);
             },
+            setDeliverySetting: async (profileId, ciphertext) => {
+              const profile = this.#profiles.get(profileId);
+              if (!profile || profile.wallet !== canonicalWallet) throw new Error("delivery setting profile mismatch");
+              if (typeof ciphertext !== "string" || ciphertext.length > 1024
+                  || !/^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(ciphertext)) {
+                throw new TypeError("delivery setting must be a canonical encrypted envelope");
+              }
+              this.#deliverySettings.set(profileId, ciphertext);
+            },
           });
           return await callback(transaction);
         } catch (error) {
           this.#profiles = profiles;
           this.#policies = policies;
           this.#authNonces = nonces;
+          this.#deliverySettings = deliverySettings;
           throw error;
         }
       });
@@ -908,7 +921,8 @@ class MemoryGateStore {
       token: quote.token, submissionHash: submission.submissionHash, quoteVersion: quote.quoteVersion,
       baseChainId: quote.baseChainId, splitter: quote.splitter, expiresAt: quote.expiresAt,
       issuanceLifecycle: snapshot.eligibility, dao: snapshot.dao, proposalId: snapshot.proposalId,
-      destinationRef: `profile:${submission.profileId}`,
+      profileId: submission.profileId,
+      destinationRef: this.#deliverySettings.get(submission.profileId) ?? null,
       trustedSummary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
   }
 
@@ -1029,7 +1043,7 @@ class MemoryGateStore {
     if (!inbox.currentLifecycleUnavailable && inbox.privateUnavailabilityReason != null) {
       throw new TypeError("private unavailability reason requires unavailable lifecycle");
     }
-    if (!notification?.id || notification.status !== "pending") throw new TypeError("notification must initially be pending");
+
     if (!monitor?.id) throw new TypeError("monitor id is required");
     const nextCheck = block(monitor.nextCheckBlock, "monitor.nextCheckBlock");
     if (nextCheck.number < BigInt(normalized.receiptBlock)) throw new Error("monitor nextCheckBlock must cover receiptBlock");
@@ -1053,8 +1067,12 @@ class MemoryGateStore {
         const existingInbox = [...this.#inboxItems.values()].find((row) => row.submissionId === submission.id);
         const existingMonitor = this.#monitors.get(monitorKey);
         const existingNotification = existingInbox && [...this.#notifications.values()].find((row) => row.inboxId === existingInbox.id);
-        if (!existingInbox || !existingMonitor || !existingNotification) throw new Error("idempotent settlement is incomplete: inbox, notification, and monitor are required");
-        if (existingInbox.id !== inbox.id || existingNotification.id !== notification.id || existingMonitor.id !== monitor.id) {
+        if (!existingInbox || !existingMonitor) {
+          throw new Error("idempotent settlement side effects are incomplete");
+        }
+        if (existingInbox.id !== inbox.id
+            || (existingNotification && notification && existingNotification.id !== notification.id)
+            || existingMonitor.id !== monitor.id) {
           throw new Error("conflicting settlement side effects");
         }
         return false;
@@ -1078,9 +1096,11 @@ class MemoryGateStore {
         ...clone(inbox), submissionId: submission.id, profileId: submission.profileId,
         inboxCreatedAt: now, readAt: null, archivedAt: null,
       };
-      const stagedNotification = { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
+      const notificationIsValid = Boolean(notification?.id && notification.status === "pending"
+        && !this.#notifications.has(notification.id));
+      const stagedNotification = notificationIsValid ? { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
         nextAttemptAt: now, claimedUntil: null, firstAttemptAt: null, dedupeDeadline: null,
-        manualReconciliationAt: null, createdAt: now, updatedAt: now };
+        manualReconciliationAt: null, createdAt: now, updatedAt: now } : null;
       const stagedMonitor = {
         ...clone(monitor), quoteId: quote.quoteId, chainId: quote.baseChainId, splitter: quote.splitter,
         receiptBlock: normalizedSettlement.receiptBlock, receiptBlockHash: normalizedSettlement.receiptBlockHash,
@@ -1098,7 +1118,7 @@ class MemoryGateStore {
           return false;
         }
         if (this.#inboxItems.has(inbox.id)) throw new Error("duplicate inbox id");
-        if (this.#notifications.has(notification.id)) throw new Error("duplicate notification id");
+
         if (this.#monitors.has(monitorKey)) throw new Error("duplicate settlement monitor");
         const settlementCollision = [...this.#quotes.values()].some((row) => row.state === "settled"
           && row.baseChainId === quote.baseChainId && row.splitter === quote.splitter
@@ -1108,7 +1128,7 @@ class MemoryGateStore {
         this.#reservations.set(reservation.id, stagedReservation);
         this.#submissions.set(submission.id, stagedSubmission);
         this.#inboxItems.set(inbox.id, stagedInbox);
-        this.#notifications.set(notification.id, stagedNotification);
+        if (stagedNotification) this.#notifications.set(notification.id, stagedNotification);
         this.#monitors.set(monitorKey, stagedMonitor);
         return { settled: true, inboxCreatedAt: clone(now) };
       });
@@ -1172,6 +1192,7 @@ class MemoryGateStore {
       }
       return clone(rows.map((row) => ({ id: row.id, claimToken: String(row.claimGeneration), retryCount: row.retryCount,
         firstAttemptAt: row.firstAttemptAt, dedupeDeadline: row.dedupeDeadline,
+        profileId: this.#inboxItems.get(row.inboxId)?.profileId,
         destinationRef: row.destinationRef, summary: row.summary })));
     });
   }

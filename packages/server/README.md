@@ -71,11 +71,50 @@ never treated as a successful or automatically retryable send. Missing or
 invalid keys fail before any fetch. Operator alerts contain only a stable error
 code and source, never the key, destination, body, response, or headers. Legacy
 claimed attempts with unknowable provider history also require reconciliation.
-This adapter has not live-probed AgentMail. An unusable `message_id` is dropped
-(`null`) instead of failing a send that already went out.
+An unusable `message_id` is dropped (`null`) instead of failing a send that
+already went out.
 
-The adapter is not composed into `createGateServerRuntime` in this PR. There is
-no `resolveDestination` decryptor and no `AGENTMAIL_*` wiring.
+Notification mode is explicit through `GAVEL_GATE_NOTIFIER_MODE=disabled` or
+`agentmail`. AgentMail mode requires all of `AGENTMAIL_API_KEY`,
+`AGENTMAIL_FROM_INBOX`, and `GAVEL_GATE_ENCRYPTION_KEY`; partial configuration
+fails startup. `AGENTMAIL_API_URL` is optional and must be exactly one of these
+HTTPS origins (no path, query, credentials, or fragment):
+
+- `https://api.agentmail.to`
+- `https://x402.api.agentmail.to`
+- `https://mpp.api.agentmail.to`
+- `https://api.agentmail.eu`
+
+`GAVEL_GATE_ENCRYPTION_KEY` is exactly
+`<key-id>:<43-character unpadded base64url encoding of 32 bytes>`. Delivery
+settings use a `gg1.<key-id>.<nonce>.<ciphertext>.<tag>` AES-256-GCM envelope
+with authenticated version/key identity. The database and worker retain only
+the envelope. The notifier decrypts it only after the send deadline precheck,
+immediately before the final deadline check and outbound request. A wrong key,
+unknown key ID, malformed envelope, or tamper produces only the private
+`DESTINATION_UNAVAILABLE` code.
+
+The canonical runtime constructs the complete narrow chain:
+
+`createNotificationWorker -> createEmailNotifier -> resolveDestination -> createAgentMailSender`
+
+The email closure receives only the decrypt resolver, AgentMail sender, and a
+redacted logger. It receives no quote signer, wallet/session material, Base RPC
+client, raw pitch, payment authorization, or evidence-fetch capability.
+
+An opt-in non-send credential/reachability probe is available after setting the
+complete AgentMail environment:
+
+```sh
+npm run probe:agentmail --workspace @gavel/server
+```
+
+It performs only documented `GET /v0/inboxes/{inbox_id}` with bearer auth, a
+five-second timeout, and redirects disabled. It never reads or prints the
+response body or headers. Output is only `result` (`pass`/`fail`) and a status
+class (`2xx`, `4xx`, `network`, etc.); configuration failures are similarly
+redacted. This probe validates neither sending nor send-path idempotency. No
+live probe or email send was performed while implementing this integration.
 
 Private inbox HTTP (exact `dao_inbox` session equal to the enrolled profile
 wallet):

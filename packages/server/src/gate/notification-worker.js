@@ -11,6 +11,9 @@ function trustedJob(job) {
   if (typeof job.destinationRef !== "string" || !job.destinationRef || /^https?:/i.test(job.destinationRef)) {
     throw new TypeError("notification destination must be an opaque private reference");
   }
+  if (typeof job.profileId !== "string" || !job.profileId || job.profileId.length > 256) {
+    throw new TypeError("notification profile identity is required");
+  }
   const summary = job.summary;
   if (!summary || typeof summary !== "object" || Array.isArray(summary)
       || Object.keys(summary).sort().join("\0") !== "subject\0text"
@@ -23,7 +26,7 @@ function trustedJob(job) {
   if (Number.isNaN(firstAttemptAt.valueOf()) || Number.isNaN(dedupeDeadline.valueOf())
       || dedupeDeadline <= firstAttemptAt) throw new TypeError("notification dedupe window is required");
   return Object.freeze({ id: job.id, claimToken: job.claimToken, retryCount: job.retryCount ?? 0,
-    firstAttemptAt, dedupeDeadline, destinationRef: job.destinationRef,
+    firstAttemptAt, dedupeDeadline, profileId: job.profileId, destinationRef: job.destinationRef,
     summary: Object.freeze({ subject: summary.subject, text: summary.text }) });
 }
 function errorCode(error) {
@@ -80,7 +83,7 @@ function createNotificationWorker({ store, provider, clock = () => new Date(), b
         }
         const result = await provider(Object.freeze({
           idempotencyKey: job.id, dedupeDeadline: new Date(job.dedupeDeadline),
-          destinationRef: job.destinationRef, summary: job.summary,
+          profileId: job.profileId, destinationRef: job.destinationRef, summary: job.summary,
         }));
         const providerOpaqueId = result?.providerOpaqueId;
         if (providerOpaqueId != null && (typeof providerOpaqueId !== "string" || providerOpaqueId.length > 256)) {

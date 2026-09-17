@@ -41,18 +41,20 @@ BEGIN
           = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables <> 20)
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
-            'sha256:gate-001-v3-agentmail-idempotency') AND installed_tables <> 20)
+            'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
          AND column_name='scanner_result' AND is_nullable='NO' AND data_type='jsonb')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency') AND NOT EXISTS(
+          NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency') AND (
+          IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -77,7 +79,8 @@ BEGIN
        OR COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
           NOT IN ('sha256:gate-001-v3-postgres-parity','sha256:gate-001-v3-durable-auth-profile',
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
-            'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency')
+            'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -523,7 +526,7 @@ CREATE INDEX IF NOT EXISTS notification_pending_idx ON gate.notification_attempt
 DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,timestamptz,integer);
 DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,integer,integer);
 CREATE OR REPLACE FUNCTION gate.claim_notification_attempts(p_limit integer,p_retry_limit integer,p_lease_ms integer)
-RETURNS TABLE(id text,"claimToken" text,"retryCount" integer,"firstAttemptAt" timestamptz,"dedupeDeadline" timestamptz,"destinationRef" text,summary jsonb)
+RETURNS TABLE(id text,"claimToken" text,"retryCount" integer,"firstAttemptAt" timestamptz,"dedupeDeadline" timestamptz,"profileId" text,"destinationRef" text,summary jsonb)
 LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
  WITH candidates AS (
    SELECT n.id FROM gate.notification_attempts n
@@ -538,7 +541,8 @@ LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
    first_attempt_at=COALESCE(first_attempt_at,statement_timestamp()),
    dedupe_deadline=COALESCE(dedupe_deadline,statement_timestamp()+interval '24 hours'),updated_at=clock_timestamp()
  FROM candidates c WHERE n.id=c.id
- RETURNING n.id,n.claim_generation::text,n.retry_count,n.first_attempt_at,n.dedupe_deadline,n.destination_ref_ciphertext,n.trusted_summary
+ RETURNING n.id,n.claim_generation::text,n.retry_count,n.first_attempt_at,n.dedupe_deadline,
+   (SELECT i.profile_id FROM gate.inbox_items i WHERE i.id=n.inbox_id),n.destination_ref_ciphertext,n.trusted_summary
 $$;
 REVOKE ALL ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) FROM PUBLIC;
 
@@ -628,9 +632,26 @@ CREATE TABLE IF NOT EXISTS gate.rate_limit_events (
 );
 CREATE INDEX IF NOT EXISTS rate_limit_lookup_idx ON gate.rate_limit_events(subject_hash,operation,occurred_at DESC);
 CREATE TABLE IF NOT EXISTS gate.delivery_settings (
- profile_id text PRIMARY KEY REFERENCES gate.profiles(id), ciphertext text NOT NULL, encrypted_config jsonb NOT NULL DEFAULT '{}'::jsonb,
- updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+  profile_id text PRIMARY KEY REFERENCES gate.profiles(id), ciphertext text NOT NULL, encrypted_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE gate.delivery_settings DROP CONSTRAINT IF EXISTS delivery_settings_envelope_check;
+ALTER TABLE gate.delivery_settings ADD CONSTRAINT delivery_settings_envelope_check CHECK (
+  length(ciphertext)<=1024
+  AND ciphertext ~ '^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+);
+CREATE OR REPLACE FUNCTION gate.set_delivery_setting(p_profile_id text,p_wallet text,p_ciphertext text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM gate.profiles p WHERE p.id=p_profile_id AND p.wallet=p_wallet) THEN
+  RAISE EXCEPTION 'delivery setting profile mismatch' USING ERRCODE='23514';
+ END IF;
+ INSERT INTO gate.delivery_settings(profile_id,ciphertext,encrypted_config,updated_at)
+ VALUES(p_profile_id,p_ciphertext,'{}'::jsonb,clock_timestamp())
+ ON CONFLICT(profile_id) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,encrypted_config='{}'::jsonb,
+   updated_at=clock_timestamp();
+END $$;
+REVOKE ALL ON FUNCTION gate.set_delivery_setting(text,text,text) FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS gate.settlement_cursors (
  id bigserial PRIMARY KEY, deployment_id text NOT NULL UNIQUE REFERENCES gate.splitter_deployments(id), chain_id bigint NOT NULL,
  splitter text NOT NULL, deployment_block bigint NOT NULL CHECK(deployment_block>=0), next_range_from bigint NOT NULL CHECK(next_range_from>=deployment_block),
@@ -1138,7 +1159,7 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
-    <> 'sha256:gate-001-v3-agentmail-idempotency' THEN
+    <> 'sha256:gate-001-v3-bound-delivery-settings' THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1164,7 +1185,7 @@ BEGIN
  SELECT count(*) INTO monitor_count FROM gate.settlement_reorg_monitors WHERE quote_id=qid;
  IF (qstate='quoted' AND (sstate NOT IN('QUOTED','SETTLEMENT_PENDING') OR rstate<>'active' OR inbox_count<>0 OR notice_count<>0 OR monitor_count<>0))
    OR (qstate='expired' AND (sstate<>'EXPIRED' OR rstate NOT IN('expiry_pending_reconciliation','released') OR inbox_count<>0 OR notice_count<>0 OR monitor_count<>0))
-   OR (qstate='settled' AND (sstate<>'SETTLED' OR rstate<>'consumed' OR inbox_count<>1 OR notice_count<>1 OR monitor_count<>1)) THEN
+   OR (qstate='settled' AND (sstate<>'SETTLED' OR rstate<>'consumed' OR inbox_count<>1 OR notice_count NOT BETWEEN 0 AND 1 OR monitor_count<>1)) THEN
    RAISE EXCEPTION 'inconsistent Gate quote/submission/reservation/inbox/notification/monitor graph' USING ERRCODE='23514';
  END IF; RETURN NULL;
 END $$;
@@ -1234,6 +1255,7 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.set_delivery_setting(text,text,text) TO gavel_gate;
  END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_api') THEN
   REVOKE ALL ON SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL TABLES IN SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL SEQUENCES IN SCHEMA gate FROM gavel_api;
@@ -1296,7 +1318,7 @@ $catalog_manifest$;
 REVOKE ALL ON FUNCTION public.gavel_gate_catalog_manifest() FROM PUBLIC;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-agentmail-idempotency',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v3-bound-delivery-settings',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest;

@@ -429,6 +429,59 @@ test("profile update persists only allowlisted scalar public display fields", as
   await assert.rejects(service.updateProfile({ session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: nested }), /publicDisplay\.ens/);
 });
 
+test("authenticated profile update encrypts a private top-level delivery destination and stores only its envelope transactionally", async () => {
+  const { createProfileService } = loadProfileService();
+  const events = [];
+  const plaintext = "private-voter@example.com";
+  const envelope = "gg1.primary.AAAAAAAAAAAAAAAA.ciphertext.AAAAAAAAAAAAAAAAAAAAAA";
+  const service = createProfileService({
+    repository: { async withProfileTransaction(_wallet, callback) {
+      return callback({
+        getProfileByWallet: async () => null,
+        mutateProfile: async ({ profile }) => ({ ...profile, display: {}, profileVersion: 1 }),
+        async setDeliverySetting(profileId, ciphertext) { events.push(["store", profileId, ciphertext]); },
+      });
+    } },
+    authService: {
+      async verifyProfileProofs() { return { wallet: WALLET, walletKind: "eoa", proofIds: [HASH] }; },
+      async consumeProfileProofs() { events.push(["consume"]); },
+    },
+    indexClient: { async getVotingPower() { return null; } },
+    baseChainId: BASE_CHAIN_ID,
+    encryptDestination(profileId, destination) {
+      events.push(["encrypt", profileId, destination]);
+      return envelope;
+    },
+  });
+  const result = await service.updateProfile({
+    session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof(),
+    deliveryDestination: plaintext,
+  });
+  assert.deepEqual(events, [
+    ["encrypt", WALLET, plaintext],
+    ["store", WALLET, envelope],
+    ["consume"],
+  ]);
+  assert.equal(JSON.stringify(result).includes(plaintext), false);
+  assert.equal(JSON.stringify(result).includes(envelope), false);
+});
+
+test("delivery destination fails closed without encryption and is never accepted inside signed or public display data", async () => {
+  const { createProfileService } = loadProfileService();
+  const service = createProfileService({
+    repository: { async withProfileTransaction(_wallet, callback) {
+      return callback({ getProfileByWallet: async () => null, mutateProfile: async ({ profile }) => ({ ...profile, display: {}, profileVersion: 1 }) });
+    } },
+    authService: { async verifyProfileProofs() { return { wallet: WALLET, walletKind: "eoa", proofIds: [HASH] }; }, async consumeProfileProofs() {} },
+    indexClient: { async getVotingPower() { return null; } },
+    baseChainId: BASE_CHAIN_ID,
+  });
+  await assert.rejects(service.updateProfile({
+    session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof(),
+    deliveryDestination: "private-voter@example.com",
+  }), /delivery encryption unavailable/i);
+});
+
 test("profile update returns a safe committed projection when post-commit index decoration fails", async () => {
   const { createProfileService } = loadProfileService();
   let committed = false;
