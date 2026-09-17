@@ -37,7 +37,8 @@ async function setupStore(options = {}) {
   ]);
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+    config: { environment: "production" }, rpcAccess: {}, issuanceActive: true,
   });
   return store;
 }
@@ -262,17 +263,44 @@ test("profiles, policies, deployments, and issuance enforce canonical protocol i
     const deployment = {
       id: "old", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token,
       gavelRecipient: ADDR.payer2,
-      contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: false,
+      contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+      config: { environment: "production" }, rpcAccess: {}, issuanceActive: false,
     };
     await store.configureDeployment(deployment);
     const historical = await store.configureDeployment({
       ...deployment, id: "older", splitter: ADDR.payer1, deploymentBlock: "1", nextBlock: "1",
     });
     historical.config.mutated = true;
-    assert.deepEqual((await store.configureDeployment({ ...deployment, nextBlock: "2", config: { overlap: 64 } })).config, { overlap: 64 });
+    assert.deepEqual((await store.configureDeployment({ ...deployment, nextBlock: "2",
+      config: { environment: "production", overlap: 64 } })).config, { environment: "production", overlap: 64 });
     await assert.rejects(store.configureDeployment({ ...deployment, splitter: ADDR.payer2 }), /immutable deployment identity/);
+    await assert.rejects(store.configureDeployment({ ...deployment,
+      config: { environment: "production", testTokenLabel: "" } }), /deployment environment/);
     await store.configureDeployment({ ...deployment, id: "active", splitter: ADDR.wallet2, issuanceActive: true });
     await assert.rejects(store.configureDeployment({ ...deployment, id: "active-2", splitter: ADDR.wallet1, issuanceActive: true }), /one active/);
+  });
+
+  await t.test("closes deployment environment identity for active and inactive history", async () => {
+    const store = new MemoryGateStore();
+    const base = {
+      id: "deployment", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token,
+      gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+      rpcAccess: {}, issuanceActive: false,
+    };
+    for (const [name, patch] of [
+      ["missing environment", { config: {} }],
+      ["unknown chain", { chainId: "1", config: { environment: "production" } }],
+      ["cross environment", { config: { environment: "test", testTokenLabel: "test-token" } }],
+      ["production token", { token: ADDR.wallet2, config: { environment: "production" } }],
+      ["production label", { config: { environment: "production", testTokenLabel: "test-token" } }],
+      ["production empty label", { config: { environment: "production", testTokenLabel: "" } }],
+      ["production null label", { config: { environment: "production", testTokenLabel: null } }],
+    ]) {
+      await assert.rejects(store.configureDeployment({ ...base, ...patch }), /deployment environment/i, name);
+    }
+    const testDeployment = await store.configureDeployment({ ...base, id: "test", chainId: "84532",
+      token: ADDR.wallet2, config: { environment: "test", testTokenLabel: "base-sepolia-test-token" } });
+    assert.equal(testDeployment.config.environment, "test");
   });
 
   await t.test("requires exact quote constants, bindings, lifecycle values, wallet voter, and bytes32 IDs", async (validationT) => {
@@ -414,10 +442,25 @@ test("Memory deployment ignores a caller-provided later cursor and starts exactl
   const store = new MemoryGateStore();
   await store.configureDeployment({ id: "cursor-pin", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
     token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "10", nextBlock: "1000",
-    config: { overlap: 64 }, rpcAccess: {}, issuanceActive: true });
+    config: { environment: "production", overlap: 64 }, rpcAccess: {}, issuanceActive: true });
   assert.deepEqual(await store.getScannerState({ chainId: "8453", splitter: ADDR.splitter }), {
     deploymentId: "cursor-pin", deploymentBlock: "10", nextRangeFrom: "10", generation: "0", overlap: 64,
   });
+});
+
+test("Memory deployment lookup returns the exact persisted registry tuple by chain and splitter", async () => {
+  const store = await setupStore();
+  const row = await store.getDeployment({ chainId: "8453", splitter: ADDR.splitter.toUpperCase().replace("0X", "0x") });
+  assert.deepEqual({
+    id: row.id, chainId: row.chainId, splitter: row.splitter, signer: row.signer, token: row.token,
+    gavelRecipient: row.gavelRecipient, contractCodeHash: row.contractCodeHash, config: row.config,
+  }, {
+    id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token.toLowerCase(),
+    gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), config: { environment: "production", overlap: 64 },
+  });
+  row.config.environment = "test";
+  assert.equal((await store.getDeployment({ chainId: "8453", splitter: ADDR.splitter })).config.environment, "production");
+  assert.equal(await store.getDeployment({ chainId: "8453", splitter: ADDR.wallet2 }), null);
 });
 
 test("PR6 memory scanner atomically releases expiry-pending reservations after complete no-match coverage", async () => {
@@ -541,7 +584,8 @@ test("expiry updates public submission state and release requires cursor-authori
   const issued = await store.issue(issuance("expiry", { quoteId: publicQuoteId, expiresAt: new Date("2026-01-01T00:10:00.000Z") }));
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "2", config: { overlap: 64 }, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "2",
+    config: { environment: "production", overlap: 64 }, rpcAccess: {}, issuanceActive: true,
   });
   now = new Date("2026-01-01T00:10:01.000Z");
   assert.equal(await store.markExpired(now), 1);
@@ -796,7 +840,8 @@ test("memory policies enforce the shared pending-to-settled relationship and iss
   }
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+    config: { environment: "production" }, rpcAccess: {}, issuanceActive: true,
   });
   await store.issue(issuance("persisted-cap-1", { payer: addr(701), quoteId: hex32(701), submissionHash: hex32(801) }));
   await store.issue(issuance("persisted-cap-2", { payer: addr(702), quoteId: hex32(702), submissionHash: hex32(802) }));

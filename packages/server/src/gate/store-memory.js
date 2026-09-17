@@ -34,6 +34,7 @@ const INBOX_LIFECYCLE_SET = new Set(INBOX_LIFECYCLES);
 const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
+const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 
 function clone(value) { return value == null ? value : structuredClone(value); }
 function publicDisplay(value) {
@@ -82,6 +83,16 @@ function compareShape(value) {
     }
     return item;
   });
+}
+function validDeploymentEnvironment(deployment) {
+  const environment = deployment.config?.environment;
+  const label = deployment.config?.testTokenLabel;
+  if (environment === "production") {
+    return deployment.chainId === "8453" && deployment.token === PRODUCTION_BASE_USDC
+      && !Object.hasOwn(deployment.config, "testTokenLabel");
+  }
+  return environment === "test" && deployment.chainId === "84532"
+    && typeof label === "string" && label.trim() !== "";
 }
 class MemoryGateStore {
   #randomBytes;
@@ -423,11 +434,18 @@ class MemoryGateStore {
     if (!Number.isSafeInteger(normalized.config.overlap) || normalized.config.overlap < 1) {
       throw new TypeError("deployment.config.overlap must be a positive integer");
     }
+    if (!validDeploymentEnvironment(normalized)) {
+      throw new TypeError("deployment environment is not valid for its chain and token");
+    }
     return this.#serialized(() => {
       const existing = this.#deployments.get(normalized.id);
       if (existing) {
         for (const field of ["chainId", "splitter", "signer", "token", "gavelRecipient", "deploymentBlock", "contractCodeHash"]) {
           if (existing[field] !== normalized[field]) throw new Error("immutable deployment identity mismatch");
+        }
+        if (existing.config.environment !== normalized.config.environment
+            || existing.config.testTokenLabel !== normalized.config.testTokenLabel) {
+          throw new Error("immutable deployment identity mismatch");
         }
       }
       const duplicateMaterial = [...this.#deployments.values()].find((row) =>
@@ -450,6 +468,13 @@ class MemoryGateStore {
       }
       return clone(normalized);
     });
+  }
+
+  async getDeployment({ chainId, splitter } = {}) {
+    const expectedChain = block(chainId, "chainId").raw;
+    const expectedSplitter = address(splitter, "splitter");
+    return clone([...this.#deployments.values()].find((row) =>
+      row.chainId === expectedChain && row.splitter === expectedSplitter) ?? null);
   }
 
   async getScannerState({ chainId, splitter } = {}) {
@@ -717,6 +742,7 @@ class MemoryGateStore {
       if (attentionAmount !== policy.attentionAmount) throw new Error("issuance context changed");
       const deployment = this.#deployments.get(quote.deploymentId);
       if (!deployment?.issuanceActive) throw new Error("issuance unavailable");
+      if (!validDeploymentEnvironment(deployment)) throw new Error("deployment environment is invalid");
       if (String(quote.baseChainId) !== deployment.chainId || splitter !== deployment.splitter || token !== deployment.token) {
         throw new Error("quote deployment material mismatch");
       }

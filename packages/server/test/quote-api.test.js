@@ -61,7 +61,7 @@ async function harness(options = {}) {
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER_ADDRESS, token: TOKEN,
     gavelRecipient: GAVEL_RECIPIENT, contractCodeHash: CODE_HASH, deploymentBlock: "0", nextBlock: "0",
-    issuanceActive: true, config: {}, rpcAccess: {},
+    issuanceActive: true, config: { environment: "production" }, rpcAccess: {},
   });
 
   const submissionService = createSubmissionService({

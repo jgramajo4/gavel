@@ -54,7 +54,7 @@ async function memoryStore(options = {}) {
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER_ADDRESS, token: TOKEN,
     gavelRecipient: RECIPIENT, contractCodeHash: H("e"), deploymentBlock: "0", nextBlock: "0",
-    issuanceActive: true, config: {}, rpcAccess: {},
+    issuanceActive: true, config: { environment: "production" }, rpcAccess: {},
   });
   return store;
 }
@@ -78,7 +78,7 @@ function postgresStore(options = {}) {
       }
       if (/FROM gate\.splitter_deployments/.test(text)) {
         return { rows: [{ issuance_active: true, chain_id: "8453", splitter: SPLITTER.toLowerCase(),
-          token: TOKEN.toLowerCase(), contract_code_hash: H("e") }] };
+          token: TOKEN.toLowerCase(), contract_code_hash: H("e"), config: { environment: "production" } }] };
       }
       if (/interval '600 seconds'/.test(text)) return { rows: [{ now: DB_NOW, expiresAt: DB_EXPIRY }] };
       if (/AS pending_count/.test(text)) {

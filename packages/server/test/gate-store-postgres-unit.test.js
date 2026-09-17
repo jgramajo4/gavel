@@ -8,6 +8,7 @@ const { createQuoteSigner } = require("../src/gate/quote-signer");
 
 const A = `0x${"a".repeat(40)}`;
 const B = `0x${"b".repeat(40)}`;
+const CANONICAL_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const H = (digit) => `0x${digit.repeat(64)}`;
 
 function noConnectStore() {
@@ -18,7 +19,7 @@ function noConnectStore() {
 }
 
 const SIGNER_KEY = `0x${"7".repeat(64)}`;
-const gateSigner = (splitter = A) => createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter });
+const gateSigner = (splitter = A, chainId = 8453) => createQuoteSigner({ signer: SIGNER_KEY, chainId, splitter });
 
 function issuanceCommand() {
   return {
@@ -30,11 +31,30 @@ function issuanceCommand() {
       refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: A, signedSender: A, material: {} },
     quote: { id: "q", quoteId: H("5"), payer: A, voter: A, attentionAmount: "1000000", feeAmount: "250000",
-      token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
+      token: CANONICAL_BASE_USDC, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
     reservation: { id: "r", profileId: "p", amount: "1000000" },
     signer: gateSigner(),
   };
 }
+
+function issuanceClient(deployment) {
+  return { async query(sql) {
+    sql = String(sql);
+    if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) return { rows: [] };
+    if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "eoa", availability: "accepting_now", profile_version: "1" }] };
+    if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_voting: true,
+      pending_reservation_capacity: 12, settled_capacity: 25 }] };
+    if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [deployment] };
+    if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: new Date(0), expiresAt: new Date(600_000) }] };
+    if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 0, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
+    return { rows: [], rowCount: 1 };
+  }, release() {} };
+}
+
+const productionDeployment = (overrides = {}) => ({
+  issuance_active: true, chain_id: "8453", splitter: A, token: CANONICAL_BASE_USDC,
+  contract_code_hash: H("1"), config: { environment: "production" }, ...overrides,
+});
 
 test("Postgres store rejects non-canonical protocol primitives before SQL", async () => {
   const store = noConnectStore();
@@ -81,7 +101,7 @@ test("Postgres issuance compares counts with the persisted policy capacities sel
     if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "eoa", availability: "accepting_now", profile_version: "1" }] };
     if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_voting: true,
       pending_reservation_capacity: 2, settled_capacity: 4 }] };
-    if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [{ issuance_active: true, chain_id: "8453", splitter: A, token: A, contract_code_hash: H("1") }] };
+    if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [productionDeployment()] };
     if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: new Date(0), expiresAt: new Date(600_000) }] };
     if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 2, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
     return { rows: [], rowCount: 1 };
@@ -89,6 +109,66 @@ test("Postgres issuance compares counts with the persisted policy capacities sel
   const store = new PostgresGateStore({ pool: { connect: async () => client }, quoteSigner: async () => "signed" });
   await assert.rejects(store.issue(issuanceCommand()), /capacity unavailable/);
   assert.match(calls.find((sql) => /FROM gate\.dao_policies/.test(sql)), /FOR UPDATE/);
+});
+
+test("Postgres issuance accepts an explicit canonical production deployment", async () => {
+  const client = issuanceClient(productionDeployment());
+  const issued = await new PostgresGateStore({ pool: { connect: async () => client } }).issue(issuanceCommand());
+  assert.equal(issued.quote.domain.chainId, 8453);
+  assert.equal(issued.quote.message.token.toLowerCase(), CANONICAL_BASE_USDC);
+});
+
+test("Postgres issuance accepts an explicitly labeled Base Sepolia test deployment", async () => {
+  const client = issuanceClient({ issuance_active: true, chain_id: "84532", splitter: A, token: B,
+    contract_code_hash: H("1"), config: { environment: "test", testTokenLabel: "base-sepolia-eip3009-test-token" } });
+  const command = issuanceCommand();
+  command.quote.baseChainId = "84532";
+  command.quote.token = B;
+  command.signer = gateSigner(A, 84532);
+  const issued = await new PostgresGateStore({ pool: { connect: async () => client } }).issue(command);
+  assert.equal(issued.quote.domain.chainId, 84532);
+  assert.equal(issued.quote.message.token.toLowerCase(), B);
+});
+
+test("Postgres issuance rejects a deployment whose explicit environment mismatches its chain", async () => {
+  const client = issuanceClient({ issuance_active: true, chain_id: "84532", splitter: A, token: B,
+    contract_code_hash: H("1"), config: { environment: "production" } });
+  const command = issuanceCommand();
+  command.quote.baseChainId = "84532";
+  command.quote.token = B;
+  command.signer = gateSigner(A, 84532);
+  await assert.rejects(new PostgresGateStore({ pool: { connect: async () => client } }).issue(command),
+    /deployment environment/i);
+});
+
+test("Postgres issuance rejects closed deployment environment and token invariants", async () => {
+  const cases = [
+    ["8453/test", { chain_id: "8453", token: B, config: { environment: "test", testTokenLabel: "test-token" } }, { token: B }],
+    ["84532/production", { chain_id: "84532", token: B, config: { environment: "production" } }, { baseChainId: "84532", token: B }],
+    ["production wrong token", { token: B }, { token: B }],
+    ["test unlabeled", { chain_id: "84532", token: B, config: { environment: "test" } }, { baseChainId: "84532", token: B }],
+    ["missing config", { config: undefined }],
+  ];
+  for (const [name, deploymentPatch, quotePatch] of cases) {
+    const deployment = productionDeployment(deploymentPatch);
+    const command = issuanceCommand();
+    Object.assign(command.quote, quotePatch);
+    if (command.quote.baseChainId === "84532") command.signer = gateSigner(A, 84532);
+    await assert.rejects(new PostgresGateStore({ pool: { connect: async () => issuanceClient(deployment) } }).issue(command),
+      /deployment environment/i, name);
+  }
+});
+
+test("Postgres issuance rejects unknown chains and deployment tuple mismatches", async () => {
+  const unknown = issuanceCommand();
+  unknown.quote.baseChainId = "1";
+  await assert.rejects(new PostgresGateStore({ pool: { connect: async () => issuanceClient(productionDeployment()) } }).issue(unknown),
+    /Base 8453 or Base Sepolia 84532/i);
+
+  for (const deploymentPatch of [{ chain_id: "84532" }, { splitter: B }, { contract_code_hash: H("2") }]) {
+    await assert.rejects(new PostgresGateStore({ pool: { connect: async () => issuanceClient(productionDeployment(deploymentPatch)) } })
+      .issue(issuanceCommand()), /issuance context changed/i);
+  }
 });
 
 test("Postgres issuance and settlement reject stale or incomplete evidence before SQL", async () => {
@@ -177,7 +257,7 @@ test("issuance uses independent DAO/Base chains, exact database-clock lifetime, 
       if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) return { rows: [] };
       if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "contract", availability: "accepting_now", profile_version: "7", base_payout_code_hash: keccak256(code) }] };
       if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_pre_vote: false, accept_voting: true, pending_reservation_capacity: 12, settled_capacity: 25 }] };
-      if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [{ issuance_active: true, chain_id: "8453", splitter: A, token: A, contract_code_hash: H("1") }] };
+      if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [productionDeployment()] };
       if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: databaseNow, expiresAt: trustedExpiry }] };
       if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 0, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
       return { rows: [], rowCount: 1 };
@@ -206,7 +286,7 @@ test("issuance uses independent DAO/Base chains, exact database-clock lifetime, 
     context: { authPassed: true, parsePassed: true, payerIsEoa: true, authenticatedSender: B, expectedProfileVersion: "7", walletKind: "contract", stage: "VOTING", deploymentCodeHash: H("1") },
     snapshot: { id: "snap", dao: "nouns", proposalId: "1", contentHash: H("2"), nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1", sourceBlock: "1", sourceBlockHash: H("3"), refreshedAt: new Date(), canonicalFacts: {}, decodedFacts: {}, canonicalActions: [] },
     submission: { id: "sub", submissionHash: H("4"), profileId: "p", payer: B, signedSender: B, material: {} },
-    quote: { id: "q", quoteId: H("5"), payer: B, voter: A, attentionAmount: "1000000", feeAmount: "250000", token: A, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
+    quote: { id: "q", quoteId: H("5"), payer: B, voter: A, attentionAmount: "1000000", feeAmount: "250000", token: CANONICAL_BASE_USDC, baseChainId: "8453", splitter: A, deploymentId: "d", quoteVersion: 1 },
     reservation: { id: "r", profileId: "p", amount: "1000000" },
   };
   const issued = await store.issue({ ...command, signer });
@@ -515,14 +595,39 @@ test("a new deployment ignores a caller-provided later cursor and starts exactly
     return { rows: [], rowCount: 1 };
   }, release() {} };
   const store = new PostgresGateStore({ pool: { connect: async () => client } });
-  const configured = await store.configureDeployment({ id: "d", chainId: "8453", splitter: A, signer: B, token: A,
-    gavelRecipient: B, deploymentBlock: "40", nextBlock: "99", contractCodeHash: H("1"), rpcAccess: "cipher" });
+  const configured = await store.configureDeployment({ id: "d", chainId: "8453", splitter: A, signer: B,
+    token: CANONICAL_BASE_USDC, gavelRecipient: B, deploymentBlock: "40", nextBlock: "99",
+    contractCodeHash: H("1"), config: { environment: "production" }, rpcAccess: "cipher" });
   const deploymentInsert = seen.find(({ sql }) => /INSERT INTO gate\.splitter_deployments/.test(sql));
   const cursorInsert = seen.find(({ sql }) => /INSERT INTO gate\.settlement_cursors/.test(sql));
   assert.equal(deploymentInsert.values[7], "40");
   assert.equal(cursorInsert.values[4], "40");
   assert.equal(configured.nextBlock, "40");
   assert.doesNotMatch(deploymentInsert.sql, /DO UPDATE SET scanner_cursor=EXCLUDED\.scanner_cursor/);
+  assert.match(deploymentInsert.sql, /config->>'environment'/);
+  assert.match(deploymentInsert.sql, /config->'testTokenLabel'/);
+});
+
+test("Postgres deployment lookup returns the exact persisted registry tuple by chain and splitter", async () => {
+  const calls = [];
+  const persisted = { id: "d", chainId: "8453", splitter: A, signer: B, token: CANONICAL_BASE_USDC,
+    gavelRecipient: B, contractCodeHash: H("1"), config: { environment: "production" }, issuanceActive: true };
+  const store = new PostgresGateStore({ pool: { async query(sql, values) {
+    calls.push({ sql: String(sql), values });
+    return { rows: [persisted] };
+  } } });
+  assert.deepEqual(await store.getDeployment({ chainId: "8453", splitter: A.toUpperCase().replace("0X", "0x") }), persisted);
+  assert.deepEqual(calls[0].values, ["8453", A]);
+  assert.match(calls[0].sql, /FROM gate\.splitter_deployments[\s\S]*WHERE chain_id=\$1 AND splitter=\$2/i);
+});
+
+test("Postgres deployment configuration rejects invalid inactive identity before SQL", async () => {
+  let connected = false;
+  const store = new PostgresGateStore({ pool: { async connect() { connected = true; throw new Error("must not connect"); } } });
+  await assert.rejects(store.configureDeployment({ id: "d", chainId: "8453", splitter: A, signer: B, token: A,
+    gavelRecipient: B, deploymentBlock: "0", contractCodeHash: H("1"), config: {}, rpcAccess: "cipher",
+    issuanceActive: false }), /deployment environment/i);
+  assert.equal(connected, false);
 });
 
 test("scanner range persistence sends complete observations in the cursor transaction", async () => {
@@ -657,6 +762,29 @@ test("scanner range leaves pending hints alone and only releases already expiry-
   assert.match(scanner, /UPDATE gate\.quotes q SET reservation_state='released'/i);
 });
 
+test("Gate migration closes quote chains and deployment environments in the catalog", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  assert.match(sql, /ADD CONSTRAINT quotes_base_chain_check\s+CHECK\s*\(base_chain_id IN\s*\(8453,84532\)\)/i);
+  const environmentCheck = sql.match(/ADD CONSTRAINT splitter_deployments_environment_check[\s\S]*?;\n/i)?.[0] || "";
+  assert.match(environmentCheck, /environment[\s\S]*production[\s\S]*8453[\s\S]*833589fcd6edb6e08f4c7c32d4f71b54bda02913[\s\S]*test[\s\S]*84532[\s\S]*testTokenLabel/i);
+  assert.doesNotMatch(environmentCheck, /issuance_active/i);
+  assert.match(environmentCheck, /NOT\s*\(config\s*\?\s*'testTokenLabel'\)/i);
+  assert.doesNotMatch(sql, /SET issuance_active=false[\s\S]*splitter_deployments_environment_check/i);
+  assert.match(sql, /FUNCTION gate\.protect_splitter_deployment_identity[\s\S]*OLD\.config->'environment'[\s\S]*OLD\.config->'testTokenLabel'[\s\S]*immutable deployment identity/i);
+  assert.match(sql, /splitter_deployments_immutable_identity[\s\S]*protect_splitter_deployment_identity/i);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.validate_relational_bindings[\s\S]*issuance_active[\s\S]*deployment environment[\s\S]*CREATE TRIGGER quotes_validate_bindings/i);
+  assert.match(sql, /IF marked THEN[\s\S]*quotes_base_chain_check[\s\S]*splitter_deployments_environment_check[\s\S]*quotes_validate_bindings[\s\S]*marker does not match installed Gate schema/i);
+  assert.match(sql, /sha256:gate-001-v3-closed-base-environments/i);
+});
+
+test("Gate chain upgrade drops only known quote chain constraints", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const upgrade = sql.match(/ALTER TABLE gate\.quotes DROP CONSTRAINT IF EXISTS quotes_base_chain[^\n]*[\s\S]*?ADD CONSTRAINT quotes_base_chain_check[^;]*;/i)?.[0] || "";
+  assert.match(upgrade, /DROP CONSTRAINT IF EXISTS quotes_base_chain_id_check/i);
+  assert.match(upgrade, /DROP CONSTRAINT IF EXISTS quotes_base_chain_check/i);
+  assert.doesNotMatch(upgrade, /pg_constraint|pg_get_constraintdef|EXECUTE format/i);
+});
+
 test("Gate migration replaces legacy settlement completeness checks with one stable confirmation-depth constraint", () => {
   const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const upgrade = sql.match(/DO \$\$\s*DECLARE legacy_constraint name;\s*BEGIN\s*FOR legacy_constraint IN\s*SELECT c\.conname FROM pg_constraint c\s*WHERE c\.conrelid='gate\.quotes'::regclass[\s\S]*?END \$\$;\s*ALTER TABLE gate\.quotes ADD CONSTRAINT quotes_settlement_complete_check[\s\S]*?\)\);/i)?.[0] || "";
@@ -716,7 +844,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /canonical_actions jsonb NOT NULL/i);
   assert.match(sql, /attention_amount >= 1000000/i);
   assert.match(sql, /fee_amount = 250000/i);
-  assert.match(sql, /base_chain_id bigint NOT NULL CHECK\(base_chain_id=8453\)/i);
+  assert.match(sql, /base_chain_id bigint NOT NULL CHECK\(base_chain_id IN\(8453,84532\)\)/i);
   assert.match(sql, /quote_version = 1/i);
   assert.doesNotMatch(sql, /skip_policy_version_bump/i);
   assert.doesNotMatch(sql, /policy_bump_suppressed_txid/i);

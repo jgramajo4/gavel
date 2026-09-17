@@ -11,8 +11,13 @@ composition instead of exposing a nonfunctional route.
 
 PR6 settlement settings:
 
-- `GAVEL_GATE_BASE_CHAIN_ID` — defaults to `8453`
+- `GAVEL_GATE_ENVIRONMENT` — required when configured; exactly `production` or `test`
+- `GAVEL_GATE_BASE_CHAIN_ID` — `8453` for production or `84532` for test
+- `GAVEL_GATE_BASE_USDC` — canonical Base native USDC in production; an explicitly configured test-token address in test
+- `GAVEL_GATE_TEST_TOKEN_LABEL` — required and nonblank for test; the variable must be completely absent in production (empty or whitespace values are rejected)
 - `GAVEL_GATE_SPLITTER` — enables settlement and is then required to be an address
+- `GAVEL_GATE_QUOTE_SIGNER_ADDRESS` — required public signer identity; must match the registry, splitter immutable, and quote service
+- `GAVEL_GATE_OWNER_RECIPIENT` — required recipient identity; must match the registry and splitter immutable
 - `GAVEL_GATE_CONFIRMATION_DEPTH` — defaults to `1`
 - `GAVEL_GATE_REORG_OVERLAP_BLOCKS` — defaults to `64`
 - `GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE` — defaults to `5000` and must exceed the overlap
@@ -27,6 +32,15 @@ hashes, complete per-block receipt enumeration, and an independent transaction c
 when the canonical transaction hashes, receipt transaction hashes, and independent
 count agree exactly; filtered `eth_getLogs` results are never authoritative for
 capacity release.
+
+Configured startup calls `store.getDeployment({ chainId, splitter })`, verifies the
+RPC-reported chain, then uses the bundled RPC attestor (`getCode` plus read-only
+`call`) before HTTP composition. It reads deployed runtime bytecode, splitter
+`usdc`, `quoteSigner`, `gavelRecipient`, `GAVEL_FEE_AMOUNT`, splitter domain
+separator, and token `name`, `version`, and domain separator. Startup compares
+those values to explicit runtime configuration, the persisted registry tuple,
+the quote service's frozen non-secret issuance identity, fixed fee `250000`, and
+computed EIP-712 domains.
 
 The Base RPC client, lifecycle reader, and optional narrow notification provider
 are injected. A notification provider must set `durableIdempotency = true` and

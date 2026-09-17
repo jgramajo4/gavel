@@ -87,7 +87,8 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
       if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000",
         accept_pre_vote: false, accept_voting: true, pending_reservation_capacity: 12, settled_capacity: 25 }], rowCount: 1 };
       if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [{ issuance_active: true, chain_id: "8453",
-        splitter: `0x${"a".repeat(40)}`, token: `0x${"a".repeat(40)}`, contract_code_hash: `0x${"1".repeat(64)}` }], rowCount: 1 };
+        splitter: `0x${"a".repeat(40)}`, token: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        contract_code_hash: `0x${"1".repeat(64)}`, config: { environment: "production" } }], rowCount: 1 };
       if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: new Date(0), expiresAt: new Date(600_000) }], rowCount: 1 };
       if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: "0", settled_count: "0", pair_proposal: 0, active_pair: 0 }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -109,7 +110,7 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
     submission: { id: "submission-pg", submissionHash: `0x${"4".repeat(64)}`, profileId: "profile-1",
       payer: `0x${"b".repeat(40)}`, signedSender: `0x${"b".repeat(40)}`, material: {} },
     quote: { id: "quote-pg", quoteId: `0x${"5".repeat(64)}`, payer: `0x${"b".repeat(40)}`, voter: `0x${"a".repeat(40)}`,
-      attentionAmount: "1000000", feeAmount: "250000", token: `0x${"a".repeat(40)}`, baseChainId: "8453",
+      attentionAmount: "1000000", feeAmount: "250000", token: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", baseChainId: "8453",
       splitter: `0x${"a".repeat(40)}`, deploymentId: "deployment-1", quoteVersion: 1 },
     reservation: { id: "reservation-pg", profileId: "profile-1", amount: "1000000" },
   }), /injected insert failure/);

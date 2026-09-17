@@ -25,6 +25,8 @@ const CURRENT_LIFECYCLES = new Set(["VOTING", "CLOSED", "UNKNOWN"]);
 const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
+const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const SETTLEMENT_CHAINS = new Set(["8453", "84532"]);
 const SETTLEMENT_EVENT_FIELDS = Object.freeze([
   "attentionAmount", "gavelFeeAmount", "gavelRecipient", "payer", "quoteId", "submissionHash", "token", "voter",
 ]);
@@ -73,6 +75,18 @@ function publicIdFrom(value) {
 }
 function sameTimestamp(a, b) { return new Date(a).valueOf() === new Date(b).valueOf(); }
 function invariant(condition, message) { if (!condition) throw new Error(message); }
+function explicitDeploymentEnvironment(deployment) {
+  const environment = deployment?.config?.environment;
+  const chainId = String(deployment?.chain_id ?? deployment?.chainId);
+  const token = deployment?.token;
+  const label = deployment?.config?.testTokenLabel;
+  if (environment === "production") {
+    return chainId === "8453" && token === PRODUCTION_BASE_USDC
+      && !Object.hasOwn(deployment.config, "testTokenLabel");
+  }
+  return environment === "test" && chainId === "84532"
+    && typeof label === "string" && label.trim() !== "";
+}
 function resume(row) { return { resumed: true, publicId: row.publicId, state: publicState(row.status) }; }
 function publicDisplay(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("display must be an object");
@@ -309,6 +323,8 @@ class PostgresGateStore {
     const codeHash = bytes32(deployment.contractCodeHash, "contractCodeHash");
     const config = { ...(deployment.config || {}),
       overlap: positiveInteger(Number(deployment.config?.overlap ?? 64), "deployment.config.overlap") };
+    invariant(explicitDeploymentEnvironment({ chainId, token, config }),
+      "deployment environment is not valid for its chain and token");
     return this.#transaction(async (client) => {
       const row = (await client.query(`INSERT INTO gate.splitter_deployments
         (id,chain_id,splitter,signer,token,gavel_recipient,deployment_block,scanner_cursor,contract_code_hash,config,rpc_access_ciphertext,issuance_active,retired_at,retirement_ready_at)
@@ -318,6 +334,8 @@ class PostgresGateStore {
         WHERE (gate.splitter_deployments.chain_id,gate.splitter_deployments.splitter,gate.splitter_deployments.signer,
           gate.splitter_deployments.token,gate.splitter_deployments.gavel_recipient,gate.splitter_deployments.deployment_block,gate.splitter_deployments.contract_code_hash)
           = (EXCLUDED.chain_id,EXCLUDED.splitter,EXCLUDED.signer,EXCLUDED.token,EXCLUDED.gavel_recipient,EXCLUDED.deployment_block,EXCLUDED.contract_code_hash)
+          AND gate.splitter_deployments.config->>'environment' IS NOT DISTINCT FROM EXCLUDED.config->>'environment'
+          AND gate.splitter_deployments.config->'testTokenLabel' IS NOT DISTINCT FROM EXCLUDED.config->'testTokenLabel'
         RETURNING id,chain_id::text AS "chainId",splitter,signer,token,deployment_block::text AS "deploymentBlock",
           scanner_cursor::text AS "nextBlock",contract_code_hash AS "contractCodeHash",gavel_recipient AS "gavelRecipient",config,rpc_access_ciphertext AS "rpcAccess",
           issuance_active AS "issuanceActive",retired_at AS "retiredAt",retirement_ready_at AS "retirementReadyAt"`,
@@ -329,6 +347,16 @@ class PostgresGateStore {
         VALUES($1,$2,$3,$4,$5) ON CONFLICT(deployment_id) DO NOTHING`, [deployment.id, chainId, splitter, block, block]);
       return clone(row);
     });
+  }
+
+  async getDeployment({ chainId, splitter } = {}) {
+    const row = (await this.pool.query(`SELECT id,chain_id::text AS "chainId",splitter,signer,token,
+      gavel_recipient AS "gavelRecipient",deployment_block::text AS "deploymentBlock",
+      contract_code_hash AS "contractCodeHash",config,issuance_active AS "issuanceActive",
+      retired_at AS "retiredAt",retirement_ready_at AS "retirementReadyAt"
+      FROM gate.splitter_deployments WHERE chain_id=$1 AND splitter=$2`,
+    [positiveBigint(chainId, "chainId"), address(splitter, "splitter")])).rows[0];
+    return row ? clone(row) : null;
   }
 
   async recordScannerRange(range) {
@@ -445,7 +473,7 @@ class PostgresGateStore {
     invariant(normalized.quote.payer === normalized.submission.payer, "quote payer must equal submission payer");
     invariant(normalized.quote.feeAmount === "250000", "feeAmount must equal 250000");
     invariant(normalized.quote.quoteVersion === 1, "quoteVersion must equal 1");
-    invariant(normalized.quote.baseChainId === "8453", "quote settlement chain must be Base 8453");
+    invariant(SETTLEMENT_CHAINS.has(normalized.quote.baseChainId), "quote settlement chain must be Base 8453 or Base Sepolia 84532");
     invariant(normalized.snapshot.mappingVersion === NOUNS_LIFECYCLE_MAPPING_VERSION,
       `mappingVersion must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
     invariant(normalized.snapshot.dao !== "nouns" || (normalized.context.stage === "VOTING"
@@ -489,6 +517,7 @@ class PostgresGateStore {
       const deployment = (await client.query("SELECT * FROM gate.splitter_deployments WHERE id=$1 FOR SHARE", [quote.deploymentId])).rows[0];
       invariant(deployment?.issuance_active === true && String(deployment.chain_id) === quote.baseChainId && deployment.splitter === quote.splitter
         && deployment.token === quote.token && deployment.contract_code_hash === context.deploymentCodeHash, "issuance context changed");
+      invariant(explicitDeploymentEnvironment(deployment), "deployment environment is not valid for its chain and token");
       if (profile.wallet_kind === "contract") {
         invariant(typeof this.baseCodeReader === "function", "Base code reader unavailable");
         let timer;

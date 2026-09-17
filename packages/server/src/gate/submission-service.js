@@ -390,7 +390,15 @@ function createSubmissionService({
     return (await receipts.getSubmission(publicId)) ?? null;
   }
 
-  return Object.freeze({ createSubmission, getPublicStatus, resumeSubmission, redactSignerMaterial });
+  const runtimeIdentity = Object.freeze({
+    deploymentId: configured.id,
+    chainId: configured.chainId,
+    splitter: configured.splitter,
+    token: configured.token,
+    codeHash: configured.codeHash,
+    quoteSigner: signerAddress,
+  });
+  return Object.freeze({ createSubmission, getPublicStatus, resumeSubmission, redactSignerMaterial, runtimeIdentity });
 }
 
 module.exports = { NOT_ACCEPTING_MESSAGE, SubmissionPolicyError, createSenderPolicy, createSubmissionService };

@@ -40,7 +40,7 @@ async function setupStore() {
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
     token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"),
-    deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: true,
+    deploymentBlock: "0", nextBlock: "0", config: { environment: "production" }, rpcAccess: {}, issuanceActive: true,
   });
   return store;
 }
