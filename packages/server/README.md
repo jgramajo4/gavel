@@ -33,11 +33,29 @@ are injected. A notification provider must set `durableIdempotency = true` and
 durably deduplicate every external send by the supplied `idempotencyKey`; the
 worker rejects providers that cannot make that guarantee.
 
-PR8 adds the first concrete adapter at `src/gate/notifiers/email.js`. It speaks
-the PR6 worker interface and sends AgentMail with the `Idempotency-Key` header
-set to Gate's durable notification id. AgentMail documents that a retry with the
-same key returns the original message and does not send a second email. Keys
-expire 24 hours after the send completes.
+PR8 adds a library adapter at `src/gate/notifiers/email.js`. It speaks the PR6
+worker interface. `createEmailNotifier` never hardcodes
+`durableIdempotency = true`; it inherits that flag from the injected `send`
+function. A dummy sender is rejected by the worker.
+
+`createAgentMailSender` is the only bundled sender that sets
+`durableIdempotency = true`. It stamps a non-empty `Idempotency-Key` header on
+`POST /v0/inboxes/{inbox}/messages/send`, times out at 10s, and does not follow
+redirects. That flag is justified by AgentMail's primary docs, not by a mock:
+
+- https://docs.agentmail.to/idempotency.md
+- https://docs.agentmail.to/knowledge-base/preventing-duplicate-sends.md
+
+Those pages document send-path idempotency via `Idempotency-Key` (not
+`clientId`, which is create-only): a retry with the same key returns the
+original message and sends no second email; the same key with a different body
+is `409 Conflict`; keys expire 24 hours after the send completes. This adapter
+has not live-probed AgentMail. A `409` is treated as a completed send, not a
+retryable failure. An unusable `message_id` is dropped (`null`) instead of
+failing a send that already went out.
+
+The adapter is not composed into `createGateServerRuntime` in this PR. There is
+no `resolveDestination` decryptor and no `AGENTMAIL_*` wiring.
 
 Private inbox HTTP (exact `dao_inbox` session equal to the enrolled profile
 wallet):

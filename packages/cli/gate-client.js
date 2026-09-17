@@ -39,6 +39,10 @@ function projectProfile(value) {
   return pick(value, PROFILE_FIELDS);
 }
 
+function sanitizeHumanText(value) {
+  return String(value ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
+
 function coarseError(status) {
   if (status === 401) return new GateClientError("UNAUTHORIZED", "authentication required");
   if (status === 404) return new GateClientError("NOT_FOUND", "not found");
@@ -82,4 +86,4 @@ function createGateClient({ baseUrl, token, fetchImpl = globalThis.fetch.bind(gl
   });
 }
 
-module.exports = { GateClientError, createGateClient, projectInbox, projectProfile };
+module.exports = { GateClientError, createGateClient, projectInbox, projectProfile, sanitizeHumanText };

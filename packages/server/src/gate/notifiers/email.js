@@ -1,7 +1,18 @@
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{1,256}$/;
+const SEND_TIMEOUT_MS = 10_000;
 
 function redact(value) {
   return String(value ?? "provider error").replace(EMAIL, "[redacted]").replace(/\s+/g, " ").slice(0, 180);
+}
+
+function opaqueId(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : null;
+}
+
+function messageIdFrom(body) {
+  if (!body || typeof body !== "object") return null;
+  return opaqueId(body.message_id) || opaqueId(body.messageId) || opaqueId(body.id);
 }
 
 function createAgentMailSender({
@@ -9,34 +20,40 @@ function createAgentMailSender({
   apiKey,
   fromInbox,
   fetchImpl = globalThis.fetch.bind(globalThis),
+  timeoutMs = SEND_TIMEOUT_MS,
 } = {}) {
   if (typeof apiKey !== "string" || !apiKey) throw new TypeError("AgentMail apiKey is required");
   if (typeof fromInbox !== "string" || !fromInbox) throw new TypeError("AgentMail fromInbox is required");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
   const root = String(apiUrl).replace(/\/+$/, "");
 
-  return async function send({ to, subject, text, idempotencyKey } = {}) {
+  async function send({ to, subject, text, idempotencyKey } = {}) {
+    const headers = {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    };
+    if (IDEMPOTENCY_KEY.test(String(idempotencyKey || ""))) {
+      headers["Idempotency-Key"] = String(idempotencyKey);
+    }
     const response = await fetchImpl(
       `${root}/v0/inboxes/${encodeURIComponent(fromInbox)}/messages/send`,
       {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-          "Idempotency-Key": String(idempotencyKey || ""),
-        },
+        headers,
         body: JSON.stringify({ to: [to], subject, text }),
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
       },
     );
     let body = null;
     try { body = await response.json(); } catch { body = null; }
-    if (!response.ok && response.status !== 200) {
-      throw Object.assign(new Error("provider error"), { code: "PROVIDER_ERROR" });
-    }
-    const messageId = typeof body?.message_id === "string" ? body.message_id
-      : typeof body?.messageId === "string" ? body.messageId
-        : typeof body?.id === "string" ? body.id : null;
-    return { messageId };
-  };
+    if (response.status === 409) return { messageId: messageIdFrom(body) };
+    if (!response.ok) throw Object.assign(new Error("provider error"), { code: "PROVIDER_ERROR" });
+    return { messageId: messageIdFrom(body) };
+  }
+
+  send.durableIdempotency = true;
+  return send;
 }
 
 function createEmailNotifier({ send, resolveDestination, logger = { error() {} } } = {}) {
@@ -61,8 +78,7 @@ function createEmailNotifier({ send, resolveDestination, logger = { error() {} }
         text: summary.text,
         idempotencyKey,
       });
-      const providerOpaqueId = result?.messageId ?? result?.providerOpaqueId ?? null;
-      return { providerOpaqueId };
+      return { providerOpaqueId: opaqueId(result?.messageId ?? result?.providerOpaqueId) };
     } catch (error) {
       logger.error?.(redact(error?.message));
       throw Object.assign(new Error("provider error"), {
@@ -71,7 +87,7 @@ function createEmailNotifier({ send, resolveDestination, logger = { error() {} }
     }
   }
 
-  provider.durableIdempotency = true;
+  provider.durableIdempotency = send.durableIdempotency === true;
   return provider;
 }
 

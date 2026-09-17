@@ -3,7 +3,7 @@ const test = require("node:test");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 
-const { createGateClient, projectInbox, projectProfile } = require("../gate-client");
+const { createGateClient, projectInbox, projectProfile, sanitizeHumanText } = require("../gate-client");
 
 const BIN = path.resolve(__dirname, "../bin/gavel.js");
 const FORBIDDEN = /notification|destination|capacity|signature|session|nonce|ciphertext|providerOpaque|quoteSigner|retryCount/i;
@@ -105,6 +105,18 @@ function runCli(args, env = {}) {
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 }
+
+test("human show strips terminal controls but keeps newlines and tabs", () => {
+  const hostile = "ok\n\t\u001b[2J\u001b]8;;https://evil.test/drain\u0007Gavel Official\r\b\u0007";
+  const cleaned = sanitizeHumanText(hostile);
+  assert.equal(cleaned.includes("\u001b"), false);
+  assert.equal(cleaned.includes("\r"), false);
+  assert.equal(cleaned.includes("\b"), false);
+  assert.equal(cleaned.includes("\u0007"), false);
+  assert.match(cleaned, /ok\n\t/);
+  assert.match(cleaned, /Gavel Official/);
+  assert.equal(JSON.stringify({ pitch: hostile }).includes("\\u001b"), true);
+});
 
 test("CLI gate commands refuse missing sessions and do not invent follow-up", async () => {
   const missing = await runCli(["gate", "inbox"], { GAVEL_GATE_SESSION: "", GAVEL_GATE_URL: "http://127.0.0.1:1" });

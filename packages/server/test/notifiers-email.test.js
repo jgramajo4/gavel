@@ -26,7 +26,7 @@ test("trusted summary is delivered and destination never appears in logs or erro
     send: async (value) => { sent.push(value); return { messageId: "msg-1" }; },
     logger: { error(message) { logs.push(String(message)); } },
   });
-  assert.equal(provider.durableIdempotency, true);
+  assert.equal(provider.durableIdempotency, false);
   const result = await provider({
     idempotencyKey: "notice-1", destinationRef: "vault:ciphertext", summary: SUMMARY,
   });
@@ -51,7 +51,9 @@ test("provider throw stays private and retryable without leaking destination", a
     return true;
   });
   assert.equal(JSON.stringify(logs).includes(DESTINATION), false);
-  const worker = durableWorker(provider, [{
+  const send = Object.assign(async () => { throw new Error("down"); }, { durableIdempotency: true });
+  const retryable = createEmailNotifier({ resolveDestination: async () => DESTINATION, send });
+  const worker = durableWorker(retryable, [{
     id: "notice-1", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext", summary: SUMMARY,
   }]);
   assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 0, failed: 1 });
@@ -99,6 +101,58 @@ test("raw advocate URLs are never fetched and notifier receives no signer or wal
   assert.equal("sign" in provider, false);
   assert.equal("wallet" in provider, false);
   assert.equal(provider.durableIdempotency, true);
+});
+
+test("durableIdempotency is inherited from the sender, never hardcoded on the wrapper", () => {
+  const dummy = createEmailNotifier({
+    resolveDestination: async () => DESTINATION,
+    send: async () => ({ messageId: "x" }),
+  });
+  assert.equal(dummy.durableIdempotency, false);
+  assert.throws(() => durableWorker(dummy, []), /durable.*idempotencyKey/i);
+  const promised = Object.assign(async () => ({ messageId: "x" }), { durableIdempotency: true });
+  const wrapped = createEmailNotifier({
+    resolveDestination: async () => DESTINATION, send: promised,
+  });
+  assert.equal(wrapped.durableIdempotency, true);
+});
+
+test("overlong provider ids are dropped instead of turning a successful send into a retry", async () => {
+  const send = Object.assign(async () => ({ messageId: "m".repeat(403) }), { durableIdempotency: true });
+  const provider = createEmailNotifier({
+    resolveDestination: async () => DESTINATION, send,
+  });
+  const result = await provider({ idempotencyKey: "notice-1", destinationRef: "ref", summary: SUMMARY });
+  assert.deepEqual(result, { providerOpaqueId: null });
+  const worker = durableWorker(provider, [{
+    id: "notice-1", claimToken: "1", retryCount: 0, destinationRef: "ref", summary: SUMMARY,
+  }]);
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 1, failed: 0 });
+});
+
+test("AgentMail 409 is a completed send, not a retryable failure", async () => {
+  const send = createAgentMailSender({
+    apiUrl: "https://api.agentmail.to", apiKey: "am_test", fromInbox: "agent@gavel.example",
+    fetchImpl: async () => ({
+      ok: false, status: 409, async json() { return { message_id: "am_existing" }; },
+    }),
+  });
+  assert.equal(send.durableIdempotency, true);
+  const result = await send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey: "notice-1" });
+  assert.deepEqual(result, { messageId: "am_existing" });
+});
+
+test("AgentMail send times out, rejects redirects, and omits an empty idempotency header", async () => {
+  let captured;
+  const send = createAgentMailSender({
+    apiUrl: "https://api.agentmail.to", apiKey: "am_test", fromInbox: "agent@gavel.example",
+    fetchImpl: async (_url, options) => { captured = options; return { ok: true, status: 200, async json() { return { message_id: "am_1" }; } }; },
+  });
+  await send({ to: DESTINATION, subject: "s", text: "t", idempotencyKey: "notice-1" });
+  assert.equal(captured.redirect, "error");
+  assert.equal(typeof captured.signal?.aborted, "boolean");
+  await send({ to: DESTINATION, subject: "s", text: "t" });
+  assert.equal(Object.hasOwn(captured.headers, "Idempotency-Key"), false);
 });
 
 test("AgentMail sender stamps Idempotency-Key and returns only an opaque id", async () => {

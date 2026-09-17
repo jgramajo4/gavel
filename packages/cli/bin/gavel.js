@@ -41,7 +41,7 @@ const {
   resolveExecutionReadiness,
   runChronologicalBacktest,
 } = require("../../core");
-const { createGateClient, GateClientError } = require("../gate-client");
+const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
 
 const DATA_DIR = resolveDataDir();
 const SUPPORTED_DAOS = Object.freeze(["nouns", "ens", "railgun-eth"]);
@@ -1344,8 +1344,8 @@ async function gateCommand(argv) {
           writeJson({ command: "inbox.show", item });
           return;
         }
-        process.stdout.write(`${item.id}  ${item.archived ? "archived" : "unread"}\n`);
-        process.stdout.write(`${item.pitch || ""}\n`);
+        process.stdout.write(`${sanitizeHumanText(item.id)}  ${item.archived ? "archived" : "unread"}\n`);
+        process.stdout.write(`${sanitizeHumanText(item.pitch)}\n`);
         return;
       }
       if (action === "archive") {

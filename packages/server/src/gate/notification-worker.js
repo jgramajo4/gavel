@@ -54,7 +54,7 @@ function createNotificationWorker({ store, provider, clock = () => new Date(), b
           idempotencyKey: job.id, destinationRef: job.destinationRef, summary: job.summary,
         }));
         const providerOpaqueId = result?.providerOpaqueId;
-        if (providerOpaqueId !== undefined && (typeof providerOpaqueId !== "string" || providerOpaqueId.length > 256)) {
+        if (providerOpaqueId != null && (typeof providerOpaqueId !== "string" || providerOpaqueId.length > 256)) {
           throw new Error("invalid provider result");
         }
         const completed = await store.completeNotification({
