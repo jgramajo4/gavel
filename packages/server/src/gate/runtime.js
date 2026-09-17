@@ -73,7 +73,7 @@ function notifierRuntimeConfigFromEnv(env = process.env) {
   }
   if (mode === "disabled") {
     const unexpected = NOTIFIER_CONFIG_KEYS.slice(1)
-      .some((name) => typeof env[name] === "string" && env[name] !== "");
+      .some((name) => Object.prototype.hasOwnProperty.call(env, name));
     if (unexpected) throw new TypeError("disabled notifier mode cannot include AgentMail or encryption configuration");
     return Object.freeze({ mode });
   }
@@ -249,6 +249,11 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   if (notificationLeaseMs > 3_600_000) throw new TypeError("GAVEL_GATE_NOTIFICATION_LEASE_MS must not exceed 3600000");
   const confirmationDepth = positive(env.GAVEL_GATE_CONFIRMATION_DEPTH, "GAVEL_GATE_CONFIRMATION_DEPTH", 1);
   if (confirmationDepth !== 1) throw new TypeError("GAVEL_GATE_CONFIRMATION_DEPTH must be exactly 1 for the MVP");
+  const monitorConfirmations = positive(env.GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS,
+    "GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS", 64);
+  if (monitorConfirmations !== 64) {
+    throw new TypeError("GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS must be exactly 64 for the MVP");
+  }
   const rpcTimeoutMs = positive(env.GAVEL_GATE_BASE_RPC_TIMEOUT_MS, "GAVEL_GATE_BASE_RPC_TIMEOUT_MS", 10_000);
   if (rpcTimeoutMs > 60_000) throw new TypeError("GAVEL_GATE_BASE_RPC_TIMEOUT_MS must not exceed 60000");
   return Object.freeze({
@@ -260,6 +265,7 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
     quoteSigner: env.GAVEL_GATE_QUOTE_SIGNER_ADDRESS.toLowerCase(),
     gavelRecipient: env.GAVEL_GATE_OWNER_RECIPIENT.toLowerCase(),
     confirmationDepth,
+    monitorConfirmations,
     overlap,
     maxBlockRange,
     pollIntervalMs: positive(env.GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS, "GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS", 5_000),
@@ -345,6 +351,7 @@ async function createGateServerRuntime(options = {}) {
       adapter,
       lifecycleReader: options.lifecycleReader,
       operatorAlert: options.operatorAlert,
+      monitorConfirmations: config.monitorConfirmations,
     });
     jobs.push(() => options.store.markExpired(), settlementService.scanOnce,
       settlementService.reconcileSubmitted, settlementService.monitorOnce);
@@ -400,13 +407,15 @@ async function createGateServerRuntime(options = {}) {
   };
   const server = factories.createGateHttpServer(httpOptions);
   const timers = [];
-  const running = new Set();
+  const running = new Map();
+  let stopping = false;
 
   async function invoke(job) {
-    if (running.has(job)) return undefined;
-    running.add(job);
-    try { return await job(); }
-    finally { running.delete(job); }
+    if (stopping || running.has(job)) return undefined;
+    const execution = Promise.resolve().then(job);
+    running.set(job, execution);
+    try { return await execution; }
+    finally { if (running.get(job) === execution) running.delete(job); }
   }
 
   function start() {
@@ -418,8 +427,12 @@ async function createGateServerRuntime(options = {}) {
     }
   }
 
-  function stop() {
+  async function stop() {
+    stopping = true;
     while (timers.length) scheduler.clearInterval(timers.shift());
+    const results = await Promise.allSettled([...running.values()]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   return Object.freeze({

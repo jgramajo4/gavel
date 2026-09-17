@@ -108,6 +108,9 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       const url = new URL(request.url, "http://gate.invalid");
       const path = url.pathname;
 
+      if (request.method === "GET" && path === "/health") {
+        return sendJson(response, 200, { ok: true, status: "ready" });
+      }
       if (request.method === "POST" && path === "/v1/gate/auth/challenge") {
         let allowed = false;
         try { allowed = await challengeLimiter.allow(request.socket.remoteAddress || "unknown"); } catch { /* fail closed */ }

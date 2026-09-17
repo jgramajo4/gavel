@@ -11,6 +11,8 @@
     "pg": "^8.23.0"
   },
   "scripts": {
+    "start": "node bin/gavel-server.js",
+    "smoke": "node ../../scripts/gate-smoke.js",
     "probe:agentmail": "node bin/agentmail-probe.js",
     "test": "node --test test/*.test.js"
   }

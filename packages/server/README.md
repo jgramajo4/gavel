@@ -123,3 +123,24 @@ wallet):
 - `GET /v1/gate/me/inbox`
 - `GET /v1/gate/me/inbox/:id`
 - `POST /v1/gate/me/inbox/:id/archive` — idempotent; does not change public accepted state
+
+## Canonical process and smoke check
+
+`npm start --workspace @gavel/server` runs the single canonical Gate HTTP and
+worker process. Startup fails before listening unless the `gavel_gate` database
+role is least-privilege, the Gate migration sentinels exist, the canonical index
+is healthy, Ethereum RPC reports chain 1, and Base deployment/RPC attestation
+matches the persisted registry. `GET /health` is exposed only after those checks
+and returns exactly `{ "ok": true, "status": "ready" }`.
+
+Container packaging lives in `Dockerfile.server` and
+`docker-compose.server.yml`; it is deliberately separate from the existing
+read-only index deployment. Validate a running instance without credentials or
+response-body relay:
+
+```sh
+GAVEL_GATE_URL=http://127.0.0.1:8081 npm run smoke --workspace @gavel/server
+```
+
+See `docs/deployment/GAVEL_GATE_EXPERIMENTAL.md` for the fail-closed deployment,
+rotation, rollback, and activation gates.

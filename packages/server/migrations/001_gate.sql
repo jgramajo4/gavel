@@ -41,20 +41,21 @@ BEGIN
           = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables <> 20)
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
-            'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings') AND installed_tables <> 20)
+            'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
+            'sha256:gate-001-v3-runtime-readiness') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
          AND column_name='scanner_result' AND is_nullable='NO' AND data_type='jsonb')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings') AND NOT EXISTS(
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings') AND (
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -80,7 +81,7 @@ BEGIN
           NOT IN ('sha256:gate-001-v3-postgres-parity','sha256:gate-001-v3-durable-auth-profile',
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
             'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings')
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -1159,7 +1160,7 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
-    <> 'sha256:gate-001-v3-bound-delivery-settings' THEN
+    NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1317,8 +1318,42 @@ LANGUAGE sql SET search_path=pg_catalog AS $catalog_manifest$
 $catalog_manifest$;
 REVOKE ALL ON FUNCTION public.gavel_gate_catalog_manifest() FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.runtime_migration_status()
+RETURNS TABLE("migrationVersion" text,"migrationChecksum" text,"manifestMatches" boolean)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public AS $runtime_migration_status$
+ SELECT m.version,m.migration_checksum,
+   m.catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
+ FROM public.schema_migrations m WHERE m.version='gate/001_gate-v3'
+$runtime_migration_status$;
+REVOKE ALL ON FUNCTION gate.runtime_migration_status() FROM PUBLIC;
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_gate') THEN
+  GRANT EXECUTE ON FUNCTION gate.runtime_migration_status() TO gavel_gate;
+ END IF;
+END $$;
+
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-bound-delivery-settings',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v3-runtime-readiness',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
-   catalog_manifest=EXCLUDED.catalog_manifest;
+   catalog_manifest=EXCLUDED.catalog_manifest
+ WHERE public.schema_migrations.migration_checksum IN (
+   'sha256:gate-001-v3-postgres-parity',
+   'sha256:gate-001-v3-durable-auth-profile',
+   'sha256:gate-001-v3-durable-auth-profile-hardening',
+   'sha256:gate-001-v3-legacy-upgrade-hardening',
+   'sha256:gate-001-v3-closed-base-environments',
+   'sha256:gate-001-v3-agentmail-idempotency',
+   'sha256:gate-001-v3-bound-delivery-settings',
+   'sha256:gate-001-v3-runtime-readiness'
+ );
+DO $$ BEGIN
+ IF NOT EXISTS (
+   SELECT 1 FROM public.schema_migrations
+   WHERE version='gate/001_gate-v3'
+     AND migration_checksum='sha256:gate-001-v3-runtime-readiness'
+     AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
+ ) THEN
+  RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';
+ END IF;
+END $$;

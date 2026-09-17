@@ -137,7 +137,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
     await pool.query(migration);
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v3-bound-delivery-settings",
+      migration_checksum: "sha256:gate-001-v3-runtime-readiness",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition

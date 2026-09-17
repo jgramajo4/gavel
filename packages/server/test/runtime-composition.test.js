@@ -133,8 +133,12 @@ test("both notifier modes reject injected providers and disabled rejects every n
     ["AGENTMAIL_API_KEY", "configured"],
     ["AGENTMAIL_FROM_INBOX", "gate@gavel.example"],
     ["AGENTMAIL_API_URL", "https://api.agentmail.to"],
-  ]) assert.throws(() => notifierRuntimeConfigFromEnv({ GAVEL_GATE_NOTIFIER_MODE: "disabled", [name]: value }),
-    /disabled notifier mode cannot include/i, name);
+  ]) {
+    for (const configured of [value, ""]) {
+      assert.throws(() => notifierRuntimeConfigFromEnv({ GAVEL_GATE_NOTIFIER_MODE: "disabled", [name]: configured }),
+        /disabled notifier mode cannot include/i, `${name}:${configured === "" ? "blank" : "value"}`);
+    }
+  }
 });
 
 test("AgentMail startup validates exact key encoding, sender inbox syntax, and allowlisted HTTPS origins", () => {
@@ -181,6 +185,7 @@ test("production settlement config requires exact Base mainnet and canonical nat
     quoteSigner: SIGNER,
     gavelRecipient: GAVEL_RECIPIENT,
     confirmationDepth: 1,
+    monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
     pollIntervalMs: 5_000,
@@ -208,6 +213,7 @@ test("test settlement config accepts exact Base Sepolia with an explicitly label
     quoteSigner: SIGNER,
     gavelRecipient: GAVEL_RECIPIENT,
     confirmationDepth: 1,
+    monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
     pollIntervalMs: 5_000,
@@ -302,6 +308,7 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
     quoteSigner: SIGNER,
     gavelRecipient: GAVEL_RECIPIENT,
     confirmationDepth: 1,
+    monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
     pollIntervalMs: 5_000,
@@ -317,7 +324,7 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
     GAVEL_GATE_NOTIFICATION_LEASE_MS: "420000",
   })), { environment: "production", chainId: "8453", token: CANONICAL_BASE_USDC.toLowerCase(),
     splitter: SPLITTER, quoteSigner: SIGNER, gavelRecipient: GAVEL_RECIPIENT,
-    confirmationDepth: 1, overlap: 12, maxBlockRange: 200,
+    confirmationDepth: 1, monitorConfirmations: 64, overlap: 12, maxBlockRange: 200,
     pollIntervalMs: 9_000, rpcTimeoutMs: 8_000, notificationLeaseMs: 420_000 });
 });
 
@@ -346,6 +353,8 @@ test("partial or malformed settlement configuration fails closed", () => {
     GAVEL_GATE_BASE_RPC_TIMEOUT_MS: "60001" })), /GAVEL_GATE_BASE_RPC_TIMEOUT_MS/);
   assert.throws(() => settlementRuntimeConfigFromEnv(productionEnv({
     GAVEL_GATE_NOTIFICATION_LEASE_MS: "3600001" })), /GAVEL_GATE_NOTIFICATION_LEASE_MS/);
+  assert.throws(() => settlementRuntimeConfigFromEnv(productionEnv({
+    GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS: "63" })), /GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS.*exactly 64/);
 });
 
 test("canonical server composes only after authoritative deployment parity", async () => {
@@ -610,11 +619,14 @@ test("AgentMail runtime fails closed when profile writes cannot bind the runtime
   }), /profile service.*encryption/i);
 });
 
-test("start and stop own one serialized interval per composed job", async () => {
+test("start and stop own one serialized interval per composed job and drain active work", async () => {
   const { createGateServerRuntime } = loadRuntime();
   const scheduled = []; const cleared = [];
+  const activeJob = new Promise((resolve) => setTimeout(resolve, 20));
+  const testServices = services();
+  testServices.store.markExpired = () => activeJob;
   const runtime = await createGateServerRuntime({
-    ...services(), env: { ...productionEnv(), ...notifierEnv() },
+    ...testServices, env: { ...productionEnv(), ...notifierEnv() },
     scheduler: {
       setInterval(callback, delay) { scheduled.push({ callback, delay }); return scheduled.length; },
       clearInterval(id) { cleared.push(id); },
@@ -629,6 +641,39 @@ test("start and stop own one serialized interval per composed job", async () => 
   runtime.start();
   assert.equal(scheduled.length, 5);
   assert.ok(scheduled.every((item) => item.delay === 5_000));
-  runtime.stop();
+  const run = runtime.runOnce();
+  await Promise.resolve();
+  let stopped = false;
+  const stopping = runtime.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  assert.equal(stopped, false);
+  await Promise.all([run, stopping]);
   assert.deepEqual(cleared, [1, 2, 3, 4, 5]);
+});
+
+test("stop waits for every active worker when one worker rejects", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  let delayedFinished = false;
+  const testServices = services();
+  testServices.store.markExpired = async () => { throw new Error("worker failed"); };
+  const runtime = await createGateServerRuntime({
+    ...testServices, env: { ...productionEnv(), ...notifierEnv() },
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return {
+        async scanOnce() {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          delayedFinished = true;
+        },
+        async reconcileSubmitted() {},
+        async monitorOnce() {},
+      }; },
+      createGateHttpServer() { return {}; },
+    },
+  });
+  const run = runtime.runOnce().catch(() => {});
+  await Promise.resolve();
+  await assert.rejects(runtime.stop(), /worker failed/);
+  assert.equal(delayedFinished, true);
+  await run;
 });

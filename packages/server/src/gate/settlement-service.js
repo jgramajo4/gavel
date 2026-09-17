@@ -62,7 +62,7 @@ function bounded(operation, timeoutMs) {
 }
 
 function createSettlementService({ store, adapter, lifecycleReader, lifecycleTimeoutMs = 2_000,
-  operatorAlert, clock = () => new Date(), batchSize = 50 } = {}) {
+  operatorAlert, clock = () => new Date(), batchSize = 50, monitorConfirmations = 64 } = {}) {
   for (const method of ["recordSettlementHint", "getScannerState", "findSettlementQuote", "recordScannerRange",
     "listUnsettledSettlementObservations", "claimSettlementLifecycle", "recordSettlementLifecycle", "settle",
     "listPendingSettlementHints", "resolveSettlementHint", "claimSettlementMonitors", "advanceSettlementMonitor"]) {
@@ -72,6 +72,7 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     if (!adapter || typeof adapter[method] !== "function") throw new TypeError(`adapter.${method} is required`);
   }
   if (adapter.confirmationDepth !== 1) throw new TypeError("adapter.confirmationDepth must be exactly 1 for the MVP");
+  if (monitorConfirmations !== 64) throw new TypeError("monitorConfirmations must be exactly 64 for the MVP");
   if (typeof lifecycleReader !== "function") throw new TypeError("lifecycleReader must be a function");
   if (typeof operatorAlert !== "function") throw new TypeError("operatorAlert must be a function");
   if (!Number.isSafeInteger(lifecycleTimeoutMs) || lifecycleTimeoutMs < 1 || lifecycleTimeoutMs > 10_000) {
@@ -214,7 +215,8 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     let reorged = 0; let completed = 0;
     for (const monitor of monitors) {
       const check = await adapter.revalidateMonitor(monitor);
-      const final = head >= BigInt(monitor.receiptBlock) + 63n;
+      const target = BigInt(monitor.receiptBlock) + BigInt(monitorConfirmations - 1);
+      const final = head >= target;
       const wasReorged = check.canonical !== true;
       const done = wasReorged || final;
       const advanced = await store.advanceSettlementMonitor({ id: monitor.id, claimToken: monitor.claimToken,
