@@ -48,7 +48,7 @@ For Base Sepolia, use exactly `GAVEL_GATE_ENVIRONMENT=test`, chain `84532`, the 
 
 These contracts are isolated from the unchanged Base-mainnet deployment script:
 
-- `DeployBaseSepoliaMockUSDC3009.s.sol` deploys the existing `MockUSDC3009` only on chain `84532`. It reports `USD Coin` / version `2` / `USDC` / 6 decimals, uses the exact `ReceiveWithAuthorization` type hash, caller-is-payee check, per-signer nonce replay state, and a chain/address-bound EIP-712 domain. Its unrestricted `mint` is solely for test funding. **It is not production-safe and must never represent real value.**
+- `DeployBaseSepoliaTestUSDC3009.s.sol` deploys the dedicated `BaseSepoliaTestUSDC3009` only on chain `84532`. It reports `USD Coin` / version `2` / `USDC` / 6 decimals, uses the exact `ReceiveWithAuthorization` type hash, caller-is-payee check, time window, per-signer nonce replay state, signature and balance checks, and a chain/address-bound EIP-712 domain. Its unrestricted `mint` is solely for test funding. **It is intentionally test-only, is not production-safe, and must never represent real value.** The existing fault-injection test mock remains test-suite-only.
 - `DeployBaseSepoliaGavelGateSplitter.s.sol` accepts `BASE_SEPOLIA_TEST_TOKEN`, `GAVEL_RECIPIENT`, and `QUOTE_SIGNER`; requires chain `84532`, nonzero configuration, token code, exact token name/version/decimals/domain, and post-deploy splitter immutable/domain readback. It deploys the existing `GavelGateSplitter` unchanged with fee `250000`.
 - `DeployGavelGateSplitter.s.sol` remains the only Base-mainnet path and still requires chain `8453` plus canonical native USDC.
 
@@ -61,10 +61,10 @@ export BASE_SEPOLIA_RPC_URL='<secret-bearing RPC from the approved secret store>
 export GAVEL_RECIPIENT='0x...'
 export QUOTE_SIGNER='0x...'
 
-forge script script/DeployBaseSepoliaMockUSDC3009.s.sol:DeployBaseSepoliaMockUSDC3009 \
+forge script script/DeployBaseSepoliaTestUSDC3009.s.sol:DeployBaseSepoliaTestUSDC3009 \
   --rpc-url "$BASE_SEPOLIA_RPC_URL" --account <foundry-keystore-account>
 # Approved broadcast only; omitted during review:
-forge script script/DeployBaseSepoliaMockUSDC3009.s.sol:DeployBaseSepoliaMockUSDC3009 \
+forge script script/DeployBaseSepoliaTestUSDC3009.s.sol:DeployBaseSepoliaTestUSDC3009 \
   --rpc-url "$BASE_SEPOLIA_RPC_URL" --account <foundry-keystore-account> --broadcast
 
 export BASE_SEPOLIA_TEST_TOKEN='<address from the confirmed token deployment>'
@@ -77,65 +77,21 @@ forge script script/DeployBaseSepoliaGavelGateSplitter.s.sol:DeployBaseSepoliaGa
 
 ### Deployment evidence artifact
 
-The machine-readable schema is `contracts/gate/deployments/base-sepolia/deployment.schema.json`. Write the actual ignored artifact to `contracts/gate/deployments/base-sepolia/<splitter-address>.json`; review and then publish it through the approved release-evidence channel. It contains public chain evidence only and never RPC URLs, credentials, signer keys, or database ciphertext.
+The machine-readable schema is `contracts/gate/deployments/base-sepolia/deployment.schema.json`. It enforces the artifact's structural shape only. The executable `script/capture-base-sepolia-deployment.mjs` validator enforces cross-field and on-chain invariants, including receipts, deployed code and locally recomputed code hashes, metadata, immutable bindings, fee, and both EIP-712 domains. Write the actual ignored artifact to `contracts/gate/deployments/base-sepolia/<splitter-address>.json`; review and then publish it through the approved release-evidence channel. It contains public chain evidence only and never RPC URLs, credentials, signer keys, or database ciphertext.
 
-After both receipts are confirmed, reproduce the artifact from Foundry's broadcast JSON plus on-chain reads. Keep shell tracing disabled because the RPC variable can contain credentials:
+After both receipts are confirmed, capture and validate the artifact from Foundry's broadcast JSON plus independent on-chain reads. Keep shell tracing disabled because the RPC variable can contain credentials:
 
 ```sh
 set -eu
-CAST="$HOME/.foundry/bin/cast"
-TOKEN_RUN=broadcast/DeployBaseSepoliaMockUSDC3009.s.sol/84532/run-latest.json
+TOKEN_RUN=broadcast/DeployBaseSepoliaTestUSDC3009.s.sol/84532/run-latest.json
 SPLITTER_RUN=broadcast/DeployBaseSepoliaGavelGateSplitter.s.sol/84532/run-latest.json
-TOKEN_TX=$(jq -er '.transactions[] | select(.contractName=="MockUSDC3009") | .hash' "$TOKEN_RUN")
-TOKEN=$(jq -er '.transactions[] | select(.contractName=="MockUSDC3009") | .contractAddress' "$TOKEN_RUN")
-SPLITTER_TX=$(jq -er '.transactions[] | select(.contractName=="GavelGateSplitter") | .hash' "$SPLITTER_RUN")
-SPLITTER=$(jq -er '.transactions[] | select(.contractName=="GavelGateSplitter") | .contractAddress' "$SPLITTER_RUN")
-TOKEN_BLOCK=$($CAST to-dec "$($CAST receipt "$TOKEN_TX" --rpc-url "$BASE_SEPOLIA_RPC_URL" --json | jq -er .blockNumber)")
-SPLITTER_BLOCK=$($CAST to-dec "$($CAST receipt "$SPLITTER_TX" --rpc-url "$BASE_SEPOLIA_RPC_URL" --json | jq -er .blockNumber)")
-TOKEN_CODE=$($CAST code "$TOKEN" --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_CODE=$($CAST code "$SPLITTER" --rpc-url "$BASE_SEPOLIA_RPC_URL")
-TOKEN_CODE_HASH=$($CAST codehash "$TOKEN" --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_CODE_HASH=$($CAST codehash "$SPLITTER" --rpc-url "$BASE_SEPOLIA_RPC_URL")
-TOKEN_NAME=$($CAST call "$TOKEN" 'name()(string)' --rpc-url "$BASE_SEPOLIA_RPC_URL" | jq -Rr fromjson)
-TOKEN_VERSION=$($CAST call "$TOKEN" 'version()(string)' --rpc-url "$BASE_SEPOLIA_RPC_URL" | jq -Rr fromjson)
-TOKEN_SYMBOL=$($CAST call "$TOKEN" 'symbol()(string)' --rpc-url "$BASE_SEPOLIA_RPC_URL" | jq -Rr fromjson)
-TOKEN_DECIMALS=$($CAST call "$TOKEN" 'decimals()(uint8)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-TOKEN_DOMAIN=$($CAST call "$TOKEN" 'DOMAIN_SEPARATOR()(bytes32)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_TOKEN=$($CAST call "$SPLITTER" 'usdc()(address)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_RECIPIENT=$($CAST call "$SPLITTER" 'gavelRecipient()(address)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_SIGNER=$($CAST call "$SPLITTER" 'quoteSigner()(address)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_FEE=$($CAST call "$SPLITTER" 'GAVEL_FEE_AMOUNT()(uint256)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SPLITTER_DOMAIN=$($CAST call "$SPLITTER" 'DOMAIN_SEPARATOR()(bytes32)' --rpc-url "$BASE_SEPOLIA_RPC_URL")
-SOURCE_COMMIT=$(git rev-parse HEAD)
-ARTIFACT="deployments/base-sepolia/${SPLITTER}.json"
-
-jq -n \
-  --arg sourceCommit "$SOURCE_COMMIT" \
-  --arg token "$TOKEN" --arg tokenTx "$TOKEN_TX" --arg tokenBlock "$TOKEN_BLOCK" \
-  --arg tokenCode "$TOKEN_CODE" --arg tokenCodeHash "$TOKEN_CODE_HASH" \
-  --arg tokenName "$TOKEN_NAME" --arg tokenVersion "$TOKEN_VERSION" --arg tokenSymbol "$TOKEN_SYMBOL" \
-  --arg tokenDomain "$TOKEN_DOMAIN" \
-  --arg splitter "$SPLITTER" --arg splitterTx "$SPLITTER_TX" --arg splitterBlock "$SPLITTER_BLOCK" \
-  --arg splitterCode "$SPLITTER_CODE" --arg splitterCodeHash "$SPLITTER_CODE_HASH" \
-  --arg splitterToken "$SPLITTER_TOKEN" --arg recipient "$SPLITTER_RECIPIENT" \
-  --arg signer "$SPLITTER_SIGNER" --arg fee "$SPLITTER_FEE" --arg splitterDomain "$SPLITTER_DOMAIN" \
-  --argjson decimals "$TOKEN_DECIMALS" \
-  '{schemaVersion:1,environment:"test",chainId:"84532",sourceCommit:$sourceCommit,
-    token:{label:"base-sepolia-mock-usdc3009-unrestricted-mint",productionSafe:false,address:$token,
-      deployment:{hash:$tokenTx,block:$tokenBlock},code:{runtimeBytecode:$tokenCode,runtimeCodeHash:$tokenCodeHash},
-      name:$tokenName,version:$tokenVersion,symbol:$tokenSymbol,decimals:$decimals,domainSeparator:$tokenDomain},
-    splitter:{address:$splitter,deployment:{hash:$splitterTx,block:$splitterBlock},
-      code:{runtimeBytecode:$splitterCode,runtimeCodeHash:$splitterCodeHash},token:$splitterToken,
-      gavelRecipient:$recipient,quoteSigner:$signer,gavelFeeAmount:$fee,domainSeparator:$splitterDomain}}' > "$ARTIFACT"
-
-jq -e '.schemaVersion==1 and .environment=="test" and .chainId=="84532"
-  and .token.productionSafe==false and .token.name=="USD Coin" and .token.version=="2"
-  and .token.symbol=="USDC" and .token.decimals==6
-  and (.splitter.token|ascii_downcase)==(.token.address|ascii_downcase)
-  and .splitter.gavelFeeAmount=="250000"' "$ARTIFACT" >/dev/null
+ARTIFACT="deployments/base-sepolia/0x<splitter-address>.json"
+node script/capture-base-sepolia-deployment.mjs capture \
+  --token-run "$TOKEN_RUN" --splitter-run "$SPLITTER_RUN" --output "$ARTIFACT"
+node script/capture-base-sepolia-deployment.mjs validate "$ARTIFACT"
 ```
 
-The artifact's splitter deployment block is the scanner start block. Re-run every `cast` read independently before registry activation; do not trust only the local broadcast file.
+The artifact's splitter deployment block is the scanner start block. The capture and validation commands fail closed unless the RPC reports Base Sepolia and all recorded receipt and on-chain evidence matches; do not trust only the local broadcast file.
 
 ### Base Sepolia registry and runtime configuration
 
@@ -143,16 +99,21 @@ Do not alter SQL constraints. Configure the existing store with `environment: "t
 
 ```sh
 export DEPLOYMENT_ARTIFACT="$PWD/contracts/gate/deployments/base-sepolia/0x....json"
-export GAVEL_GATE_DATABASE_URL='<least-privilege registry-writer connection>'
-export GAVEL_GATE_RPC_ACCESS_CIPHERTEXT='<encrypted Base Sepolia RPC access envelope>'
+export GAVEL_GATE_DATABASE_URL='<controlled operator/bootstrap database connection>'
+export GAVEL_GATE_RPC_ACCESS_CIPHERTEXT='<operator-provisioned encrypted opaque material>'
 node - <<'NODE'
 const fs = require('node:fs');
 const { PostgresGateStore } = require('./packages/server/src/gate/store');
 const artifact = JSON.parse(fs.readFileSync(process.env.DEPLOYMENT_ARTIFACT, 'utf8'));
+const rpcAccess = process.env.GAVEL_GATE_RPC_ACCESS_CIPHERTEXT;
+if (typeof rpcAccess !== 'string' || rpcAccess.trim() === '') throw new Error('RPC access ciphertext is required');
+if (/^(?:https?|wss?):\/\//i.test(rpcAccess.trim()) || /^(?:<.*>|changeme|placeholder|todo)$/i.test(rpcAccess.trim())) {
+  throw new Error('RPC access must be operator-provisioned encrypted opaque material');
+}
 const store = new PostgresGateStore({ connectionString: process.env.GAVEL_GATE_DATABASE_URL });
 (async () => {
   try {
-    const row = await store.configureDeployment({
+    const expected = {
       id: `base-sepolia-${artifact.splitter.address.toLowerCase()}`,
       chainId: '84532',
       splitter: artifact.splitter.address,
@@ -162,16 +123,31 @@ const store = new PostgresGateStore({ connectionString: process.env.GAVEL_GATE_D
       deploymentBlock: artifact.splitter.deployment.block,
       contractCodeHash: artifact.splitter.code.runtimeCodeHash,
       config: { environment: 'test', testTokenLabel: artifact.token.label, overlap: 64 },
-      rpcAccess: process.env.GAVEL_GATE_RPC_ACCESS_CIPHERTEXT,
+      rpcAccess,
       issuanceActive: false,
-    });
-    if (row.issuanceActive !== false) throw new Error('initial issuance was not disabled');
+    };
+    await store.configureDeployment(expected);
+    const row = await store.getDeployment({ chainId: expected.chainId, splitter: expected.splitter });
+    if (!row || row.id !== expected.id || row.chainId !== expected.chainId
+        || row.splitter.toLowerCase() !== expected.splitter.toLowerCase()
+        || row.signer.toLowerCase() !== expected.signer.toLowerCase()
+        || row.token.toLowerCase() !== expected.token.toLowerCase()
+        || row.gavelRecipient.toLowerCase() !== expected.gavelRecipient.toLowerCase()
+        || row.deploymentBlock !== expected.deploymentBlock
+        || row.contractCodeHash.toLowerCase() !== expected.contractCodeHash.toLowerCase()
+        || row.config?.environment !== 'test'
+        || row.config?.testTokenLabel !== artifact.token.label
+        || row.issuanceActive !== false) {
+      throw new Error('deployment registry readback mismatch');
+    }
   } finally {
     await store.close();
   }
 })().catch(() => { console.error('deployment registry configuration failed'); process.exitCode = 1; });
 NODE
 ```
+
+This is a controlled operator/bootstrap action through the existing supported `PostgresGateStore`, using separately provisioned database credentials. The repository defines no dedicated registry-writer role and no canonical RPC-envelope grammar. Treat `GAVEL_GATE_RPC_ACCESS_CIPHERTEXT` as operator-provisioned encrypted opaque material; the bootstrap rejects blank values, obvious placeholders, and plaintext HTTP/WebSocket RPC URLs without printing the value. Initial issuance remains disabled.
 
 Read the exact row back without selecting `rpc_access_ciphertext`, and compare it to the artifact before startup:
 
@@ -187,7 +163,7 @@ Set the server secret store to the matching values below. `GAVEL_GATE_BASE_RPC_U
 ```text
 GAVEL_GATE_ENVIRONMENT=test
 GAVEL_GATE_BASE_CHAIN_ID=84532
-GAVEL_GATE_TEST_TOKEN_LABEL=base-sepolia-mock-usdc3009-unrestricted-mint
+GAVEL_GATE_TEST_TOKEN_LABEL=base-sepolia-test-usdc3009-unrestricted-mint
 GAVEL_GATE_BASE_USDC=<artifact token.address>
 GAVEL_GATE_SPLITTER=<artifact splitter.address>
 GAVEL_GATE_QUOTE_SIGNER_ADDRESS=<artifact splitter.quoteSigner>
