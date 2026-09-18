@@ -82,6 +82,17 @@ if (command === "tx") {
   };
   if (mode === "altered-creation-input" && token) tx.input += "ff";
   if (mode === "malformed-transaction" && token) delete tx.input;
+  if (token && mode.startsWith("wrapped-")) {
+    const wrapped = { success: true, errors: [], data: tx };
+    if (mode === "wrapped-success-false") wrapped.success = false;
+    if (mode === "wrapped-errors") wrapped.errors = ["provider error"];
+    if (mode === "wrapped-missing-errors") delete wrapped.errors;
+    if (mode === "wrapped-missing-data") delete wrapped.data;
+    if (mode === "wrapped-null-data") wrapped.data = null;
+    if (mode === "wrapped-array-data") wrapped.data = [tx];
+    if (mode === "wrapped-malformed-transaction") delete wrapped.data.input;
+    console.log(JSON.stringify(wrapped)); process.exit(0);
+  }
   console.log(JSON.stringify(tx)); process.exit(0);
 }
 if (command === "receipt") {
@@ -193,6 +204,43 @@ test("accepts plain and annotated Cast uint output and rejects every other form"
         { SYNTHETIC_CAST_UINT_OUTPUT: output },
       );
       assert.notEqual(captured.status, 0, `${JSON.stringify(output)} unexpectedly passed`);
+    });
+  }
+});
+
+test("accepts direct and valid wrapped transaction JSON and rejects invalid wrappers", async (t) => {
+  for (const [name, mode] of [
+    ["direct top-level transaction", "ok"],
+    ["valid wrapped success response", "wrapped-success"],
+  ]) {
+    await t.test(name, () => {
+      const fixture = setupSyntheticFixture();
+      const captured = run(
+        ["capture", "--token-run", fixture.tokenRun, "--splitter-run", fixture.splitterRun, "--output", fixture.artifact],
+        fixture,
+        { SYNTHETIC_CAST_MODE: mode },
+      );
+      assert.equal(captured.status, 0, captured.stderr);
+    });
+  }
+
+  for (const mode of [
+    "wrapped-success-false",
+    "wrapped-errors",
+    "wrapped-missing-errors",
+    "wrapped-missing-data",
+    "wrapped-null-data",
+    "wrapped-array-data",
+    "wrapped-malformed-transaction",
+  ]) {
+    await t.test(mode, () => {
+      const fixture = setupSyntheticFixture();
+      const captured = run(
+        ["capture", "--token-run", fixture.tokenRun, "--splitter-run", fixture.splitterRun, "--output", fixture.artifact],
+        fixture,
+        { SYNTHETIC_CAST_MODE: mode },
+      );
+      assert.notEqual(captured.status, 0, `${mode} unexpectedly passed`);
     });
   }
 });

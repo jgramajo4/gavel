@@ -199,6 +199,17 @@ function expectedCreationInputs(artifact) {
   return { token, splitter: `${splitter}${constructorArgs.slice(2)}` };
 }
 
+function normalizeTransactionJson(value, label) {
+  object(value, label);
+  const wrapped = Object.hasOwn(value, "success") || Object.hasOwn(value, "errors") || Object.hasOwn(value, "data");
+  if (!wrapped) return value;
+  if (value.success !== true || !Array.isArray(value.errors) || value.errors.length !== 0
+      || !value.data || typeof value.data !== "object" || Array.isArray(value.data)) {
+    fail(`${label} wrapper is invalid`);
+  }
+  return value.data;
+}
+
 function creationTransaction(rpc, deployment, expectedInput, label) {
   let value;
   try {
@@ -206,7 +217,7 @@ function creationTransaction(rpc, deployment, expectedInput, label) {
   } catch {
     fail(`${label} deployment transaction is missing or malformed`);
   }
-  object(value, `${label} deployment transaction`);
+  value = normalizeTransactionJson(value, `${label} deployment transaction`);
   if (!("hash" in value) || !("to" in value) || !("input" in value)) {
     fail(`${label} deployment transaction is incomplete`);
   }
