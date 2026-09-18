@@ -98,11 +98,17 @@ if (command === "code") {
 }
 if (command === "call") {
   const [address, signature] = args;
+  const uintOutput = (plain) => {
+    const override = process.env.SYNTHETIC_CAST_UINT_OUTPUT;
+    if (override !== undefined) return override;
+    if (process.env.SYNTHETIC_CAST_ANNOTATED_UINT !== "yes") return plain;
+    return plain === "250000" ? "250000 [2.5e5]" : "6 [6e0]";
+  };
   const values = {
     "name()(string)": '"USD Coin"', "version()(string)": '"2"', "symbol()(string)": '"USDC"',
-    "decimals()(uint8)": "6", "DOMAIN_SEPARATOR()(bytes32)": address === A.token ? E.tokenDomain : E.splitterDomain,
+    "decimals()(uint8)": uintOutput("6"), "DOMAIN_SEPARATOR()(bytes32)": address === A.token ? E.tokenDomain : E.splitterDomain,
     "usdc()(address)": A.token, "gavelRecipient()(address)": A.recipient,
-    "quoteSigner()(address)": A.signer, "GAVEL_FEE_AMOUNT()(uint256)": "250000",
+    "quoteSigner()(address)": A.signer, "GAVEL_FEE_AMOUNT()(uint256)": uintOutput("250000"),
   };
   if (!(signature in values)) process.exit(1);
   console.log(values[signature]); process.exit(0);
@@ -160,6 +166,35 @@ test("synthetic capture builds and validates one fail-closed deployment artifact
   symlinkSync(symlinkTarget, symlinkOutput);
   const redirected = run(["capture", "--token-run", fixture.tokenRun, "--splitter-run", fixture.splitterRun, "--output", symlinkOutput], fixture);
   assert.notEqual(redirected.status, 0, "capture followed an output symlink");
+});
+
+test("accepts plain and annotated Cast uint output and rejects every other form", async (t) => {
+  for (const [name, extraEnv] of [
+    ["plain decimal", {}],
+    ["annotated decimal", { SYNTHETIC_CAST_ANNOTATED_UINT: "yes" }],
+  ]) {
+    await t.test(name, () => {
+      const fixture = setupSyntheticFixture();
+      const captured = run(
+        ["capture", "--token-run", fixture.tokenRun, "--splitter-run", fixture.splitterRun, "--output", fixture.artifact],
+        fixture,
+        extraEnv,
+      );
+      assert.equal(captured.status, 0, captured.stderr);
+    });
+  }
+
+  for (const output of ["-1", "0x3d090", "2.5e5", "", "nonnumeric", "[2.5e5]"]) {
+    await t.test(`rejects ${JSON.stringify(output)}`, () => {
+      const fixture = setupSyntheticFixture();
+      const captured = run(
+        ["capture", "--token-run", fixture.tokenRun, "--splitter-run", fixture.splitterRun, "--output", fixture.artifact],
+        fixture,
+        { SYNTHETIC_CAST_UINT_OUTPUT: output },
+      );
+      assert.notEqual(captured.status, 0, `${JSON.stringify(output)} unexpectedly passed`);
+    });
+  }
 });
 
 test("synthetic validator rejects every required malformed or mismatched evidence class", async (t) => {
