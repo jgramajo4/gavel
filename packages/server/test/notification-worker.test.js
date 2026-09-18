@@ -57,13 +57,13 @@ test("21. notifier receives only trusted pre-rendered summary and an opaque priv
 test("22. provider success marks only the private notification attempt sent", async () => {
   const h = harness();
   const result = await h.worker.runOnce();
-  assert.deepEqual(result, { claimed: 1, sent: 1, failed: 0 });
+  assert.deepEqual(result, { claimed: 1, attempted: 1, sent: 1, failed: 0 });
   assert.deepEqual(h.calls.find(([name]) => name === "complete")[1], { id: "notice-1", claimToken: "1", providerOpaqueId: "opaque-1" });
 });
 
 test("23. provider throw preserves acceptance and schedules bounded exponential backoff", async () => {
   const h = harness({ provider: async () => { throw Object.assign(new Error("secret provider detail"), { code: "TEMP" }); } });
-  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, sent: 0, failed: 1 });
+  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, attempted: 1, sent: 0, failed: 1 });
   const failure = h.calls.find(([name]) => name === "fail")[1];
   assert.deepEqual(failure, { id: "notice-1", claimToken: "1", errorCode: "TEMP", nextAttemptAt: new Date("2026-01-01T00:00:01Z") });
   assert.equal(JSON.stringify(failure).includes("secret provider detail"), false);
@@ -76,7 +76,7 @@ test("24. retry delay is capped and invalid provider capabilities or job shapes 
   assert.equal(capped.calls.find(([name]) => name === "fail")[1].nextAttemptAt.toISOString(), "2026-01-01T00:00:04.000Z");
   assert.throws(() => createNotificationWorker({ store: {}, provider: { fetch() {} } }), /provider.*function/i);
   const invalid = harness({ attempts: [{ id: "n", claimToken: "1", destinationRef: "https://example.com", summary: { subject: "s", text: "t" } }] });
-  assert.deepEqual(await invalid.worker.runOnce(), { claimed: 1, sent: 0, failed: 1 });
+  assert.deepEqual(await invalid.worker.runOnce(), { claimed: 1, attempted: 0, sent: 0, failed: 1 });
 });
 
 test("25. public serializer is never consulted or mutated by notification processing", async () => {
@@ -91,7 +91,7 @@ test("26. a poison notification is isolated and does not abort the rest of the c
     { id: "poison", claimToken: "1", retryCount: 0, destinationRef: "https://attacker.invalid", summary: { subject: "s", text: "t" } },
     { id: "healthy", claimToken: "2", retryCount: 0, destinationRef: "private:2", summary: { subject: "s", text: "t" } },
   ] });
-  assert.deepEqual(await h.worker.runOnce(), { claimed: 2, sent: 1, failed: 1 });
+  assert.deepEqual(await h.worker.runOnce(), { claimed: 2, attempted: 1, sent: 1, failed: 1 });
   assert.deepEqual(h.calls.find(([name, value]) => name === "fail" && value.id === "poison")[1], {
     id: "poison", claimToken: "1", errorCode: "INVALID_JOB", nextAttemptAt: new Date("2026-01-01T00:00:01Z"),
   });
@@ -112,7 +112,7 @@ test("27. lost claim ownership is not reported as a completed delivery", async (
     operatorAlert: async () => {},
     clock: () => new Date("2026-01-01T00:00:00Z"),
   });
-  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 0, failed: 0 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, attempted: 0, sent: 0, failed: 0 });
 });
 
 test("28. a failure-recording error is isolated from later jobs", async () => {
@@ -135,7 +135,7 @@ test("28. a failure-recording error is isolated from later jobs", async () => {
     operatorAlert: async () => {},
     clock: () => new Date("2026-01-01T00:00:00Z"),
   });
-  assert.deepEqual(await worker.runOnce(), { claimed: 2, sent: 1, failed: 0 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 2, attempted: 2, sent: 1, failed: 0 });
   assert.deepEqual(completed, ["healthy"]);
 });
 
@@ -148,7 +148,7 @@ test("provider idempotency conflict enters terminal private reconciliation and a
     attempts: [{ id: key, claimToken: "9", retryCount: 0, firstAttemptAt: new Date("2026-01-01T00:00:00Z"),
       dedupeDeadline: new Date("2026-01-02T00:00:00Z"), destinationRef: secret, summary: { subject: "s", text: body } }],
   });
-  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, sent: 0, failed: 0, reconciled: 1 });
+  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, attempted: 1, sent: 0, failed: 0, reconciled: 1 });
   assert.equal(h.calls.some(([name]) => name === "complete" || name === "fail"), false);
   assert.deepEqual(h.calls.find(([name]) => name === "reconcile")[1], {
     id: key, claimToken: "9", errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT",
@@ -166,7 +166,7 @@ test("retry that could cross the 24-hour dedupe deadline stops in terminal recon
       firstAttemptAt: new Date("2025-12-31T00:00:04Z"), dedupeDeadline: new Date("2026-01-01T00:00:04Z"),
       destinationRef: "private:expiring", summary: { subject: "s", text: "t" } }],
   });
-  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, sent: 0, failed: 0, reconciled: 1 });
+  assert.deepEqual(await h.worker.runOnce(), { claimed: 1, attempted: 0, sent: 0, failed: 0, reconciled: 1 });
   assert.equal(sends, 0);
   assert.deepEqual(h.calls.find(([name]) => name === "reconcile")[1], {
     id: "notice-expiring", claimToken: "3", errorCode: "PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED",
@@ -199,7 +199,7 @@ test("elapsed time inside a claimed batch is rechecked before every provider cal
       async reconcileNotification(value) { reconciled.push(value); return true; },
     },
   });
-  assert.deepEqual(await worker.runOnce(), { claimed: 2, sent: 1, failed: 0, reconciled: 1 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 2, attempted: 1, sent: 1, failed: 0, reconciled: 1 });
   assert.deepEqual(sent, ["first"]);
   assert.equal(reconciled[0].id, "second");
 });

@@ -84,6 +84,32 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
   });
 });
 
+test("Nouns index client reports aggregate freshness age and health without source details", async () => {
+  const { createNounsIndexClient, IndexUnavailableError } = loadIndexClient();
+  const gauges = [];
+  const source = {
+    async getHealth() { return { healthy: true, refreshedAt: "2026-09-14T00:00:00.000Z" }; },
+    async getProposal() { return {
+      dao: "nouns", proposalId: "42", effectiveStatus: "ACTIVE", refreshedAt: "2026-09-14T00:00:00.000Z",
+      sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
+    }; },
+  };
+  const observability = { gauge(...args) { gauges.push(args); } };
+  const healthy = createNounsIndexClient({ source, observability,
+    clock: () => new Date("2026-09-14T00:00:12.500Z") });
+  await healthy.getProposalSnapshot("42");
+  assert.deepEqual(gauges, [
+    ["gate_dao_freshness_age_seconds", 12.5, { health: "healthy" }],
+    ["gate_dao_freshness_age_seconds", 12.5, { health: "healthy" }],
+  ]);
+
+  gauges.length = 0;
+  const stale = createNounsIndexClient({ source, observability, freshnessMs: 1_000,
+    clock: () => new Date("2026-09-14T00:00:12.500Z") });
+  await assert.rejects(stale.getProposalSnapshot("42"), IndexUnavailableError);
+  assert.deepEqual(gauges, [["gate_dao_freshness_age_seconds", 12.5, { health: "stale" }]]);
+});
+
 test("Nouns index client never exposes stale ACTIVE as VOTING after canonical terminalization", async () => {
   const { createNounsIndexClient } = loadIndexClient();
   const source = {

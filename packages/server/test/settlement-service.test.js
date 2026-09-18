@@ -69,9 +69,13 @@ function fakeHarness(options = {}) {
     async findSettlementQuote(id) { calls.push(["quote", id]); return id === QUOTE_ID ? state.q : null; },
     async recordScannerRange(value) {
       calls.push(["range", value]);
+      if (options.rangeError) throw options.rangeError;
       state.unsettled = value.observations.filter((item) => item.kind === "exact_log")
         .map((item) => ({ quoteId: item.quoteId, settlement: item.details.settlement }));
-      return options.rangeResult ?? { released: 0 };
+      if (options.rangeResult) return options.rangeResult;
+      const codes = value.observations.filter((item) => item.kind === "anomaly").map((item) => item.details?.code);
+      return { released: 0, unknownQuotes: codes.filter((code) => code === "UNKNOWN_QUOTE").length,
+        mismatches: codes.filter((code) => code !== "UNKNOWN_QUOTE").length };
     },
     async listUnsettledSettlementObservations() { calls.push(["unsettled"]); return state.unsettled; },
     async claimSettlementLifecycle(value) {
@@ -89,14 +93,17 @@ function fakeHarness(options = {}) {
     },
     async listPendingSettlementHints() { return state.pending; },
     async resolveSettlementHint(value) { calls.push(["resolve", value]); },
+    async getSettlementMonitorStats(value) { calls.push(["monitorStats", value]); if (options.monitorStatsError) throw options.monitorStatsError; return options.monitorStats ?? {
+      queueDepth: (options.monitors ?? []).length, oldestAgeSeconds: 0, progressLag: 0,
+    }; },
     async claimSettlementMonitors(value) { calls.push(["claimMonitors", value]); return options.monitors ?? []; },
-    async advanceSettlementMonitor(value) { calls.push(["monitor", value]); return true; },
+    async advanceSettlementMonitor(value) { calls.push(["monitor", value]); if (options.advanceMonitorError) throw options.advanceMonitorError; return true; },
   };
   const adapter = {
     chainId: "8453", splitter: SPLITTER, confirmationDepth: 1, overlap: options.adapterOverlap ?? 64,
     maxBlockRange: options.maxBlockRange ?? 5_000,
     async getSafeHead() { return state.safeHead; },
-    async getCanonicalHead() { return state.canonicalHead; },
+    async getCanonicalHead() { if (options.canonicalHeadError) throw options.canonicalHeadError; return state.canonicalHead; },
     async scanRange(range) { calls.push(["scan", range]); return {
       canonicalBlocks: Array.from({ length: Number(range.throughBlock - range.fromBlock + 1n) }, (_, index) => ({
         blockNumber: String(range.fromBlock + BigInt(index)), blockHash: H("a"), blockTimestamp: new Date(100_000),
@@ -299,6 +306,20 @@ test("8. submitted browser hash authenticates exact base_sender owner and stores
   assert.deepEqual(h.calls[0][1], { publicId: "A".repeat(22), payer: PAYER, txHash: TX, chainId: "8453", splitter: SPLITTER });
 });
 
+test("8a. observability preserves the settlement service receipt API", async () => {
+  const h = fakeHarness();
+  const response = await h.service.submitTxHash({ session: { role: "base_sender", wallet: PAYER }, publicId: "A".repeat(22),
+    txHash: TX, chainId: "8453" });
+  assert.deepEqual(Object.keys(response).sort(), ["publicId", "state", "updatedAt"]);
+});
+
+test("8b. monitor statistics remain optional observability", () => {
+  const h = fakeHarness();
+  delete h.store.getSettlementMonitorStats;
+  assert.doesNotThrow(() => createSettlementService({ store: h.store, adapter: h.adapter,
+    lifecycleReader: async () => "ACTIVE", operatorAlert: async () => {} }));
+});
+
 test("9. settlement submission rejects wrong role, malformed hash, wrong chain, and non-owner store result", async () => {
   const h = fakeHarness();
   await assert.rejects(h.service.submitTxHash({ session: { role: "dao_inbox", wallet: PAYER }, publicId: "A".repeat(22), txHash: TX, chainId: "8453" }), SettlementRequestError);
@@ -327,6 +348,8 @@ test("10. canonical expected log settles without any submitted transaction hash"
   const h = fakeHarness();
   const result = await h.service.scanOnce();
   assert.equal(result.accepted, 1);
+  assert.deepEqual({ confirmationLag: result.confirmationLag, cursorLag: result.cursorLag, overlapLag: result.overlapLag },
+    { confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.state.settlement.quoteId, QUOTE_ID);
   assert.equal(h.calls.some(([name]) => name === "hint"), false);
 });
@@ -352,6 +375,8 @@ test("12. unknown quote IDs create only redacted scanner anomalies", async () =>
   const h = fakeHarness({ candidates: [unknown] });
   const result = await h.service.scanOnce();
   assert.equal(result.accepted, 0);
+  assert.equal(result.unknownQuotes, 1);
+  assert.equal(result.mismatches, 0);
   assert.equal(h.calls.some(([name]) => name === "settle"), false);
   const range = h.calls.find(([name]) => name === "range")[1];
   assert.deepEqual(range.observations[0].details, { code: "UNKNOWN_QUOTE" });
@@ -366,6 +391,7 @@ test("13. every persisted quote/event/economics/deployment binding and quote ver
     const h = fakeHarness({ quote: { [field]: patch } });
     const result = await h.service.scanOnce();
     assert.equal(result.accepted, 0, field);
+    assert.equal(result.mismatches, 1, field);
     assert.equal(h.calls.some(([name]) => name === "settle"), false, field);
   }
 });
@@ -438,7 +464,9 @@ test("18a. a submitted tx whose expected event belongs to another or mismatched 
 test("19. accepted monitor claims only at the canonical head and advances durable scheduling before 64 confirmations", async () => {
   const monitor = { id: "m", claimToken: "7", quoteId: QUOTE_ID, receiptBlock: "10", receiptBlockHash: BLOCK_HASH, txHash: TX, logIndex: 2 };
   const pending = fakeHarness({ safeHead: 60n, canonicalHead: 72n, monitors: [monitor] });
-  await pending.service.monitorOnce();
+  const result = await pending.service.monitorOnce();
+  assert.deepEqual({ queueDepth: result.queueDepth, oldestAgeSeconds: result.oldestAgeSeconds, progressLag: result.progressLag },
+    { queueDepth: 1, oldestAgeSeconds: 0, progressLag: 0 });
   assert.deepEqual(pending.calls.find(([name]) => name === "claimMonitors")[1], {
     chainId: "8453", splitter: SPLITTER, headBlock: "72", limit: 1, leaseMs: 300000,
   });
@@ -477,12 +505,36 @@ test("19c. transient monitor RPC failure leaves the durable monitor active for l
   const h = fakeHarness({ canonicalHead: 73n, monitors: [monitor], revalidationError: timeout });
   await assert.rejects(h.service.monitorOnce(), (error) => error === timeout);
   assert.equal(h.calls.some(([name]) => name === "monitor"), false);
-  assert.deepEqual(h.operatorAlerts, []);
+  assert.deepEqual(h.operatorAlerts, [{ code: "FINAL_CHECK_FAILED", source: "monitor" }]);
+});
+
+test("19c.1 telemetry-only monitor statistics failure does not prevent durable monitoring", async () => {
+  const monitor = { id: "m", claimToken: "9", quoteId: QUOTE_ID, receiptBlock: "10", receiptBlockHash: BLOCK_HASH, txHash: TX, logIndex: 2 };
+  const h = fakeHarness({ canonicalHead: 20n, monitors: [monitor], monitorStatsError: new Error("telemetry SQL failed") });
+  const result = await h.service.monitorOnce();
+  assert.equal(result.checked, 1);
+  assert.equal(h.calls.some(([name]) => name === "monitor"), true);
+  assert.equal(Object.hasOwn(result, "queueDepth"), false);
+});
+
+test("19c.1a malformed telemetry-only monitor statistics are omitted without blocking monitoring", async () => {
+  const h = fakeHarness({ monitorStats: { queueDepth: Symbol("bad"), oldestAgeSeconds: -1, progressLag: Infinity }, monitors: [] });
+  assert.deepEqual(await h.service.monitorOnce(), { checked: 0, completed: 0, reorged: 0 });
+});
+
+test("19c.2 final-check persistence failure emits a redacted failure alert", async () => {
+  const failure = new Error("private database detail");
+  const monitor = { id: "m", claimToken: "9", quoteId: QUOTE_ID, receiptBlock: "10", receiptBlockHash: BLOCK_HASH, txHash: TX, logIndex: 2 };
+  const h = fakeHarness({ canonicalHead: 73n, monitors: [monitor], advanceMonitorError: failure });
+  await assert.rejects(h.service.monitorOnce(), (error) => error === failure);
+  assert.deepEqual(h.operatorAlerts, [{ code: "FINAL_CHECK_FAILED", source: "monitor" }]);
+  assert.equal(JSON.stringify(h.operatorAlerts).includes(failure.message), false);
 });
 
 test("19d. trailing-overlap reorg persistence emits the same narrow redacted operator alert", async () => {
   const h = fakeHarness({ candidates: [], rangeResult: { released: 0, reorged: 1 } });
-  await h.service.scanOnce();
+  const result = await h.service.scanOnce();
+  assert.equal(result.reorged, 1);
   assert.deepEqual(h.operatorAlerts, [{ code: "POST_ACCEPTANCE_SETTLEMENT_REORG", source: "scanner_overlap",
     chainId: "8453", splitter: SPLITTER }]);
   assert.equal(JSON.stringify(h.operatorAlerts).includes(QUOTE_ID), false);
@@ -508,6 +560,13 @@ test("22. scanner limits each range while preserving the frozen overlap window",
   assert.deepEqual(h.calls.find(([name]) => name === "scan")[1], { fromBlock: 5n, throughBlock: 104n });
 });
 
+test("22a. telemetry-only canonical-head failure does not prevent safe-head scanning", async () => {
+  const h = fakeHarness({ candidates: [], canonicalHeadError: new Error("secondary RPC failed") });
+  const result = await h.service.scanOnce();
+  assert.equal(result.scanned > 0, true);
+  assert.equal(Object.hasOwn(result, "confirmationLag"), false);
+});
+
 test("23. a persisted exact observation is recovered before the next scanner range", async () => {
   const persisted = candidate({ settledAt: new Date(101_000) });
   const h = fakeHarness({ unsettled: [{ quoteId: QUOTE_ID, settlement: persisted }], candidates: [persisted] });
@@ -531,17 +590,27 @@ test("24. scanner persists lifecycle-attempt state and never retries the read af
   assert.equal(h.lifecycleCalls(), 1);
 });
 
+test("24a. a failed durable cursor checkpoint emits one redacted operator alert and aborts", async () => {
+  const failure = new Error("database details must not enter telemetry");
+  const h = fakeHarness({ rangeError: failure });
+  await assert.rejects(h.service.scanOnce(), (error) => error === failure);
+  assert.deepEqual(h.operatorAlerts, [{ code: "CHECKPOINT_FAILED", source: "cursor" }]);
+  assert.equal(JSON.stringify(h.operatorAlerts).includes(failure.message), false);
+});
+
 test("25. a lagging safe head drains a current-generation durable observation without scanning or moving the cursor", async () => {
   const durable = candidate({ settledAt: new Date(101_000) });
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n,
     unsettled: [{ quoteId: QUOTE_ID, settlement: durable }], candidates: [] });
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.state.settlement.settlement, durable);
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
   assert.deepEqual(h.operatorAlerts, []);
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.calls.filter(([name]) => name === "settle").length, 1);
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
 });
@@ -550,7 +619,8 @@ test("25a. durable observations settle while the safe head is before deployment"
   const h = fakeHarness({ deploymentBlock: "5", nextRangeFrom: "100", safeHead: 4n,
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
 });
 
@@ -558,7 +628,8 @@ test("25b. a shallow head regression neither fabricates canonical coverage nor r
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 35n,
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
   assert.deepEqual(h.operatorAlerts, []);
 });
@@ -567,7 +638,8 @@ test("25c. a pending lifecycle claim remains retryable when the safe head is lag
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, lifecycleClaimPending: true,
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.calls.filter(([name]) => name === "claimLifecycle").length, 1);
   assert.equal(h.calls.some(([name]) => name === "settle" || name === "scan" || name === "range"), false);
   assert.equal(h.state.unsettled.length, 1);
@@ -576,6 +648,7 @@ test("25c. a pending lifecycle claim remains retryable when the safe head is lag
 test("25d. a lagging safe head with no durable observations is a no-op", async () => {
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, unsettled: [], candidates: [] });
 
-  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0 });
+  assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range" || name === "settle"), false);
 });

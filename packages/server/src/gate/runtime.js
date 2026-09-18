@@ -300,6 +300,10 @@ async function createGateServerRuntime(options = {}) {
   };
   const onError = options.onError ?? (() => {});
   if (typeof onError !== "function") throw new TypeError("onError must be a function");
+  const observability = options.observability;
+  if (observability !== undefined && typeof observability?.observeWorkerResult !== "function") {
+    throw new TypeError("observability.observeWorkerResult must be a function");
+  }
 
   let adapter = null;
   let settlementService = null;
@@ -353,8 +357,15 @@ async function createGateServerRuntime(options = {}) {
       operatorAlert: options.operatorAlert,
       monitorConfirmations: config.monitorConfirmations,
     });
-    jobs.push(() => options.store.markExpired(), settlementService.scanOnce,
-      settlementService.reconcileSubmitted, settlementService.monitorOnce);
+    const observedJob = (name, job) => async () => {
+      const result = await job();
+      try { observability?.observeWorkerResult(name, result); } catch {}
+      return result;
+    };
+    jobs.push(observedJob("expire", () => options.store.markExpired()),
+      observedJob("scan", settlementService.scanOnce),
+      observedJob("reconcile", settlementService.reconcileSubmitted),
+      observedJob("monitor", settlementService.monitorOnce));
     if (notifierConfig.mode === "agentmail") {
       const { encryptDestination, resolveDestination: decryptDestination } = createDeliverySettingsCipher({
         encodedKey: notifierConfig.encryptionKey,
@@ -394,7 +405,7 @@ async function createGateServerRuntime(options = {}) {
         store: options.store, provider: notificationProvider, leaseMs: config.notificationLeaseMs,
         operatorAlert: options.operatorAlert,
       });
-      jobs.push(notificationWorker.runOnce);
+      jobs.push(observedJob("notification", notificationWorker.runOnce));
     }
   }
 
@@ -404,6 +415,7 @@ async function createGateServerRuntime(options = {}) {
     ...(!config || options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
     ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
+    ...(observability ? { observability } : {}),
   };
   const server = factories.createGateHttpServer(httpOptions);
   const timers = [];

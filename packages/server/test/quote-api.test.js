@@ -130,6 +130,36 @@ test("a valid submission returns the frozen payment-required quote payload", asy
   });
 });
 
+test("quote HTTP outcomes increment only aggregate issued and allowlisted rejection counters", async () => {
+  const counters = [];
+  const gate = await harness({ server: { observability: {
+    counter(name, value, labels) { counters.push([name, value, labels]); },
+  } } });
+  await withServer(gate.server, async (baseUrl) => {
+    assert.equal((await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()))).status, 201);
+    gate.state.healthy = false;
+    assert.equal((await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body({ pitch: "different" })))).status, 503);
+  });
+  assert.deepEqual(counters, [
+    ["gate_quote_issued_total", 1, undefined],
+    ["gate_quote_rejected_total", 1, { reason: "canonical_data_unavailable" }],
+  ]);
+});
+
+test("malformed and oversized quote requests use stable rejection reasons", async () => {
+  const counters = [];
+  const gate = await harness({ server: { maxBodyBytes: 32, observability: {
+    counter(name, value, labels) { if (name === "gate_quote_rejected_total") counters.push(labels.reason); },
+  } } });
+  await withServer(gate.server, async (baseUrl) => {
+    const path = `${baseUrl}/v1/gates/${VOTER}/submissions`;
+    const headers = { authorization: ["Bearer", TOKEN_VALUE].join(" "), "content-type": "application/json" };
+    await fetch(path, { method: "POST", headers, body: "{" });
+    await fetch(path, { method: "POST", headers, body: JSON.stringify({ pitch: "x".repeat(64) }) }).catch(() => {});
+  });
+  assert.deepEqual(counters, ["invalid_request", "request_too_large"]);
+});
+
 test("submission requires an exact base_sender session", async () => {
   const anonymous = await harness();
   await withServer(anonymous.server, async (baseUrl) => {

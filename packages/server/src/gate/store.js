@@ -432,11 +432,49 @@ class PostgresGateStore {
       metadata: range.metadata || {},
     };
     return this.#transaction(async (client) => {
+      await client.query("SELECT id FROM gate.settlement_cursors WHERE deployment_id=$1 FOR UPDATE", [range.deploymentId]);
+      const priorAnomalies = new Set((await client.query(`SELECT tx_hash,"log_index",details->>'code' AS code
+        FROM gate.settlement_scan_observations WHERE deployment_id=$1 AND kind='anomaly'
+          AND block_number BETWEEN $2 AND $3`, [range.deploymentId, fromBlock, throughBlock])).rows
+        .map((item) => `${item.tx_hash}:${item.log_index}:${item.code}`));
+      const priorExact = new Set((await client.query(`SELECT o.quote_id,o.tx_hash,o.log_index
+        FROM gate.settlement_scan_observations o JOIN gate.quotes q ON q.quote_id=o.quote_id
+        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match AND q.state<>'settled'
+          AND o.block_number BETWEEN $2 AND $3 AND o.scan_generation=(SELECT max(b.scan_generation)
+            FROM gate.settlement_scan_blocks b WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
+      const previouslyReorgedExact = new Set((await client.query(`SELECT DISTINCT o.quote_id,o.tx_hash,o.log_index
+        FROM gate.settlement_scan_observations o
+        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match
+          AND o.block_number BETWEEN $2 AND $3 AND EXISTS (
+            SELECT 1 FROM gate.settlement_scan_blocks b
+            WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number
+              AND b.scan_generation>o.scan_generation AND NOT EXISTS (
+                SELECT 1 FROM gate.settlement_scan_observations later
+                WHERE later.deployment_id=o.deployment_id AND later.scan_generation=b.scan_generation
+                  AND later.block_number=o.block_number AND later.kind='exact_log' AND later.exact_match
+                  AND later.quote_id=o.quote_id AND later.tx_hash=o.tx_hash AND later.log_index=o.log_index))`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
+      const alreadyReorged = new Set((await client.query(`SELECT id FROM gate.quotes WHERE deployment_id=$1
+        AND state='settled' AND settlement_reorged_at IS NOT NULL AND receipt_block BETWEEN $2 AND $3`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => item.id));
       const row = (await client.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb) AS released",
         [range.deploymentId, fromBlock, throughBlock, canonicalBlockHash, canonicalBlockTimestamp, JSON.stringify(result)])).rows[0];
-      const reorged = (await client.query(`SELECT count(*)::int AS count FROM gate.settlement_reorg_monitors
-        WHERE reconciliation_metadata#>>'{trailingOverlapReorg,generation}'=$1`, [generation])).rows[0];
-      return { released: Number(row?.released || 0), reorged: Number(reorged?.count || 0) };
+      const reorgedRows = (await client.query(`SELECT m.quote_id FROM gate.settlement_reorg_monitors m
+        JOIN gate.quotes q ON q.id=m.quote_id WHERE q.deployment_id=$2
+          AND m.reconciliation_metadata#>>'{trailingOverlapReorg,generation}'=$1`, [generation, range.deploymentId])).rows;
+      const anomalyKeys = observations.filter((item) => item.kind === "anomaly")
+        .map((item) => `${item.txHash}:${item.logIndex}:${item.details?.code}`);
+      const currentExact = new Set(observations.filter((item) => item.kind === "exact_log")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+      const reorged = reorgedRows.filter((item) => !alreadyReorged.has(item.quote_id)).length;
+      const unknownQuotes = anomalyKeys.filter((key) => key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const mismatches = anomalyKeys.filter((key) => !key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const preAcceptanceReorged = [...priorExact]
+        .filter((key) => !currentExact.has(key) && !previouslyReorgedExact.has(key)).length;
+      return { released: Number(row?.released || 0), reorged,
+        ...(unknownQuotes ? { unknownQuotes } : {}), ...(mismatches ? { mismatches } : {}),
+        ...(preAcceptanceReorged ? { preAcceptanceReorged } : {}) };
     });
   }
 
@@ -763,7 +801,9 @@ class PostgresGateStore {
       const changed = (await client.query(`UPDATE gate.submissions SET status='SETTLEMENT_PENDING',pending_settlement_tx_hash=$2,
         public_state_changed_at=clock_timestamp() WHERE id=$1 RETURNING public_state_changed_at AS "updatedAt"`,
       [row.id, transactionHash])).rows[0];
-      return { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(changed.updatedAt) };
+      const receipt = { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(changed.updatedAt) };
+      Object.defineProperty(receipt, "newlyPending", { value: true });
+      return receipt;
     });
   }
 
@@ -951,6 +991,19 @@ class PostgresGateStore {
       [monitor.id, e.sourceChainId, e.splitter, quote.id, e.receiptBlock, e.receiptBlockHash, e.txHash, e.logIndex, nextCheckBlock]);
       return { settled: true, inboxCreatedAt: accepted.inboxCreatedAt };
     });
+  }
+
+  async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
+    const settlementChain = positiveBigint(chainId, "chainId");
+    const settlementSplitter = address(splitter, "splitter");
+    const head = uint78(headBlock, "headBlock");
+    const row = (await this.pool.query(`SELECT count(*)::int AS "queueDepth",
+      COALESCE(EXTRACT(epoch FROM (clock_timestamp()-min(created_at))),0)::float8 AS "oldestAgeSeconds",
+      COALESCE(max(GREATEST($3::bigint-COALESCE(progress_block,receipt_block),0)),0)::float8 AS "progressLag"
+      FROM gate.settlement_reorg_monitors WHERE chain_id=$1 AND splitter=$2 AND completed_at IS NULL`,
+    [settlementChain, settlementSplitter, head])).rows[0];
+    return { queueDepth: Number(row?.queueDepth || 0), oldestAgeSeconds: Number(row?.oldestAgeSeconds || 0),
+      progressLag: Number(row?.progressLag || 0) };
   }
 
   async claimSettlementMonitors({ chainId, splitter, headBlock, limit = 50, leaseMs = 5 * 60_000 } = {}) {

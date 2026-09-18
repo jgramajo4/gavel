@@ -5,6 +5,7 @@ const { Contract, Interface, JsonRpcProvider, toBeHex } = require("ethers");
 const { createAuthService } = require("../src/gate/auth");
 const { createInboxService } = require("../src/gate/inbox-service");
 const { createNounsIndexClient } = require("../src/gate/index-client");
+const { createGateObservability } = require("../src/gate/observability");
 const { createProfileService } = require("../src/gate/profile-service");
 const { createQuoteSignerFromEnv } = require("../src/gate/quote-signer");
 const { createGateServerRuntime, settlementRuntimeConfigFromEnv } = require("../src/gate/runtime");
@@ -180,13 +181,14 @@ function contractVerifier(client) {
 
 async function composeProduction(env) {
   const config = serverConfigFromEnv(env);
+  const observability = createGateObservability();
   const baseClient = createRpcClient(config.baseRpcUrl, config.settlement.chainId);
   const ethereumClient = createRpcClient(config.ethereumRpcUrl, "1");
   const store = new PostgresGateStore({ connectionString: config.databaseUrl,
     baseCodeReader: ({ wallet }) => baseClient.getCode(wallet) });
   try {
     const source = createCanonicalIndexSource({ baseUrl: config.indexUrl, ethereumProvider: ethereumClient.provider });
-  const indexClient = createNounsIndexClient({ source, freshnessMs: config.freshnessMs });
+  const indexClient = createNounsIndexClient({ source, freshnessMs: config.freshnessMs, observability });
   const authService = createAuthService({
     repository: store, audience: config.audience,
     base: { chainId: Number(config.settlement.chainId), verifier: config.baseVerifier },
@@ -206,17 +208,21 @@ async function composeProduction(env) {
   });
   const inboxService = createInboxService({ store });
   const operatorAlert = ({ source, code } = {}) => {
-    const safeSource = /^[a-z0-9_]{1,64}$/.test(source || "") ? source : "gate";
-    const safeCode = /^[A-Z0-9_]{1,64}$/.test(code || "") ? code : "OPERATION_FAILED";
-    process.stderr.write(`${JSON.stringify({ level: "error", source: safeSource, code: safeCode })}\n`);
+    const safeSource = source === "scanner_overlap" ? "overlap" : source;
+    try { observability.recordOperatorAlert({ source: safeSource, code }); }
+    catch { try { observability.recordOperatorAlert({ source: "gate", code: "OPERATION_FAILED" }); } catch {} }
   };
   const runtime = await createGateServerRuntime({ env, store, baseClient, authService, profileService,
-    submissionService, inboxService, operatorAlert,
+    submissionService, inboxService, operatorAlert, observability,
     lifecycleReader: async ({ proposalId }) => (await indexClient.getProposalSnapshot(proposalId)).eligibility,
     onError: () => operatorAlert({ source: "gate_worker", code: "WORKER_FAILED" }),
-    notifierLogger: { error: (message) => process.stderr.write(`${message}\n`) },
+    notifierLogger: { error(message) {
+      const match = /^source=email_notifier code=([A-Z0-9_]{1,64})$/.exec(String(message));
+      try { observability.alert({ source: "email_notifier", code: match?.[1] || "PROVIDER_ERROR" }); }
+      catch { try { observability.alert({ source: "email_notifier", code: "PROVIDER_ERROR" }); } catch {} }
+    } },
   });
-  return { config, runtime, store, indexSource: source, ethereumClient };
+  return { config, runtime, store, indexSource: source, ethereumClient, observability };
   } catch (error) {
     await store.close().catch(() => {});
     throw error;
@@ -241,7 +247,14 @@ async function startGateServer({ env = process.env, dependencies = {}, installSi
     ]);
     const refreshedAt = Date.parse(health?.refreshedAt);
     const age = Date.now() - refreshedAt;
-    if (health?.healthy !== true || !Number.isFinite(age) || age < 0 || age > config.freshnessMs
+    const freshnessHealth = health?.healthy !== true ? "unhealthy"
+      : (!Number.isFinite(age) || age < 0 || age > config.freshnessMs) ? "stale" : "healthy";
+    try {
+      if (Number.isFinite(age) && age >= 0) {
+        composed.observability?.gauge("gate_dao_freshness_age_seconds", age / 1000, { health: freshnessHealth });
+      }
+    } catch {}
+    if (freshnessHealth !== "healthy"
         || ethereumChainId !== "1") throw new Error("canonical index or Ethereum RPC is unhealthy");
   });
   let stopping;

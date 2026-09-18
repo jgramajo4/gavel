@@ -33,7 +33,7 @@ function timestamp(value, name) {
 }
 
 function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs = DEFAULT_FRESHNESS_MS,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, observability } = {}) {
   if (!source || typeof source.getHealth !== "function" || typeof source.getProposal !== "function") {
     throw new TypeError("source.getHealth and source.getProposal are required");
   }
@@ -41,13 +41,26 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 10_000) {
     throw new TypeError("requestTimeoutMs must be an integer from 1 to 10000");
   }
+  if (observability !== undefined && typeof observability?.gauge !== "function") {
+    throw new TypeError("observability.gauge must be a function");
+  }
+  const reportFreshness = (age, health) => {
+    try { if (Number.isFinite(age) && age >= 0) observability?.gauge("gate_dao_freshness_age_seconds", age / 1000, { health }); } catch {}
+  };
 
   async function assertFresh(value, name) {
     const row = requireObject(value, name);
-    if (row.healthy !== true || row.lastError) throw new IndexUnavailableError();
     const refreshedAt = timestamp(row.refreshedAt, `${name}.refreshedAt`);
     const age = new Date(clock()).getTime() - Date.parse(refreshedAt);
-    if (!Number.isFinite(age) || age < 0 || age > freshnessMs) throw new IndexUnavailableError();
+    if (row.healthy !== true || row.lastError) {
+      reportFreshness(age, "unhealthy");
+      throw new IndexUnavailableError();
+    }
+    if (!Number.isFinite(age) || age < 0 || age > freshnessMs) {
+      reportFreshness(age, "stale");
+      throw new IndexUnavailableError();
+    }
+    reportFreshness(age, "healthy");
     return refreshedAt;
   }
   async function readSource(read) {
@@ -84,7 +97,11 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
       }
       const asOf = timestamp(power.asOf, "votingPower.asOf");
       const age = new Date(clock()).getTime() - Date.parse(asOf);
-      if (!Number.isFinite(age) || age < 0 || age > freshnessMs) throw new IndexUnavailableError();
+      if (!Number.isFinite(age) || age < 0 || age > freshnessMs) {
+        reportFreshness(age, "stale");
+        throw new IndexUnavailableError();
+      }
+      reportFreshness(age, "healthy");
       return {
         dao: "nouns",
         amount: decimal(power.amount, "votingPower.amount"),

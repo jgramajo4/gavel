@@ -14,6 +14,7 @@
     "start": "node bin/gavel-server.js",
     "smoke": "node ../../scripts/gate-smoke.js",
     "probe:agentmail": "node bin/agentmail-probe.js",
+    "observe:reorg": "node bin/gate-observe.js settlement-reorg",
     "test": "node --test test/*.test.js"
   }
 }

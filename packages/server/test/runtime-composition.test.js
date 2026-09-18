@@ -677,3 +677,28 @@ test("stop waits for every active worker when one worker rejects", async () => {
   assert.equal(delayedFinished, true);
   await run;
 });
+
+test("canonical runtime observes actual worker return values without changing them", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const input = services();
+  input.store.markExpired = async () => 3;
+  const observed = [];
+  const observability = { observeWorkerResult(job, result) { observed.push([job, result]); } };
+  const results = {
+    scan: { accepted: 2 }, reconcile: { checked: 1, resolved: 1 }, monitor: { queueDepth: 4 },
+  };
+  const runtime = await createGateServerRuntime({ ...input, env: productionEnv(), observability,
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return {
+        async scanOnce() { return results.scan; },
+        async reconcileSubmitted() { return results.reconcile; },
+        async monitorOnce() { return results.monitor; },
+      }; },
+      createGateHttpServer() { return {}; },
+    },
+  });
+
+  assert.deepEqual(await runtime.runOnce(), [3, results.scan, results.reconcile, results.monitor]);
+  assert.deepEqual(observed, [["expire", 3], ["scan", results.scan], ["reconcile", results.reconcile], ["monitor", results.monitor]]);
+});

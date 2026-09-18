@@ -71,7 +71,7 @@ test("provider throw stays private and retryable without leaking destination", a
   const worker = durableWorker(retryable, [{
     id: "notice-1", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext", summary: SUMMARY,
   }]);
-  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 0, failed: 1 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, attempted: 1, sent: 0, failed: 1 });
 });
 
 test("upstream exception text never reaches notifier logs", async () => {
@@ -172,7 +172,7 @@ test("overlong provider ids are dropped instead of turning a successful send int
   const worker = durableWorker(provider, [{
     id: "notice-1", claimToken: "1", retryCount: 0, destinationRef: "ref", summary: SUMMARY,
   }]);
-  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 1, failed: 0 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, attempted: 1, sent: 1, failed: 0 });
 });
 
 test("AgentMail 409 is a private idempotency conflict, never a completed send", async () => {
@@ -354,7 +354,7 @@ test("worker carries profile identity through authenticated decryption before se
     destinationRef: envelope, summary: SUMMARY,
   }]);
 
-  assert.deepEqual(await worker.runOnce(), { claimed: 1, sent: 1, failed: 0 });
+  assert.deepEqual(await worker.runOnce(), { claimed: 1, attempted: 1, sent: 1, failed: 0 });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].to, DESTINATION);
   assert.equal(JSON.stringify(sent).includes(envelope), false);

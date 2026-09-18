@@ -622,6 +622,46 @@ class MemoryGateStore {
           throw new Error("canonical scanner range does not join persisted ancestry");
         }
       }
+      const priorLatestByBlock = new Map();
+      for (const stored of this.#scannerRanges.values()) {
+        if (stored.deploymentId !== deployment.id) continue;
+        for (const item of stored.canonicalBlocks) {
+          const current = priorLatestByBlock.get(item.blockNumber);
+          if (current == null || BigInt(stored.generation) > BigInt(current)) priorLatestByBlock.set(item.blockNumber, stored.generation);
+        }
+      }
+      const priorAnomalies = new Set();
+      const priorExact = new Set();
+      const previouslyReorgedExact = new Set();
+      const seenExact = new Map();
+      const historicalRanges = [...this.#scannerRanges.values()]
+        .filter((stored) => stored.deploymentId === deployment.id)
+        .sort((left, right) => BigInt(left.generation) === BigInt(right.generation) ? 0
+          : BigInt(left.generation) < BigInt(right.generation) ? -1 : 1);
+      for (const stored of historicalRanges) {
+        const coveredBlocks = new Set(stored.canonicalBlocks.map((item) => String(item.blockNumber)));
+        const currentKeys = new Set(stored.observations.filter((item) => item.kind === "exact_log" && item.exactMatch === true)
+          .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+        for (const [identity, blockNumber] of seenExact) {
+          if (coveredBlocks.has(blockNumber) && !currentKeys.has(identity)) previouslyReorgedExact.add(identity);
+        }
+        for (const item of stored.observations) {
+          if (item.kind === "exact_log" && item.exactMatch === true) {
+            seenExact.set(`${item.quoteId}:${item.txHash}:${item.logIndex}`, String(item.blockNumber));
+          }
+        }
+      }
+      for (const stored of this.#scannerRanges.values()) {
+        if (stored.deploymentId !== deployment.id) continue;
+        for (const item of stored.observations) {
+          if (BigInt(item.blockNumber) < fromBlock.number || BigInt(item.blockNumber) > throughBlock.number) continue;
+          if (item.kind === "anomaly") priorAnomalies.add(`${item.txHash}:${item.logIndex}:${item.details?.code}`);
+          if (item.kind === "exact_log" && priorLatestByBlock.get(String(item.blockNumber)) === stored.generation) {
+            const quote = this.#quoteEntry(item.quoteId)?.[1];
+            if (quote && quote.state !== "settled") priorExact.add(`${item.quoteId}:${item.txHash}:${item.logIndex}`);
+          }
+        }
+      }
       this.#scannerRanges.set(replayKey, normalized);
       this.#settlementCursors.set(key, { ...clone(cursor), nextRangeFrom: (throughBlock.number + 1n).toString(),
         checkpointBlock: throughBlock.raw, canonicalBlockHash: normalized.canonicalBlockHash,
@@ -662,7 +702,8 @@ class MemoryGateStore {
           && String(item.blockNumber) === quote.receiptBlock && item.blockHash === quote.receiptBlockHash
           && instant(item.blockTimestamp, "observation.blockTimestamp").valueOf() === quote.receiptBlockTimestamp.valueOf());
         if (exact) continue;
-        const detectedAt = quote.settlementReorgedAt ?? instant(this.#clock(), "clock");
+        if (quote.settlementReorgedAt) continue;
+        const detectedAt = instant(this.#clock(), "clock");
         this.#quotes.set(quoteInternalId, { ...clone(quote), settlementReorgedAt: detectedAt });
         const monitorKey = `${quote.baseChainId}:${quote.splitter}:${quote.quoteId}`;
         const monitor = this.#monitors.get(monitorKey);
@@ -673,7 +714,16 @@ class MemoryGateStore {
         } });
         reorged += 1;
       }
-      return { released, reorged };
+      const anomalyKeys = observations.filter((item) => item.kind === "anomaly")
+        .map((item) => `${item.txHash}:${item.logIndex}:${item.details?.code}`);
+      const currentExact = new Set(observations.filter((item) => item.kind === "exact_log")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+      const unknownQuotes = anomalyKeys.filter((key) => key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const mismatches = anomalyKeys.filter((key) => !key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const preAcceptanceReorged = [...priorExact]
+        .filter((key) => !currentExact.has(key) && !previouslyReorgedExact.has(key)).length;
+      return { released, reorged, ...(unknownQuotes ? { unknownQuotes } : {}), ...(mismatches ? { mismatches } : {}),
+        ...(preAcceptanceReorged ? { preAcceptanceReorged } : {}) };
     });
   }
 
@@ -875,7 +925,9 @@ class MemoryGateStore {
       submission.pendingSettlementTxHash = transactionHash;
       submission.status = "SETTLEMENT_PENDING";
       submission.publicStateChangedAt = now;
-      return clone(publicSubmissionProjection(submission, null));
+      const receipt = clone(publicSubmissionProjection(submission, null));
+      Object.defineProperty(receipt, "newlyPending", { value: true });
+      return receipt;
     });
   }
 
@@ -1105,7 +1157,7 @@ class MemoryGateStore {
         ...clone(monitor), quoteId: quote.quoteId, chainId: quote.baseChainId, splitter: quote.splitter,
         receiptBlock: normalizedSettlement.receiptBlock, receiptBlockHash: normalizedSettlement.receiptBlockHash,
         txHash: normalizedSettlement.txHash, logIndex: normalizedSettlement.logIndex, completedAt: null,
-        claimedUntil: null, claimGeneration: 0, reconciliationMetadata: {},
+        claimedUntil: null, claimGeneration: 0, reconciliationMetadata: {}, createdAt: now,
       };
       await this.#beforeSettlementCommit();
       return this.#serialized(async () => {
@@ -1132,6 +1184,23 @@ class MemoryGateStore {
         this.#monitors.set(monitorKey, stagedMonitor);
         return { settled: true, inboxCreatedAt: clone(now) };
       });
+    });
+  }
+
+  async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    const head = block(headBlock, "headBlock").number;
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      const active = [...this.#monitors.values()].filter((row) => row.chainId === settlementChain
+        && row.splitter === settlementSplitter && !row.completedAt);
+      return {
+        queueDepth: active.length,
+        oldestAgeSeconds: active.length ? Math.max(0, (now - new Date(Math.min(...active.map((row) => row.createdAt.valueOf())))) / 1000) : 0,
+        progressLag: active.reduce((lag, row) => Math.max(lag,
+          Number(head - BigInt(row.progressBlock ?? row.receiptBlock) > 0n ? head - BigInt(row.progressBlock ?? row.receiptBlock) : 0n)), 0),
+      };
     });
   }
 

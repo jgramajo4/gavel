@@ -450,9 +450,20 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
       observations: [{ kind: "exact_log", quoteId: hash("f"), txHash: hash("a"), logIndex: 0, blockNumber: "9",
         blockHash: hash("d"), blockTimestamp: pendingObservedAt, exactMatch: true }] });
     const pendingRewriteAt = new Date();
-    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "7", throughBlock: "10",
+    const firstPendingRewrite = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "7", throughBlock: "10",
       canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingRewriteAt,
       canonicalBlocks: canonicalBlocks(7, 10, { changedBlock: 9, changedHash: hash("e"), timestamp: pendingRewriteAt }), observations: [] });
+    assert.equal(firstPendingRewrite.preAcceptanceReorged, 1);
+    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "8", throughBlock: "10",
+      canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingObservedAt,
+      canonicalBlocks: canonicalBlocks(8, 10, { timestamp: pendingObservedAt }),
+      observations: [{ kind: "exact_log", quoteId: hash("f"), txHash: hash("a"), logIndex: 0, blockNumber: "9",
+        blockHash: hash("d"), blockTimestamp: pendingObservedAt, exactMatch: true }] });
+    const repeatedPendingRewrite = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "6", fromBlock: "8", throughBlock: "10",
+      canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingRewriteAt,
+      canonicalBlocks: canonicalBlocks(8, 10, { changedBlock: 9, changedHash: hash("e"), timestamp: pendingRewriteAt }), observations: [] });
+    assert.equal(Object.hasOwn(repeatedPendingRewrite, "preAcceptanceReorged"), false,
+      "PostgreSQL must count a recurring pre-acceptance reorg only once");
     assert.equal((await createPublicGateReader(pool).getSubmission(issuedExpiring.publicId)).state, "pending_settlement");
     await assert.rejects(store.settle({ quoteId: hash("f"), settlement: pendingSettlement,
       inbox: { id: "inbox-stale", issuanceLifecycle: "VOTING", currentLifecycle: "UNKNOWN", lifecycleChanged: false,
@@ -478,26 +489,26 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     await store.markExpired();
     const releaseScanAt = new Date();
     await assert.rejects(pool.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb)",
-      ["deployment-1", "8", "12", hash("f"), releaseScanAt, JSON.stringify({ generation: "5", kind: "no_match",
+      ["deployment-1", "8", "12", hash("f"), releaseScanAt, JSON.stringify({ generation: "7", kind: "no_match",
         canonicalBlocks: canonicalBlocks(8, 11, { defaultHash: hash("f"), timestamp: releaseScanAt })
           .map((block, index) => ({ ...block, ...(index === 0 ? { parentHash: hash("d") } : {}),
             blockTimestamp: block.blockTimestamp.toISOString() })), observations: [], metadata: {} })]),
     /scanner result does not completely describe its canonical range/);
     assert.equal((await pool.query("SELECT next_range_from::text AS next FROM gate.settlement_cursors WHERE deployment_id='deployment-1'")).rows[0].next, "11");
-    assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_ranges WHERE deployment_id='deployment-1'")).rows[0].n, 4);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_ranges WHERE deployment_id='deployment-1'")).rows[0].n, 6);
     assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
       FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [hash("f")])).rows[0],
     { quote_state: "expired", quote_reservation_state: "reserved", reservation_state: "expiry_pending_reconciliation" },
     "incomplete canonical coverage must not release an expired reservation");
-    await assert.rejects(store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "10", throughBlock: "12",
+    await assert.rejects(store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "10", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(10, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] }), /discontinuous/);
-    const scan = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "8", throughBlock: "12",
+    const scan = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "8", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(8, 12, { defaultHash: hash("f"), timestamp: releaseScanAt })
         .map((block, index) => index === 0 ? { ...block, parentHash: hash("d") } : block), observations: [] });
     assert.equal(scan.released, 1);
-    assert.deepEqual(await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "8", throughBlock: "12",
+    assert.deepEqual(await store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "8", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(8, 12, { defaultHash: hash("f"), timestamp: releaseScanAt })
         .map((block, index) => index === 0 ? { ...block, parentHash: hash("d") } : block), observations: [] }), { released: 0, reorged: 0 },

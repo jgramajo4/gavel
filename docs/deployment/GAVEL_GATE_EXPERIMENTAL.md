@@ -95,6 +95,43 @@ npm run probe:agentmail --workspace @gavel/server
 
 It performs only a bounded inbox `GET`. It does not send mail or prove send-path idempotency.
 
+## Observability
+
+Gate writes newline-delimited JSON telemetry to stderr. The schema is default-deny: metric names, label keys/values, alert sources, and alert codes are allowlisted; wallet addresses, profile/submission/quote IDs, transaction hashes, destinations, signatures, request bodies, provider responses, and raw exceptions are never fields. Sink failures never affect quote, settlement, inbox, or notification state.
+
+Follow only structured Gate telemetry (non-JSON process output is discarded):
+
+```sh
+GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.yml logs -f --no-log-prefix gate \
+  | jq -R 'fromjson? | select(.type == "counter" or .type == "gauge" or .type == "alert")'
+```
+
+Show cursor/overlap/confirmation lag and checkpoint failures:
+
+```sh
+GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.yml logs --no-log-prefix gate \
+  | jq -R 'fromjson? | select(.name == "gate_confirmation_lag_blocks" or .name == "gate_forward_cursor_lag_blocks" or .name == "gate_overlap_lag_blocks" or .name == "gate_forward_cursor_checkpoint_failure_total")'
+```
+
+Show monitor backlog, progress, final-check failures, and reorgs:
+
+```sh
+GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.yml logs --no-log-prefix gate \
+  | jq -R 'fromjson? | select(.name == "gate_monitor_queue_depth" or .name == "gate_monitor_oldest_age_seconds" or .name == "gate_monitor_progress_lag_blocks" or .name == "gate_monitor_final_check_failure_total" or .name == "gate_settlement_reorg_total")'
+```
+
+The remaining counters are `gate_quote_issued_total`, `gate_quote_rejected_total{reason}`, `gate_quote_expired_total`, `gate_settlement_pending_total`, `gate_settlement_verified_total`, `gate_settlement_mismatch_total`, `gate_settlement_unknown_quote_total`, `gate_inbox_created_total`, `gate_notification_attempt_total`, and `gate_notification_failure_total`. DAO health is reported as `gate_dao_freshness_age_seconds{health="healthy|stale|unhealthy"}`. Counters are event deltas, not database totals; ship the JSON stream to the approved metrics/log collector for durable aggregation and alert on any `type="alert"`, checkpoint/final-check failure increment, sustained lag/oldest-age growth, unhealthy freshness, unknown quote, mismatch, notification failure, or reorg.
+
+When manual reconciliation proves a reorg outside the automatic overlap/monitor paths, emit the required operator-source event without passing an identifier or free text:
+
+```sh
+GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.yml exec -T gate \
+  npm run observe:reorg --workspace @gavel/server -- pre_acceptance
+# or: post_acceptance
+```
+
+The command accepts only the phase literal and emits a redacted counter plus alert; record the private evidence separately in the restricted incident system.
+
 ## Operations
 
 - Inspect status with `docker compose -f docker-compose.server.yml ps`; do not dump `docker inspect`, rendered Compose, or environment output into tickets or logs.

@@ -453,6 +453,45 @@ test("PR6 memory store recovers durable latest exact observations and owns overl
     [{ quoteId, settlement }]);
 });
 
+test("memory scanner reports anomaly and pre-acceptance reorg transitions only once", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("observability-transitions", { quoteId }));
+  const at = new Date("2026-01-01T00:00:00.000Z");
+  const settlement = settlementCommand("observability-transitions", quoteId).settlement;
+  settlement.receiptBlock = "0"; settlement.receiptBlockHash = hash("9"); settlement.receiptBlockTimestamp = at;
+  const first = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("9"), parentHash: hash("8"), blockTimestamp: at }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: at, exactMatch: true, details: { settlement } },
+    { kind: "anomaly", quoteId: null, txHash: hash("7"), logIndex: 1, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: at, exactMatch: false, details: { code: "UNKNOWN_QUOTE" } }] });
+  assert.equal(first.unknownQuotes, 1);
+  const second = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("6"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("6"), parentHash: hash("5"), blockTimestamp: at }],
+    observations: [{ kind: "anomaly", quoteId: null, txHash: hash("7"), logIndex: 1, blockNumber: "0",
+      blockHash: hash("6"), blockTimestamp: at, exactMatch: false, details: { code: "UNKNOWN_QUOTE" } }] });
+  assert.equal(Object.hasOwn(second, "unknownQuotes"), false);
+  assert.equal(second.preAcceptanceReorged, 1);
+  const third = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "3", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("4"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("4"), parentHash: hash("3"), blockTimestamp: at }], observations: [] });
+  assert.equal(Object.hasOwn(third, "preAcceptanceReorged"), false);
+  await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("2"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("2"), parentHash: hash("1"), blockTimestamp: at }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("2"), blockTimestamp: at, exactMatch: true,
+      details: { settlement: { ...settlement, receiptBlockHash: hash("2") } } }] });
+  const repeated = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("0"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("0"), parentHash: hash("f"), blockTimestamp: at }], observations: [] });
+  assert.equal(Object.hasOwn(repeated, "preAcceptanceReorged"), false,
+    "a reappearing exact log must not make the same pre-acceptance reorg count twice");
+});
+
 test("Memory deployment ignores a caller-provided later cursor and starts exactly at deployment block", async () => {
   const store = new MemoryGateStore();
   await store.configureDeployment({ id: "cursor-pin", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,

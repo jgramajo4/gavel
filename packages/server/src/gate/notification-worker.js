@@ -63,7 +63,7 @@ function createNotificationWorker({ store, provider, clock = () => new Date(), b
     };
     currentTime();
     const attempts = await store.claimNotificationAttempts({ limit, leaseMs: lease });
-    let sent = 0; let failed = 0; let reconciled = 0;
+    let attempted = 0; let sent = 0; let failed = 0; let reconciled = 0;
     for (const raw of attempts) {
       let job;
       try {
@@ -81,6 +81,7 @@ function createNotificationWorker({ store, provider, clock = () => new Date(), b
           }
           continue;
         }
+        attempted += 1;
         const result = await provider(Object.freeze({
           idempotencyKey: job.id, dedupeDeadline: new Date(job.dedupeDeadline),
           profileId: job.profileId, destinationRef: job.destinationRef, summary: job.summary,
@@ -124,7 +125,7 @@ function createNotificationWorker({ store, provider, clock = () => new Date(), b
         if (recorded !== false) failed += 1;
       }
     }
-    return { claimed: attempts.length, sent, failed, ...(reconciled > 0 ? { reconciled } : {}) };
+    return { claimed: attempts.length, attempted, sent, failed, ...(reconciled > 0 ? { reconciled } : {}) };
   }
   return Object.freeze({ runOnce });
 }
