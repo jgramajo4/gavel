@@ -77,7 +77,7 @@ forge script script/DeployBaseSepoliaGavelGateSplitter.s.sol:DeployBaseSepoliaGa
 
 ### Deployment evidence artifact
 
-The machine-readable schema is `contracts/gate/deployments/base-sepolia/deployment.schema.json`. It enforces the artifact's structural shape only. The executable `script/capture-base-sepolia-deployment.mjs` validator enforces cross-field and on-chain invariants, including receipts, deployed code and locally recomputed code hashes, metadata, immutable bindings, fee, and both EIP-712 domains. Write the actual ignored artifact to `contracts/gate/deployments/base-sepolia/<splitter-address>.json`; review and then publish it through the approved release-evidence channel. It contains public chain evidence only and never RPC URLs, credentials, signer keys, or database ciphertext.
+The machine-readable schema is `contracts/gate/deployments/base-sepolia/deployment.schema.json`. It enforces the artifact's structural shape only. The executable `script/capture-base-sepolia-deployment.mjs` validator requires `sourceCommit` to equal the current reviewed checkout's `HEAD`, compiles creation bytecode from that checkout, fetches both deployment transactions, requires contract-creation transactions, and compares each full transaction input byte-for-byte with the local creation bytecode plus the splitter's ABI-encoded constructor arguments. It also enforces receipts, deployed code and locally recomputed code hashes, metadata, immutable bindings, fee, and both EIP-712 domains. Write the actual ignored artifact to `contracts/gate/deployments/base-sepolia/<splitter-address>.json`; the writer rejects existing files, confines production output through canonical parent paths, and creates evidence with mode `0600`. Review and then publish it through the approved release-evidence channel. It contains public chain evidence only and never RPC URLs, credentials, signer keys, or database ciphertext.
 
 After both receipts are confirmed, capture and validate the artifact from Foundry's broadcast JSON plus independent on-chain reads. Keep shell tracing disabled because the RPC variable can contain credentials:
 
@@ -100,16 +100,13 @@ Do not alter SQL constraints. Configure the existing store with `environment: "t
 ```sh
 export DEPLOYMENT_ARTIFACT="$PWD/contracts/gate/deployments/base-sepolia/0x....json"
 export GAVEL_GATE_DATABASE_URL='<controlled operator/bootstrap database connection>'
-export GAVEL_GATE_RPC_ACCESS_CIPHERTEXT='<operator-provisioned encrypted opaque material>'
+export GAVEL_GATE_RPC_ACCESS_CIPHERTEXT='enc:v1:<key-id>:<base64url-nonce-ciphertext-tag>'
 node - <<'NODE'
 const fs = require('node:fs');
 const { PostgresGateStore } = require('./packages/server/src/gate/store');
+const { validateRpcAccessEnvelope } = require('./scripts/validate-gate-rpc-access-envelope');
 const artifact = JSON.parse(fs.readFileSync(process.env.DEPLOYMENT_ARTIFACT, 'utf8'));
-const rpcAccess = process.env.GAVEL_GATE_RPC_ACCESS_CIPHERTEXT;
-if (typeof rpcAccess !== 'string' || rpcAccess.trim() === '') throw new Error('RPC access ciphertext is required');
-if (/^(?:https?|wss?):\/\//i.test(rpcAccess.trim()) || /^(?:<.*>|changeme|placeholder|todo)$/i.test(rpcAccess.trim())) {
-  throw new Error('RPC access must be operator-provisioned encrypted opaque material');
-}
+const rpcAccess = validateRpcAccessEnvelope(process.env.GAVEL_GATE_RPC_ACCESS_CIPHERTEXT);
 const store = new PostgresGateStore({ connectionString: process.env.GAVEL_GATE_DATABASE_URL });
 (async () => {
   try {
@@ -147,7 +144,7 @@ const store = new PostgresGateStore({ connectionString: process.env.GAVEL_GATE_D
 NODE
 ```
 
-This is a controlled operator/bootstrap action through the existing supported `PostgresGateStore`, using separately provisioned database credentials. The repository defines no dedicated registry-writer role and no canonical RPC-envelope grammar. Treat `GAVEL_GATE_RPC_ACCESS_CIPHERTEXT` as operator-provisioned encrypted opaque material; the bootstrap rejects blank values, obvious placeholders, and plaintext HTTP/WebSocket RPC URLs without printing the value. Initial issuance remains disabled.
+This is a controlled operator/bootstrap action through the existing supported `PostgresGateStore`, using separately provisioned database credentials. The repository defines no dedicated registry-writer role. `GAVEL_GATE_RPC_ACCESS_CIPHERTEXT` is an operator-provisioned opaque encrypted envelope with the exact shape `enc:v1:<key-id>:<base64url payload>`: the key ID is 1–64 ASCII alphanumeric/`.`/`_`/`-` characters, and the canonical unpadded base64url payload is 29–8192 decoded bytes (enough for a 12-byte nonce, ciphertext, and 16-byte tag). Encryption, key lookup, authentication, and decryption are external and operator-managed; this bootstrap validates only the closed envelope shape, not cryptographic authenticity. Plaintext URLs, `rpc=https://...`, JSON-wrapped URLs, raw API keys, placeholders, blanks, unknown versions, malformed base64url, and short/oversized payloads fail before `configureDeployment`, without printing the value. The registry stores the envelope as opaque ciphertext and initial issuance remains disabled.
 
 Read the exact row back without selecting `rpc_access_ciphertext`, and compare it to the artifact before startup:
 

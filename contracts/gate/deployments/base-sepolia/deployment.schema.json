@@ -15,14 +15,14 @@
   },
   "$defs": {
     "address": { "type": "string", "pattern": "^0x(?!0{40}$)[0-9a-fA-F]{40}$" },
-    "bytes32": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
+    "bytes32": { "type": "string", "pattern": "^0x(?!0{64}$)[0-9a-fA-F]{64}$" },
     "transaction": {
       "type": "object",
       "additionalProperties": false,
       "required": ["hash", "block"],
       "properties": {
         "hash": { "$ref": "#/$defs/bytes32" },
-        "block": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+        "block": { "type": "string", "pattern": "^[1-9][0-9]*$" }
       }
     },
     "code": {

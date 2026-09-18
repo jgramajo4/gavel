@@ -70,25 +70,95 @@ contract BaseSepoliaDeploymentTest {
         _assertEq(token.DOMAIN_SEPARATOR(), _tokenDomain(address(token)));
     }
 
-    function testTestTokenReceiveAuthorizationIsBoundToPayeeDomainTimeNonceSignatureAndBalances() public {
+    function testTestTokenReceiveAuthorizationRejectsWrongCaller() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("wrong-caller");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_100, nonce);
+
+        vm.prank(address(0xCAFE));
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationRejectsWrongChainDomain() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("wrong-chain-domain");
+        vm.chainId(8453);
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_100, nonce);
         vm.chainId(84532);
-        vm.warp(1_000);
-        BaseSepoliaTestUSDC3009 token = new BaseSepoliaTestUSDC3009();
-        uint256 payerKey = 0xA11CE;
-        address payer = vm.addr(payerKey);
-        address payee = address(0xBEEF);
-        bytes32 nonce = keccak256("base-sepolia-test-token");
-        token.mint(payer, 1_250_000);
-        bytes32 structHash = keccak256(abi.encode(token.RECEIVE_TYPEHASH(), payer, payee, 1_250_000, 0, 1_100, nonce));
-        (uint8 v, bytes32 r, bytes32 s) =
-            vm.sign(payerKey, keccak256(abi.encodePacked("\x19\x01", token.DOMAIN_SEPARATOR(), structHash)));
+
+        vm.prank(payee);
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationRejectsNotYetValid() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("not-yet-valid");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 1_000, 1_100, nonce);
+
+        vm.prank(payee);
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 1_000, 1_100, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationRejectsExpired() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("expired");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_000, nonce);
+
+        vm.prank(payee);
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_000, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationRejectsInvalidSignature() public {
+        (BaseSepoliaTestUSDC3009 token,, address payer, address payee) = _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("invalid-signature");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, 0xB0B, payee, 1_250_000, 0, 1_100, nonce);
+
+        vm.prank(payee);
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationRejectsInsufficientBalance() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_249_999);
+        bytes32 nonce = keccak256("insufficient-balance");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_100, nonce);
+
+        vm.prank(payee);
+        vm.expectRevert();
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
+    }
+
+    function testTestTokenReceiveAuthorizationSucceeds() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(1_250_000);
+        bytes32 nonce = keccak256("success");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_100, nonce);
 
         vm.prank(payee);
         token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
+
         _assertEq(token.balanceOf(payer), 0);
         _assertEq(token.balanceOf(payee), 1_250_000);
         require(token.authorizationState(payer, nonce), "authorization not consumed");
+    }
 
+    function testTestTokenReceiveAuthorizationRejectsNonceReplay() public {
+        (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee) =
+            _authorizationFixture(2_500_000);
+        bytes32 nonce = keccak256("nonce-replay");
+        (uint8 v, bytes32 r, bytes32 s) = _signAuthorization(token, payerKey, payee, 1_250_000, 0, 1_100, nonce);
+
+        vm.prank(payee);
+        token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
         vm.prank(payee);
         vm.expectRevert();
         token.receiveWithAuthorization(payer, payee, 1_250_000, 0, 1_100, nonce, v, r, s);
@@ -186,6 +256,34 @@ contract BaseSepoliaDeploymentTest {
         DeployBaseSepoliaGavelGateSplitter script = new DeployBaseSepoliaGavelGateSplitter();
         vm.expectRevert(DeployBaseSepoliaGavelGateSplitter.InvalidTestUSDC.selector);
         script.deploy(address(token), address(0xBEEF), address(0xCAFE));
+    }
+
+    function _authorizationFixture(uint256 balance)
+        private
+        returns (BaseSepoliaTestUSDC3009 token, uint256 payerKey, address payer, address payee)
+    {
+        vm.chainId(84532);
+        vm.warp(1_000);
+        token = new BaseSepoliaTestUSDC3009();
+        payerKey = 0xA11CE;
+        payer = vm.addr(payerKey);
+        payee = address(0xBEEF);
+        token.mint(payer, balance);
+    }
+
+    function _signAuthorization(
+        BaseSepoliaTestUSDC3009 token,
+        uint256 signerKey,
+        address payee,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce
+    ) private returns (uint8 v, bytes32 r, bytes32 s) {
+        bytes32 structHash = keccak256(
+            abi.encode(token.RECEIVE_TYPEHASH(), vm.addr(0xA11CE), payee, value, validAfter, validBefore, nonce)
+        );
+        return vm.sign(signerKey, keccak256(abi.encodePacked("\x19\x01", token.DOMAIN_SEPARATOR(), structHash)));
     }
 
     function _tokenDomain(address token) private pure returns (bytes32) {
