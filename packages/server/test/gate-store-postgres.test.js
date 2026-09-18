@@ -3,7 +3,9 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const test = require("node:test");
 const { Pool } = require("pg");
+const { Wallet, keccak256, toUtf8Bytes } = require("ethers");
 const { createQuoteTypedData, verifyQuoteSignature } = require("@gavel/gate");
+const { createAuthService } = require("../src/gate/auth");
 const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
 
@@ -61,6 +63,120 @@ async function denied(pool, role, sql) {
     try { await client.query(sql); return false; } catch (error) { return error.code === "42501" || error.code === "23514"; }
   } finally { await client.query("ROLLBACK").catch(() => {}); client.release(); }
 }
+
+function effectiveRolePool(pool, role) {
+  async function connect() {
+    const client = await pool.connect();
+    try { await client.query(`SET ROLE ${role}`); }
+    catch (error) { client.release(true); throw error; }
+    return { query: client.query.bind(client), release: () => client.release(true) };
+  }
+  return {
+    connect,
+    async query(sql, values) {
+      const client = await connect();
+      try { return await client.query(sql, values); } finally { client.release(); }
+    },
+  };
+}
+
+function walletSessionProof(challenge, signature, message = challenge.message) {
+  return { proofType: "WalletSession", typedData: {
+    primaryType: "WalletSession", domain: challenge.domain, message,
+  }, signature };
+}
+
+test("least-privilege role atomically consumes WalletSession nonces and inserts bound sessions", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const signer = Wallet.createRandom();
+  const other = Wallet.createRandom();
+  const base = { chainId: 8453, verifier: addr("b") };
+  const dao = { chainId: 1, verifier: addr("d"), dao: "nouns" };
+  const audience = "https://gate.example";
+  const now = Math.floor(Date.now() / 1000);
+  let randomByte = 0x20;
+  const randomBytes = (length) => Buffer.alloc(length, randomByte++);
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_gate') THEN CREATE ROLE gavel_gate NOLOGIN; END IF;
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_api') THEN CREATE ROLE gavel_api NOLOGIN; END IF;
+    END $$`);
+    await pool.query(migration);
+
+    assert.equal(await denied(pool, "gavel_gate", "UPDATE gate.auth_nonces SET consumed_at=clock_timestamp() WHERE false"), true);
+    assert.equal(await denied(pool, "gavel_gate", `INSERT INTO gate.auth_sessions
+      (token_hash,wallet,role,chain_id,audience,issued_at,expires_at)
+      VALUES('${hash("9")}','${signer.address.toLowerCase()}','base_sender',8453,'${audience}',clock_timestamp(),clock_timestamp()+interval '1 minute')`), true);
+    const acl = (await pool.query(`SELECT
+      has_function_privilege('gavel_gate','gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint)','EXECUTE') AS combined,
+      has_function_privilege('gavel_gate','gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint)','EXECUTE') AS legacy,
+      has_function_privilege('gavel_api','gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint)','EXECUTE') AS api,
+      has_function_privilege('public','gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint)','EXECUTE') AS public`)).rows[0];
+    assert.deepEqual(acl, { combined: true, legacy: false, api: false, public: false });
+    const functionSecurity = (await pool.query(`SELECT p.prosecdef,p.proconfig
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='gate' AND p.proname='consume_auth_nonce_and_insert_session'`)).rows[0];
+    assert.equal(functionSecurity.prosecdef, true);
+    assert.deepEqual(functionSecurity.proconfig, ["search_path=pg_catalog, gate"]);
+
+    const roleStore = new PostgresGateStore({ pool: effectiveRolePool(pool, "gavel_gate") });
+    const service = createAuthService({ repository: roleStore, audience, base, dao, clock: () => now, randomBytes });
+    const valid = await service.issueChallenge({ proofType: "WalletSession", wallet: signer.address, role: "base_sender" });
+    const validSignature = await signer.signTypedData(valid.domain, valid.types, valid.message);
+    const verified = await service.verifyProof(walletSessionProof(valid, validSignature));
+    assert.equal(verified.session.wallet, signer.address.toLowerCase());
+    await assert.rejects(service.verifyProof(walletSessionProof(valid, validSignature)), /unavailable/i);
+
+    for (const attack of [
+      async (challenge) => {
+        const message = { ...challenge.message, role: "dao_inbox" };
+        return walletSessionProof(challenge, await signer.signTypedData(challenge.domain, challenge.types, message), message);
+      },
+      async (challenge) => {
+        const message = { ...challenge.message, wallet: other.address };
+        return walletSessionProof(challenge, await other.signTypedData(challenge.domain, challenge.types, message), message);
+      },
+      async (challenge) => walletSessionProof(challenge,
+        await other.signTypedData(challenge.domain, challenge.types, challenge.message)),
+    ]) {
+      const challenge = await service.issueChallenge({ proofType: "WalletSession", wallet: signer.address, role: "base_sender" });
+      await assert.rejects(service.verifyProof(await attack(challenge)));
+      assert.equal((await roleStore.getNonceByHash(challenge.nonceHash)).consumedAt, null);
+    }
+
+    const concurrent = await service.issueChallenge({ proofType: "WalletSession", wallet: signer.address, role: "dao_profile" });
+    const concurrentSignature = await signer.signTypedData(concurrent.domain, concurrent.types, concurrent.message);
+    const outcomes = await Promise.allSettled([
+      service.verifyProof(walletSessionProof(concurrent, concurrentSignature)),
+      service.verifyProof(walletSessionProof(concurrent, concurrentSignature)),
+    ]);
+    assert.deepEqual(outcomes.map(({ status }) => status).sort(), ["fulfilled", "rejected"]);
+
+    const collision = await service.issueChallenge({ proofType: "WalletSession", wallet: signer.address, role: "base_sender" });
+    const collisionToken = Buffer.alloc(32, randomByte).toString("base64url");
+    const collisionHash = keccak256(toUtf8Bytes(collisionToken));
+    await pool.query(`INSERT INTO gate.auth_sessions(token_hash,wallet,role,chain_id,audience,issued_at,expires_at)
+      VALUES($1,$2,'base_sender',8453,$3,to_timestamp($4),to_timestamp($5))`,
+    [collisionHash, signer.address.toLowerCase(), audience, now, now + 900]);
+    const collisionSignature = await signer.signTypedData(collision.domain, collision.types, collision.message);
+    await assert.rejects(service.verifyProof(walletSessionProof(collision, collisionSignature)), /duplicate|collision/i);
+    assert.equal((await roleStore.getNonceByHash(collision.nonceHash)).consumedAt, null);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.auth_sessions")).rows[0].n, 3);
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
 
 test("Gate migration upgrades legacy display, Nouns policy, and settlement checks idempotently", {
   skip: canRun ? false : skipReason,
@@ -137,7 +253,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
     await pool.query(migration);
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v3-runtime-readiness",
+      migration_checksum: "sha256:gate-001-v3-atomic-auth-session",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition

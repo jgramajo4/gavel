@@ -143,7 +143,20 @@ class PostgresGateStore {
 
   #authTransaction(client) {
     return Object.freeze({
-      getNonceByHash: (nonceHash) => this.#getNonceByHash(client, nonceHash, true),
+      getNonceByHash: (nonceHash) => this.#getNonceByHash(client, nonceHash),
+      consumeAuthNonceAndInsertSession: async ({ expectedNonce, tokenHash, consumedAt, sessionExpiry } = {}) => {
+        const row = (await client.query(`SELECT ${AUTH_SESSION_COLUMNS}
+          FROM gate.consume_auth_nonce_and_insert_session($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [
+          bytes32(expectedNonce?.nonceHash, "nonceHash"), bytes32(expectedNonce?.payloadHash, "payloadHash"),
+          address(expectedNonce?.wallet, "nonce wallet"), expectedNonce?.role,
+          positiveBigint(expectedNonce?.chainId, "nonce chainId"), expectedNonce?.audience,
+          address(expectedNonce?.verifier, "nonce verifier"), uint78(expectedNonce?.issuedAt, "nonce issuedAt"),
+          uint78(expectedNonce?.expiry, "nonce expiry"), uint78(consumedAt, "consumedAt"),
+          bytes32(tokenHash, "tokenHash"), uint78(sessionExpiry, "session expiry"),
+        ])).rows[0];
+        invariant(row, "authentication proof unavailable");
+        return clone(row);
+      },
       consumeNonce: async (nonceHash, consumedAt) => {
         await client.query("SELECT gate.consume_auth_nonce($1,$2)", [bytes32(nonceHash, "nonceHash"), uint78(consumedAt, "consumedAt")]);
       },
@@ -250,7 +263,7 @@ class PostgresGateStore {
       await this.#profileLock(client, existing?.id ?? canonicalWallet);
       const auth = this.#authTransaction(client);
       return callback(Object.freeze({
-        getNonceByHash: auth.getNonceByHash,
+        getNonceByHash: (nonceHash) => this.#getNonceByHash(client, nonceHash, true),
         consumeNonce: auth.consumeNonce,
         getProfileByWallet: (value) => this.#getProfileByWallet(client, value, true),
         mutateProfile: (input) => {

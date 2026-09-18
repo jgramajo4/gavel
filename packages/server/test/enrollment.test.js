@@ -198,6 +198,32 @@ test("EOA WalletSession verification atomically consumes the nonce and mints an 
   assert.match(storedSession.tokenHash, /^0x[0-9a-f]{64}$/);
 });
 
+test("WalletSession verification persists through one combined repository operation", async () => {
+  const signer = Wallet.createRandom();
+  const backing = new MemoryAuthRepository();
+  let combinedCalls = 0;
+  const repository = {
+    insertNonce: (...args) => backing.insertNonce(...args),
+    getSessionByTokenHash: (...args) => backing.getSessionByTokenHash(...args),
+    transaction: (callback) => backing.transaction((transaction) => callback({
+      getNonceByHash: transaction.getNonceByHash,
+      consumeAuthNonceAndInsertSession: async (input) => {
+        combinedCalls += 1;
+        return transaction.consumeAuthNonceAndInsertSession(input);
+      },
+    })),
+  };
+  const { service } = makeHarness({ repository });
+  const challenge = await service.issueChallenge({ proofType: "WalletSession", wallet: signer.address, role: "base_sender" });
+  const signature = await signer.signTypedData(challenge.domain, challenge.types, challenge.message);
+
+  await service.verifyProof(walletSessionProof(challenge, signature));
+
+  assert.equal(combinedCalls, 1);
+  assert.equal((await backing.getNonceByHash(challenge.nonceHash)).consumedAt, String(NOW));
+  assert.equal((await backing.listSessions()).length, 1);
+});
+
 test("WalletSession verification accepts only the exact documented request shape", async () => {
   const signer = Wallet.createRandom();
   const { repository, service } = makeHarness();
@@ -356,7 +382,7 @@ test("nonce-row mismatch and session-write failure roll back, while concurrent r
     getSessionByTokenHash: (...args) => failedBacking.getSessionByTokenHash(...args),
     transaction: (callback) => failedBacking.transaction((transaction) => callback({
       ...transaction,
-      insertSession: async () => { throw new Error("injected session write failure"); },
+      consumeAuthNonceAndInsertSession: async () => { throw new Error("injected session write failure"); },
     })),
   };
   const failed = makeHarness({ repository: failingRepository });

@@ -93,7 +93,7 @@ async function assertDatabaseReady(pool) {
     throw new Error("Gate database must use the least-privilege gavel_gate role");
   }
   if (row.migrationVersion !== "gate/001_gate-v3"
-      || row.migrationChecksum !== "sha256:gate-001-v3-runtime-readiness"
+      || row.migrationChecksum !== "sha256:gate-001-v3-atomic-auth-session"
       || row.manifestMatches !== true) {
     throw new Error("Gate database migration is missing or invalid");
   }

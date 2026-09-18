@@ -54,6 +54,21 @@ class MemoryAuthRepository {
     const sessions = structuredClone(this.#sessions);
     const transaction = Object.freeze({
       getNonceByHash: async (nonceHash) => clone(nonces.get(nonceHash) ?? null),
+      consumeAuthNonceAndInsertSession: async ({ expectedNonce, tokenHash, consumedAt, sessionExpiry } = {}) => {
+        const row = nonces.get(expectedNonce?.nonceHash);
+        const matches = row && Object.entries(expectedNonce).every(([key, value]) => row[key] === value);
+        if (!matches || row.consumedAt !== null || BigInt(row.expiry) <= BigInt(consumedAt)) {
+          throw new Error("authentication proof unavailable");
+        }
+        if (sessions.has(tokenHash)) throw new Error("session collision");
+        row.consumedAt = String(consumedAt);
+        const session = {
+          tokenHash, wallet: row.wallet, role: row.role, chainId: row.chainId, audience: row.audience,
+          issuedAt: String(consumedAt), expiry: String(sessionExpiry), revokedAt: null,
+        };
+        sessions.set(tokenHash, clone(session));
+        return clone(session);
+      },
       consumeNonce: async (nonceHash, consumedAt) => {
         const row = nonces.get(nonceHash);
         if (!row || row.consumedAt !== null) throw new Error("authentication proof unavailable");
@@ -273,12 +288,13 @@ function createAuthService(options = {}) {
       const tokenBytes = randomBytes(32);
       if (!Buffer.isBuffer(tokenBytes) || tokenBytes.length !== 32) throw new TypeError("randomBytes must return exactly 32 bytes");
       const token = tokenBytes.toString("base64url");
-      const session = {
-        wallet: value.wallet, role: value.message.role, chainId: String(value.selected.chainId), audience,
-        issuedAt: value.now, expiry: String(BigInt(value.now) + BigInt(sessionLifetimeSeconds)),
-      };
-      await transaction.consumeNonce(value.nonceHash, value.now);
-      await transaction.insertSession({ ...session, tokenHash: keccak256(toUtf8Bytes(token)), revokedAt: null });
+      const storedSession = await transaction.consumeAuthNonceAndInsertSession({
+        expectedNonce: value.expectedRow,
+        tokenHash: keccak256(toUtf8Bytes(token)),
+        consumedAt: value.now,
+        sessionExpiry: String(BigInt(value.now) + BigInt(sessionLifetimeSeconds)),
+      });
+      const { tokenHash: _tokenHash, revokedAt: _revokedAt, ...session } = storedSession;
       return { token, session };
     });
   }

@@ -48,6 +48,11 @@ test("Gate privilege audit tracks the database-clock notification claim signatur
     && signature.includes("claim_notification_attempts")), false);
 });
 
+test("Gate privilege audit requires only the atomic WalletSession persistence function", () => {
+  assert.ok(GATE_REQUIRED_FUNCTIONS.includes("gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint)"));
+  assert.equal(GATE_REQUIRED_FUNCTIONS.some((signature) => signature.startsWith("gate.insert_auth_session(")), false);
+});
+
 test("Gate privilege audit has one exact migration-matched table matrix", () => {
   assert.deepEqual(GATE_TABLE_PRIVILEGES, {
     auth_nonces: ["SELECT"],
@@ -222,7 +227,8 @@ test("migration grants only safe projections to the public API role", () => {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.record_scanner_range\(text,bigint,bigint,text,timestamptz,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.insert_auth_nonce\(gate\.auth_proof_type,gate\.auth_purpose,gate\.auth_role,text,text,bigint,text,text,text,bigint,bigint\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.consume_auth_nonce\(text,bigint\) TO gavel_gate/i);
-  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.insert_auth_session\(text,text,gate\.auth_role,bigint,text,bigint,bigint\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.consume_auth_nonce_and_insert_session\(text,text,text,gate\.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint\) TO gavel_gate/i);
+  assert.match(sql, /REVOKE ALL ON FUNCTION gate\.insert_auth_session\(text,text,gate\.auth_role,bigint,text,bigint,bigint\) FROM gavel_gate/i);
   assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*gate\.(?:auth_nonces|auth_sessions)[^;]*TO gavel_gate/i);
   assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
 });

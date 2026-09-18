@@ -42,20 +42,22 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
             'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
-            'sha256:gate-001-v3-runtime-readiness') AND installed_tables <> 20)
+            'sha256:gate-001-v3-runtime-readiness','sha256:gate-001-v3-atomic-auth-session') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
          AND column_name='scanner_result' AND is_nullable='NO' AND data_type='jsonb')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND NOT EXISTS(
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
+            'sha256:gate-001-v3-atomic-auth-session') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND (
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
+            'sha256:gate-001-v3-atomic-auth-session') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -81,7 +83,8 @@ BEGIN
           NOT IN ('sha256:gate-001-v3-postgres-parity','sha256:gate-001-v3-durable-auth-profile',
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
             'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
-            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness')
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
+            'sha256:gate-001-v3-atomic-auth-session')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -341,6 +344,28 @@ BEGIN
  VALUES(p_token_hash,p_wallet,p_role,p_chain_id,p_audience,to_timestamp(p_issued_at),to_timestamp(p_expiry));
 END $$;
 REVOKE ALL ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.consume_auth_nonce_and_insert_session(
+ p_nonce_hash text,p_payload_hash text,p_wallet text,p_role gate.auth_role,p_chain_id bigint,p_audience text,
+ p_verifier text,p_nonce_issued_at bigint,p_nonce_expiry bigint,p_consumed_at bigint,p_token_hash text,p_session_expiry bigint
+) RETURNS SETOF gate.auth_sessions LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+DECLARE consumed gate.auth_nonces%ROWTYPE; inserted gate.auth_sessions%ROWTYPE;
+BEGIN
+ UPDATE gate.auth_nonces SET consumed_at=to_timestamp(p_consumed_at)
+ WHERE nonce_hash=p_nonce_hash AND payload_hash=p_payload_hash
+   AND proof_type='WalletSession' AND signed_purpose='wallet_session' AND internal_operation='create_session'
+   AND role=p_role AND wallet=p_wallet AND audience=p_audience AND chain_id=p_chain_id AND verifier=p_verifier
+   AND issued_at=to_timestamp(p_nonce_issued_at) AND expires_at=to_timestamp(p_nonce_expiry)
+   AND consumed_at IS NULL AND expires_at>to_timestamp(p_consumed_at)
+ RETURNING * INTO consumed;
+ IF NOT FOUND THEN RAISE EXCEPTION 'authentication proof unavailable' USING ERRCODE='23514'; END IF;
+ INSERT INTO gate.auth_sessions(token_hash,wallet,role,chain_id,audience,issued_at,expires_at)
+ VALUES(p_token_hash,consumed.wallet,consumed.role,consumed.chain_id,consumed.audience,
+   to_timestamp(p_consumed_at),to_timestamp(p_session_expiry))
+ RETURNING * INTO inserted;
+ RETURN NEXT inserted;
+END $$;
+REVOKE ALL ON FUNCTION gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint) FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS gate.proposal_snapshots (
  id text PRIMARY KEY, dao text NOT NULL CHECK(dao ~ '^[a-z][a-z0-9-]{0,62}$'), proposal_id numeric(78,0) NOT NULL CHECK(proposal_id>=0),
@@ -1160,7 +1185,8 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
-    NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') THEN
+    NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
+      'sha256:gate-001-v3-atomic-auth-session') THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1255,7 +1281,8 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
-  GRANT EXECUTE ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) TO gavel_gate;
+  REVOKE ALL ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) FROM gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.set_delivery_setting(text,text,text) TO gavel_gate;
  END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_api') THEN
@@ -1333,7 +1360,7 @@ DO $$ BEGIN
 END $$;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-runtime-readiness',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v3-atomic-auth-session',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest
@@ -1345,13 +1372,14 @@ INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest
    'sha256:gate-001-v3-closed-base-environments',
    'sha256:gate-001-v3-agentmail-idempotency',
    'sha256:gate-001-v3-bound-delivery-settings',
-   'sha256:gate-001-v3-runtime-readiness'
+   'sha256:gate-001-v3-runtime-readiness',
+   'sha256:gate-001-v3-atomic-auth-session'
  );
 DO $$ BEGIN
  IF NOT EXISTS (
    SELECT 1 FROM public.schema_migrations
    WHERE version='gate/001_gate-v3'
-     AND migration_checksum='sha256:gate-001-v3-runtime-readiness'
+     AND migration_checksum='sha256:gate-001-v3-atomic-auth-session'
      AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
  ) THEN
   RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';

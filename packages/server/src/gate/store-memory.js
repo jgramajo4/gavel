@@ -275,6 +275,21 @@ class MemoryGateStore {
   #authTransactionView() {
     return {
       getNonceByHash: async (nonceHash) => clone(this.#authNonces.get(nonceHash) ?? null),
+      consumeAuthNonceAndInsertSession: async ({ expectedNonce, tokenHash, consumedAt, sessionExpiry } = {}) => {
+        const row = this.#authNonces.get(expectedNonce?.nonceHash);
+        const matches = row && Object.entries(expectedNonce).every(([key, value]) => row[key] === value);
+        if (!matches || row.consumedAt !== null || BigInt(row.expiry) <= BigInt(consumedAt)) {
+          throw new Error("authentication proof unavailable");
+        }
+        if (this.#authSessions.has(tokenHash)) throw new Error("session collision");
+        row.consumedAt = String(consumedAt);
+        const session = {
+          tokenHash, wallet: row.wallet, role: row.role, chainId: row.chainId, audience: row.audience,
+          issuedAt: String(consumedAt), expiry: String(sessionExpiry), revokedAt: null,
+        };
+        this.#authSessions.set(tokenHash, clone(session));
+        return clone(session);
+      },
       consumeNonce: async (nonceHash, consumedAt) => {
         const row = this.#authNonces.get(nonceHash);
         if (!row || row.consumedAt !== null) throw new Error("authentication proof unavailable");

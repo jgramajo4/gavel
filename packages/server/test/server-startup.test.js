@@ -44,7 +44,7 @@ test("canonical entrypoint validates the least-privilege role and installed Gate
     async query(sql) {
       calls.push(sql);
       return { rows: [{ currentUser: "gavel_gate", migrationVersion: "gate/001_gate-v3",
-        migrationChecksum: "sha256:gate-001-v3-runtime-readiness", manifestMatches: true, isSuperuser: false,
+        migrationChecksum: "sha256:gate-001-v3-atomic-auth-session", manifestMatches: true, isSuperuser: false,
         canCreateDb: false, canCreateRole: false, bypassRls: false, canReplicate: false, inheritsRoles: false,
         membershipCount: "0", ownershipCount: "0", hasGateUsage: true }] };
     },
@@ -56,14 +56,14 @@ test("canonical entrypoint validates the least-privilege role and installed Gate
     canCreateDb: false, canCreateRole: false, bypassRls: false, canReplicate: false, inheritsRoles: false,
     membershipCount: "0", ownershipCount: "0", hasGateUsage: true }] }; } }), /migration is missing/);
   await assert.rejects(assertDatabaseReady({ async query() { return { rows: [{ currentUser: "postgres",
-    migrationVersion: "gate/001_gate-v3", migrationChecksum: "sha256:gate-001-v3-runtime-readiness",
+    migrationVersion: "gate/001_gate-v3", migrationChecksum: "sha256:gate-001-v3-atomic-auth-session",
     manifestMatches: true, isSuperuser: true, canCreateDb: true, canCreateRole: true, bypassRls: true,
     canReplicate: true, inheritsRoles: true, membershipCount: "1", ownershipCount: "1",
     hasGateUsage: true }] }; } }),
   /least-privilege gavel_gate role/);
   for (const escalation of ["canReplicate", "inheritsRoles", "membershipCount", "ownershipCount"]) {
     const row = { currentUser: "gavel_gate", migrationVersion: "gate/001_gate-v3",
-      migrationChecksum: "sha256:gate-001-v3-runtime-readiness", manifestMatches: true, isSuperuser: false,
+      migrationChecksum: "sha256:gate-001-v3-atomic-auth-session", manifestMatches: true, isSuperuser: false,
       canCreateDb: false, canCreateRole: false, bypassRls: false, canReplicate: false, inheritsRoles: false,
       membershipCount: "0", ownershipCount: "0", hasGateUsage: true };
     row[escalation] = escalation.endsWith("Count") ? "1" : true;

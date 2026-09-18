@@ -37,11 +37,15 @@ async function assertRepositoryContract(store) {
   await store.insertNonce(challenge);
   assert.deepEqual(await store.getNonceByHash(challenge.nonceHash), challenge);
 
-  const persistedSession = session();
+  const persistedSession = session({ issuedAt: "120" });
   await store.transaction(async (transaction) => {
     assert.deepEqual(await transaction.getNonceByHash(challenge.nonceHash), challenge);
-    await transaction.consumeNonce(challenge.nonceHash, "120");
-    await transaction.insertSession(persistedSession);
+    assert.deepEqual(await transaction.consumeAuthNonceAndInsertSession({
+      expectedNonce: challenge,
+      tokenHash: persistedSession.tokenHash,
+      consumedAt: persistedSession.issuedAt,
+      sessionExpiry: persistedSession.expiry,
+    }), persistedSession);
   });
   assert.equal((await store.getNonceByHash(challenge.nonceHash)).consumedAt, "120");
   assert.deepEqual(await store.getSessionByTokenHash(persistedSession.tokenHash), persistedSession);
@@ -98,8 +102,7 @@ test("Postgres auth/profile methods use one rollback-capable client and profile 
       sql = String(sql); calls.push({ sql, values });
       if (/SELECT gate\.insert_auth_nonce/.test(sql)) return { rows: [], rowCount: 1 };
       if (/FROM gate\.auth_nonces/.test(sql)) return { rows: [nonce()], rowCount: 1 };
-      if (/SELECT gate\.consume_auth_nonce/.test(sql)) return { rows: [], rowCount: 1 };
-      if (/SELECT gate\.insert_auth_session/.test(sql)) return { rows: [], rowCount: 1 };
+      if (/FROM gate\.consume_auth_nonce_and_insert_session/.test(sql)) return { rows: [session({ issuedAt: "120" })], rowCount: 1 };
       if (/FROM gate\.auth_sessions/.test(sql)) return { rows: [session()], rowCount: 1 };
       if (/FROM gate\.profiles WHERE wallet/.test(sql)) return { rows: rows.has(A) ? [rows.get(A)] : [], rowCount: rows.has(A) ? 1 : 0 };
       if (/FROM gate\.mutate_profile/.test(sql)) {
@@ -117,21 +120,29 @@ test("Postgres auth/profile methods use one rollback-capable client and profile 
   await store.insertNonce(nonce());
   await store.transaction(async (transaction) => {
     await transaction.getNonceByHash(H("1"));
-    await transaction.consumeNonce(H("1"), "120");
-    await transaction.insertSession(session());
+    await transaction.consumeAuthNonceAndInsertSession({
+      expectedNonce: nonce(), tokenHash: H("3"), consumedAt: "120", sessionExpiry: "1010",
+    });
   });
   await store.getSessionByTokenHash(H("3"));
-  await store.withProfileTransaction(A, async (transaction) => transaction.mutateProfile({
-    profile: { id: "profile-a", wallet: A, walletKind: "eoa", availability: "paused" }, policy: POLICY,
-  }));
+  await store.withProfileTransaction(A, async (transaction) => {
+    await transaction.getNonceByHash(H("1"));
+    return transaction.mutateProfile({
+      profile: { id: "profile-a", wallet: A, walletKind: "eoa", availability: "paused" }, policy: POLICY,
+    });
+  });
   await store.withProfileTransaction(A, async (transaction) => transaction.getProfileByWallet(A));
 
   assert.ok(calls.some(({ sql }) => /SELECT gate\.insert_auth_nonce/.test(sql)));
-  assert.ok(calls.some(({ sql }) => /FROM gate\.auth_nonces[\s\S]*FOR UPDATE/.test(sql)));
-  assert.ok(calls.some(({ sql }) => /SELECT gate\.consume_auth_nonce/.test(sql)));
-  assert.ok(calls.some(({ sql }) => /SELECT gate\.insert_auth_session/.test(sql)));
+  const nonceReads = calls.filter(({ sql }) => /FROM gate\.auth_nonces/.test(sql));
+  assert.equal(nonceReads.length, 2);
+  assert.doesNotMatch(nonceReads[0].sql, /FOR UPDATE/);
+  assert.match(nonceReads[1].sql, /FOR UPDATE/);
+  assert.equal(calls.filter(({ sql }) => /FROM gate\.consume_auth_nonce_and_insert_session/.test(sql)).length, 1);
+  assert.equal(calls.some(({ sql }) => /SELECT gate\.consume_auth_nonce\(/.test(sql)), false);
+  assert.equal(calls.some(({ sql }) => /SELECT gate\.insert_auth_session\(/.test(sql)), false);
   assert.ok(calls.some(({ sql }) => /FROM gate\.auth_sessions/.test(sql)));
-  const profileBegin = calls.findIndex(({ sql }) => sql === "BEGIN", calls.findIndex(({ sql }) => /auth_sessions/.test(sql)));
+  const profileBegin = calls.findIndex(({ sql }) => sql === "BEGIN", calls.findIndex(({ sql }) => /consume_auth_nonce_and_insert_session/.test(sql)));
   const profileLock = calls.findIndex(({ sql }) => /pg_advisory_xact_lock/.test(sql));
   const profileMutation = calls.findIndex(({ sql }) => /gate\.mutate_profile/.test(sql));
   assert.ok(profileBegin >= 0 && profileBegin < profileLock && profileLock < profileMutation);
@@ -144,11 +155,12 @@ test("migration persists only hashed sessions and exposes auth writes through na
   const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   assert.match(sql, /CREATE TABLE IF NOT EXISTS gate\.auth_sessions[\s\S]*token_hash text NOT NULL/i);
   assert.doesNotMatch(sql.match(/CREATE TABLE IF NOT EXISTS gate\.auth_sessions[\s\S]*?\);/i)?.[0] || "", /\btoken\s+text/i);
-  for (const fn of ["insert_auth_nonce", "consume_auth_nonce", "insert_auth_session"]) {
+  for (const fn of ["insert_auth_nonce", "consume_auth_nonce", "consume_auth_nonce_and_insert_session"]) {
     assert.match(sql, new RegExp(`CREATE OR REPLACE FUNCTION gate\\.${fn}\\b`, "i"));
     assert.match(sql, new RegExp(`REVOKE ALL ON FUNCTION gate\\.${fn}[\\s\\S]*? FROM PUBLIC`, "i"));
     assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION gate\\.${fn}[\\s\\S]*? TO gavel_gate`, "i"));
   }
+  assert.match(sql, /REVOKE ALL ON FUNCTION gate\.insert_auth_session[\s\S]*? FROM gavel_gate/i);
   assert.match(sql, /GRANT SELECT ON gate\.auth_nonces,gate\.auth_sessions/i);
   assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE)[^;]*gate\.(?:auth_nonces|auth_sessions)/i);
   assert.doesNotMatch(sql, /gate_public\.(?:auth_nonces|auth_sessions)/i);
