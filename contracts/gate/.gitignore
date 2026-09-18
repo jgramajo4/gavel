@@ -1,3 +1,5 @@
 /out/
 /cache/
 /broadcast/
+/deployments/base-sepolia/*.json
+!/deployments/base-sepolia/deployment.schema.json
