@@ -14,6 +14,7 @@ const { PROVISIONED_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissi
 
 const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
+const { canonicalGateActions } = require("./gate-action");
 
 // A WARM proposal (succeeded, queued) can still change, but not on the cadence a
 // live vote does. Re-reading it once a quarter hour is enough and keeps a steady
@@ -133,12 +134,13 @@ class PostgresTransaction {
       effectiveStatus, trackingState, normalized?.lifecycleReason || null, row.lastObservedBlock ?? null,
     ]);
     if (row.actions !== undefined) {
+      const actions = canonicalGateActions(row.actions, { indexKey: "index" });
       await this.client.query("DELETE FROM proposal_actions WHERE dao_id=$1 AND proposal_id=$2", [row.daoId, row.proposalId]);
-      for (const action of row.actions) {
+      for (const canonical of actions) {
         await this.client.query(`
           INSERT INTO proposal_actions(dao_id,proposal_id,action_index,target,value_wei,signature,calldata)
           VALUES($1,$2,$3,$4,$5,$6,$7)
-        `, [row.daoId, row.proposalId, action.index, action.target, action.valueWei, action.signature, action.calldata]);
+        `, [row.daoId, row.proposalId, canonical.actionIndex, canonical.target, canonical.valueWei, canonical.signature, canonical.calldata]);
       }
     }
   }
@@ -182,8 +184,14 @@ class PostgresTransaction {
     const raw = rawRow(record);
     let result;
     if (raw.recordType === "proposal" && raw.sourceRecordKey) {
+      // Serialize the first insert as well as refreshes for this canonical key.
+      // The lock is transaction-scoped, so normalized state can only be written
+      // by the snapshot that won the corresponding raw provenance decision.
+      await this.client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `${raw.daoId}:${raw.sourceId}:${raw.sourceRecordKey}`,
+      ]);
       const existing = (await this.client.query(`
-        SELECT block_number AS "blockNumber",block_hash AS "blockHash",record_type AS "recordType",
+        SELECT block_number AS "blockNumber",observed_head AS "observedHead",block_hash AS "blockHash",record_type AS "recordType",
           proposal_id::text AS "proposalId",content_hash AS "contentHash",payload
         FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
       `, [raw.daoId, raw.sourceId, raw.sourceRecordKey])).rows[0];
@@ -191,11 +199,16 @@ class PostgresTransaction {
         if (!isDeepStrictEqual(immutableEventMaterial(existing), immutableEventMaterial(raw))) {
           throw new Error(`canonical event drift for ${eventKey(raw)}`);
         }
-        await this.client.query(`
+        const refreshed = await this.client.query(`
           UPDATE raw_governance_records
-          SET block_hash=$4,observed_head=$5,ingested_at=now()
+          SET block_number=$4,block_hash=$5,observed_head=$6,ingested_at=now()
           WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
-        `, [raw.daoId, raw.sourceId, raw.sourceRecordKey, raw.blockHash, raw.observedHead]);
+            AND block_number<=$4 AND observed_head<=$6
+        `, [raw.daoId, raw.sourceId, raw.sourceRecordKey, raw.blockNumber, raw.blockHash, raw.observedHead]);
+        // Same-height replacement is deliberate reorg handling. A zero-row
+        // update means a newer snapshot won the race, so do not regress its
+        // normalized proposal state below.
+        if (refreshed.rowCount === 0) return false;
         result = { rowCount: 0 };
       }
     }
@@ -568,6 +581,39 @@ class PostgresGovernanceStore {
     if (typeof wallet !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new TypeError("invalid wallet");
     if (typeof this.votingPowerReader !== "function") throw new Error("canonical voting power reader is not configured");
     return this.votingPowerReader({ dao: daoId, wallet: wallet.toLowerCase() }, options);
+  }
+
+  async getGateProposal(daoId, id) {
+    const row = (await this.pool.query(`
+      SELECT p.proposal_id::text AS "proposalId",p.effective_status AS "effectiveStatus",
+        provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
+        provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
+        COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+            'actionIndex',a.action_index,'target',a.target,'valueWei',a.value_wei::text,'signature',a.signature,'calldata',a.calldata
+          ) ORDER BY a.action_index)
+          FROM proposal_actions a WHERE a.dao_id=p.dao_id AND a.proposal_id=p.proposal_id
+        ),'[]'::jsonb) AS actions
+      FROM proposals p
+      JOIN LATERAL (
+        SELECT r.block_number,r.block_hash,r.ingested_at FROM raw_governance_records r
+        WHERE r.dao_id=p.dao_id AND r.proposal_id=p.proposal_id
+          AND r.source_id='nouns-subgraph' AND r.source_record_key='proposal:' || p.proposal_id::text
+          AND r.record_type='proposal' AND r.content_hash=p.content_hash AND r.block_hash IS NOT NULL
+        ORDER BY r.block_number DESC,r.id DESC LIMIT 1
+      ) provenance ON true
+      WHERE p.dao_id=$1 AND p.proposal_id=$2
+    `, [daoId, id])).rows[0];
+    if (!row) return null;
+    return {
+      proposalId: row.proposalId,
+      refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
+      sourceBlock: row.sourceBlock,
+      sourceBlockHash: row.sourceBlockHash,
+      effectiveStatus: row.effectiveStatus,
+      contentHash: typeof row.contentHash === "string" && row.contentHash.startsWith("0x") ? row.contentHash : `0x${row.contentHash}`,
+      actions: row.actions,
+    };
   }
 
   async getProposal(daoId, id) {

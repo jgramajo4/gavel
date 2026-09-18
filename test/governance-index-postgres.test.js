@@ -10,7 +10,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const { PostgresGovernanceStore } = require("../packages/governance-index/src/postgres-store");
+const { PostgresGovernanceStore, PostgresTransaction } = require("../packages/governance-index/src/postgres-store");
 const { ensureRoles } = require("../packages/governance-index/src/roles");
 
 const CLI = path.join(__dirname, "..", "packages", "governance-index", "bin", "gavel-indexer.js");
@@ -183,6 +183,96 @@ test("re-ingesting the same batch is idempotent and repairs a dropped vote", { s
     await store.transaction(async (tx) => { await tx.ingest(record()); });
     assert.deepEqual(await counts(), { raw: 1, votes: 1 });
   } finally { await store.close(); }
+});
+
+test("proposal refresh persists coherent Gate provenance against real PostgreSQL", { skip }, async () => {
+  const store = await freshStore();
+  const contentHash = "a".repeat(64);
+  const firstHash = `0x${"33".repeat(32)}`;
+  const refreshedHash = `0x${"44".repeat(32)}`;
+  const makeRecord = (blockNumber, blockHash, { sourceId = "nouns-subgraph", sourceRecordKey = "proposal:42", effectiveStatus = "ACTIVE" } = {}) => ({
+    raw: {
+      daoId: "nouns", sourceId, sourceRecordKey, externalId: "42",
+      chainId: 1, contractAddress: GOVERNOR, transactionHash: null, logIndex: null, blockNumber,
+      blockHash, recordType: "proposal", proposalId: "42", contentHash, payload: { id: "42" },
+      sourceKind: "nouns-subgraph", sourceEndpoint: "https://index.example", observedHead: blockNumber,
+    },
+    proposal: {
+      daoId: "nouns", proposalId: "42", contentHash,
+      normalized: { id: "42", state: effectiveStatus, effectiveStatus, actions: [] },
+      actions: [{ index: 0, target: ADDRESS, valueWei: "0", signature: "", calldata: "0x" }],
+    },
+  });
+  try {
+    await store.transaction(async (tx) => {
+      await tx.upsertDao({ id: "nouns", name: "Nouns", chainId: 1, contractAddress: GOVERNOR, currentGovernor: GOVERNOR, fromBlock: 1 });
+      await tx.upsertSource({ daoId: "nouns", id: "nouns-subgraph", kind: "nouns-subgraph", endpoint: "https://index.example", fromBlock: 1 });
+      assert.equal(await tx.ingest(makeRecord("100", firstHash)), true);
+      assert.equal(await tx.ingest(makeRecord("105", refreshedHash)), false);
+      assert.equal(await tx.ingest(makeRecord("101", `0x${"55".repeat(32)}`, { effectiveStatus: "DEFEATED" })), false);
+      await tx.upsertSource({ daoId: "nouns", id: "unrelated", kind: "nouns-subgraph", endpoint: "https://index.example", fromBlock: 1 });
+      assert.equal(await tx.ingest(makeRecord("999", `0x${"66".repeat(32)}`, {
+        sourceId: "unrelated", sourceRecordKey: "proposal:unrelated",
+      })), true);
+    });
+    const persisted = (await store.pool.query(`
+      SELECT block_number::text AS "blockNumber",observed_head::text AS "observedHead",block_hash AS "blockHash"
+      FROM raw_governance_records WHERE dao_id='nouns' AND source_record_key='proposal:42'
+    `)).rows[0];
+    assert.deepEqual(persisted, { blockNumber: "105", observedHead: "105", blockHash: refreshedHash });
+    const gate = await store.getGateProposal("nouns", "42");
+    assert.deepEqual(gate, {
+      proposalId: "42", refreshedAt: gate.refreshedAt,
+      sourceBlock: "105", sourceBlockHash: refreshedHash, effectiveStatus: "ACTIVE",
+      contentHash: `0x${contentHash}`,
+      actions: [{ actionIndex: 0, target: ADDRESS, valueWei: "0", signature: "", calldata: "0x" }],
+    });
+  } finally { await store.close(); }
+});
+
+test("concurrent first proposal ingestion cannot roll normalized state behind raw provenance", { skip }, async () => {
+  const store = await freshStore();
+  const contentHash = "b".repeat(64);
+  const makeRecord = (blockNumber, effectiveStatus) => ({
+    raw: {
+      daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: "proposal:77", externalId: "77",
+      chainId: 1, contractAddress: GOVERNOR, transactionHash: null, logIndex: null, blockNumber,
+      blockHash: `0x${String(blockNumber).padStart(64, "0")}`, recordType: "proposal", proposalId: "77",
+      contentHash, payload: { id: "77" }, sourceKind: "nouns-subgraph",
+      sourceEndpoint: "https://index.example", observedHead: blockNumber,
+    },
+    proposal: {
+      daoId: "nouns", proposalId: "77", contentHash,
+      normalized: { id: "77", state: effectiveStatus, effectiveStatus, actions: [] }, actions: [],
+    },
+  });
+  const newerClient = await store.pool.connect();
+  const staleClient = await store.pool.connect();
+  try {
+    await store.transaction(async (tx) => {
+      await tx.upsertDao({ id: "nouns", name: "Nouns", chainId: 1, contractAddress: GOVERNOR, currentGovernor: GOVERNOR, fromBlock: 1 });
+      await tx.upsertSource({ daoId: "nouns", id: "nouns-subgraph", kind: "nouns-subgraph", endpoint: "https://index.example", fromBlock: 1 });
+    });
+    await newerClient.query("BEGIN");
+    await staleClient.query("BEGIN");
+    const newer = new PostgresTransaction(newerClient);
+    const stale = new PostgresTransaction(staleClient);
+    assert.equal(await newer.ingest(makeRecord("200", "ACTIVE")), true);
+    const staleWrite = stale.ingest(makeRecord("100", "DEFEATED"));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await newerClient.query("COMMIT");
+    assert.equal(await staleWrite, false);
+    await staleClient.query("COMMIT");
+    const raw = (await store.pool.query("SELECT block_number::text AS block FROM raw_governance_records WHERE dao_id='nouns' AND source_record_key='proposal:77'")).rows[0];
+    const proposal = (await store.pool.query("SELECT effective_status AS status FROM proposals WHERE dao_id='nouns' AND proposal_id=77")).rows[0];
+    assert.deepEqual({ raw, proposal }, { raw: { block: "200" }, proposal: { status: "ACTIVE" } });
+  } finally {
+    try { await newerClient.query("ROLLBACK"); } catch {}
+    try { await staleClient.query("ROLLBACK"); } catch {}
+    newerClient.release();
+    staleClient.release();
+    await store.close();
+  }
 });
 
 test("a failed batch leaves the checkpoint un-advanced", { skip }, async () => {

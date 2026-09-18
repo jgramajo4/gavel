@@ -4,6 +4,7 @@ const { z } = require("zod");
 const { decodeCursor, decodeProposalCursor } = require("./memory-store");
 const { redactErrorMessage } = require("./redaction");
 const { presentProposal } = require("../../core/src/governance/lifecycle");
+const { canonicalGateActions } = require("./gate-action");
 
 const limitSchema = z.coerce.number().int().min(1).max(100).default(25);
 const daoSchema = z.enum(["nouns", "ens", "railgun-eth"]);
@@ -12,6 +13,18 @@ function json(res, status, body) { const payload = JSON.stringify(body); res.wri
 function publicProposal(row) {
   if (!row) return row;
   return presentProposal(row.normalized || row, row);
+}
+function gateProposal(row) {
+  if (!row) return row;
+  return {
+    proposalId: row.proposalId,
+    refreshedAt: row.refreshedAt,
+    sourceBlock: row.sourceBlock,
+    sourceBlockHash: row.sourceBlockHash,
+    effectiveStatus: row.effectiveStatus,
+    contentHash: row.contentHash,
+    actions: canonicalGateActions(row.actions || []),
+  };
 }
 function publicEndpoint(value, explicit) {
   try {
@@ -57,6 +70,12 @@ function createReadOnlyApi({ store, logger = null }) {
       if (["/health", "/healthz"].includes(url.pathname)) return json(res, 200, { ok: true });
       if (url.pathname === "/v1/daos") return json(res, 200, { items: await store.listDaos() });
       if (url.pathname === "/v1/status") return json(res, 200, publicStatus(await store.status()));
+      if (parts[0] === "v1" && parts[1] === "gate" && parts[2] === "daos" && parts[3] === "nouns"
+        && parts[4] === "proposals" && parts.length === 6) {
+        const id = proposalSchema.parse(parts[5]);
+        const row = await store.getGateProposal("nouns", id);
+        return row ? json(res, 200, gateProposal(row)) : json(res, 404, { error: "proposal_not_found" });
+      }
       if (parts[0] !== "v1" || parts[1] !== "daos") return json(res, 404, { error: "not_found" });
       const dao = daoSchema.parse(parts[2]); const limit = limitSchema.parse(url.searchParams.get("limit") || undefined);
       if (parts.length === 3) { const row = await store.getDao(dao); return row ? json(res, 200, row) : json(res, 404, { error: "dao_not_found" }); }

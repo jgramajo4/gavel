@@ -124,9 +124,11 @@ test("Postgres proposal refresh replaces only the snapshot provenance for identi
   } });
 
   await tx.ingest({ raw });
-  assert.match(calls[0].sql, /SELECT block_number/);
-  assert.match(calls[1].sql, /UPDATE raw_governance_records/);
-  assert.deepEqual(calls[1].values.slice(-2), [BLOCK_HASH, "200"]);
+  assert.match(calls[0].sql, /pg_advisory_xact_lock/);
+  assert.match(calls[1].sql, /SELECT block_number/);
+  assert.match(calls[2].sql, /UPDATE raw_governance_records/);
+  assert.match(calls[2].sql, /SET block_number=\$4,block_hash=\$5,observed_head=\$6,ingested_at=now\(\)/);
+  assert.deepEqual(calls[2].values.slice(-3), ["200", BLOCK_HASH, "200"]);
 });
 
 test("Postgres full proposal reconciliation permits a newer canonical snapshot of identical material", async () => {
@@ -163,6 +165,51 @@ test("Postgres governance store exposes Gate health and configured canonical pow
   });
   assert.match(calls[0].sql, /sync_checkpoints/);
   assert.deepEqual(calls[0].values, ["nouns"]);
+});
+
+test("Postgres Gate proposal read is dedicated and uses persisted snapshot block provenance", async () => {
+  const pool = { async query(sql, values) {
+    const text = String(sql);
+    assert.match(text, /provenance\.block_number::text AS "sourceBlock"/);
+    assert.match(text, /SELECT r\.block_number,r\.block_hash,r\.ingested_at/);
+    assert.doesNotMatch(text, /r\.observed_head AS block_number/);
+    assert.match(text, /JOIN LATERAL/);
+    assert.match(text, /r\.content_hash=p\.content_hash/);
+    assert.match(text, /r\.source_id='nouns-subgraph'/);
+    assert.match(text, /r\.source_record_key='proposal:' \|\| p\.proposal_id::text/);
+    assert.deepEqual(values, ["nouns", "42"]);
+    return { rows: [{
+      proposalId: "42", refreshedAt: new Date("2026-09-14T00:00:00.000Z"), sourceBlock: "123",
+      sourceBlockHash: BLOCK_HASH, effectiveStatus: "ACTIVE", contentHash: HASH,
+      actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
+    }] };
+  } };
+  const store = new PostgresGovernanceStore({ pool });
+  assert.deepEqual(await store.getGateProposal("nouns", "42"), {
+    proposalId: "42", refreshedAt: "2026-09-14T00:00:00.000Z", sourceBlock: "123",
+    sourceBlockHash: BLOCK_HASH, effectiveStatus: "ACTIVE", contentHash: HASH,
+    actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
+  });
+});
+
+test("Postgres proposal refresh conditionally rejects stale snapshots", async () => {
+  const calls = [];
+  const tx = new PostgresTransaction({ async query(sql) {
+    calls.push(String(sql));
+    if (/pg_advisory_xact_lock/.test(String(sql))) return { rows: [] };
+    if (/SELECT block_number/.test(String(sql))) return { rows: [{ blockNumber: "200", observedHead: "200", blockHash: BLOCK_HASH,
+      recordType: "proposal", proposalId: "42", contentHash: HASH.slice(2), payload: { id: "42" } }] };
+    if (/UPDATE raw_governance_records/.test(String(sql))) return { rowCount: 0, rows: [] };
+    throw new Error("stale proposal refresh must not update normalized state");
+  } });
+  const inserted = await tx.ingest({ raw: {
+    daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: "proposal:42", externalId: "42",
+    chainId: 1, contractAddress: WALLET, transactionHash: null, logIndex: null, blockNumber: "199",
+    blockHash: `0x${"ef".repeat(32)}`, recordType: "proposal", proposalId: "42", contentHash: HASH.slice(2),
+    payload: { id: "42" }, sourceKind: "nouns-subgraph", sourceEndpoint: "https://example.test", observedHead: "199",
+  }, proposal: { daoId: "nouns", proposalId: "42", contentHash: HASH.slice(2), normalized: { effectiveStatus: "ACTIVE" } } });
+  assert.equal(inserted, false);
+  assert.match(calls[2], /block_number<=\$4 AND observed_head<=\$6/);
 });
 
 test("Postgres governance proposal read uses canonical effective status and preserves stale source state", async () => {

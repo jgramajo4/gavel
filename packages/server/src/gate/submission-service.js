@@ -210,11 +210,11 @@ function createSubmissionService({
   function issuanceFacts(snapshot) {
     const actions = Array.isArray(snapshot.canonicalActions) ? snapshot.canonicalActions : [];
     const decoded = [];
-    for (const [actionIndex, action] of actions.entries()) {
+    for (const action of actions) {
       try {
         decoded.push(decodeAction({
           target: action.target, valueWei: String(action.valueWei), calldata: action.calldata,
-          signature: action.signature ?? "", actionIndex,
+          signature: action.signature ?? "", actionIndex: action.actionIndex,
         }, { decoderVersion: DECODER_VERSION }));
       } catch {
         // An action the versioned decoder cannot canonicalize stays raw in

@@ -132,7 +132,9 @@ function createCanonicalIndexSource({ baseUrl, ethereumProvider, fetchImpl = glo
       return { healthy: !failed, refreshedAt: refreshedAt || "invalid", lastError: failed ? "sync_failed" : null };
     },
     async getProposal(dao, proposalId) {
-      return fetchJson(fetchImpl, `${originValue}/v1/daos/${encodeURIComponent(dao)}/proposals/${encodeURIComponent(proposalId)}`);
+      if (dao !== "nouns") throw new Error("unsupported DAO");
+      const proposal = await fetchJson(fetchImpl, `${originValue}/v1/gate/daos/nouns/proposals/${encodeURIComponent(proposalId)}`);
+      return { dao: "nouns", ...proposal };
     },
     async getVotingPower(dao, wallet) {
       if (dao !== "nouns") throw new Error("unsupported DAO");

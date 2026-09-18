@@ -169,6 +169,25 @@ test("canonical index health requires every source timestamp and reports the old
   assert.deepEqual(await source.getHealth("nouns"), { healthy: false, refreshedAt: "invalid", lastError: "sync_failed" });
 });
 
+test("canonical Gate index source uses the dedicated Nouns proposal projection", async () => {
+  const { createCanonicalIndexSource } = require("../bin/gavel-server");
+  const calls = [];
+  const proposal = {
+    proposalId: "42", refreshedAt: "2026-09-17T00:00:00.000Z", sourceBlock: "123",
+    sourceBlockHash: `0x${"1".repeat(64)}`, effectiveStatus: "ACTIVE",
+    contentHash: `0x${"2".repeat(64)}`, actions: [],
+  };
+  const source = createCanonicalIndexSource({ baseUrl: "https://index.example/private?token=secret", ethereumProvider: {},
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const bytes = Buffer.from(JSON.stringify(proposal));
+      return { status: 200, body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) };
+    } });
+
+  assert.deepEqual(await source.getProposal("nouns", "42"), { dao: "nouns", ...proposal });
+  assert.deepEqual(calls, ["https://index.example/v1/gate/daos/nouns/proposals/42"]);
+});
+
 test("canonical index fetch cancels an oversized streamed response", async () => {
   const { createCanonicalIndexSource } = require("../bin/gavel-server");
   let cancelled = false;

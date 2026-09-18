@@ -1,5 +1,6 @@
 const { sanitizeConfig, sanitizeProvenance } = require("./provenance");
 const { redactErrorMessage } = require("./redaction");
+const { canonicalGateActions } = require("./gate-action");
 
 function chainEventKey(row) {
   return `${row.chainId}:${String(row.contractAddress).toLowerCase()}:${String(row.transactionHash).toLowerCase()}:${row.logIndex}`;
@@ -38,7 +39,7 @@ function canonicalMaterial(row) { return JSON.stringify({ blockNumber: String(ro
 function immutableEventMaterial(row) { return JSON.stringify({ recordType: row.recordType, proposalId: row.proposalId || null, contentHash: row.contentHash || null, payload: row.payload }); }
 
 class MemoryGovernanceStore {
-  constructor() { this.daos = new Map(); this.sources = new Map(); this.rawRecords = []; this.proposals = []; this.proposalActions = []; this.voteEvents = []; this.delegationEvents = []; this.checkpoints = new Map(); this._keys = new Set(); this._locks = new Map(); }
+  constructor({ clock = () => new Date() } = {}) { this.clock = clock; this.daos = new Map(); this.sources = new Map(); this.rawRecords = []; this.proposals = []; this.proposalActions = []; this.voteEvents = []; this.delegationEvents = []; this.checkpoints = new Map(); this._keys = new Set(); this._locks = new Map(); }
   async transaction(callback) {
     const snapshot = structuredClone({ daos: this.daos, sources: this.sources, rawRecords: this.rawRecords, proposals: this.proposals, proposalActions: this.proposalActions, voteEvents: this.voteEvents, delegationEvents: this.delegationEvents, checkpoints: this.checkpoints, keys: this._keys });
     try { return await callback(this); } catch (error) { Object.assign(this, { ...snapshot, _keys: snapshot.keys }); throw error; }
@@ -62,6 +63,9 @@ class MemoryGovernanceStore {
     this.checkpoints.set(key, { ...existing, ...row, lastFullScanAt: row.lastFullScanAt || existing?.lastFullScanAt || null });
   }
   upsertProposal(row) {
+    const actions = row.actions === undefined
+      ? undefined
+      : canonicalGateActions(row.actions, { indexKey: "index" });
     const effectiveStatus = row.normalized?.effectiveStatus || row.normalized?.outcome || "UNKNOWN";
     const stored = {
       ...row,
@@ -82,24 +86,38 @@ class MemoryGovernanceStore {
         lastObservedBlock: observed.length ? String(observed.reduce((a, b) => (a > b ? a : b))) : null,
       };
     }
-    if (row.actions) {
+    if (actions !== undefined) {
       this.proposalActions = this.proposalActions.filter((x) => !(x.daoId === row.daoId && x.proposalId === row.proposalId));
-      this.proposalActions.push(...row.actions.map((action) => ({ daoId: row.daoId, proposalId: row.proposalId, ...action })));
+      this.proposalActions.push(...actions.map(({ actionIndex, ...action }) => ({
+        daoId: row.daoId, proposalId: row.proposalId, index: actionIndex, ...action,
+      })));
     }
   }
   insertVote(row) { const safe = sanitizeProvenance(row); const key = eventKey({ ...safe, contractAddress: safe.contractAddress || "" }); if (this._keys.has(`v:${key}`)) return false; this._keys.add(`v:${key}`); this.voteEvents.push(safe); return true; }
   insertDelegation(row) { const safe = sanitizeProvenance(row); const key = eventKey(safe); if (this._keys.has(`d:${key}`)) return false; this._keys.add(`d:${key}`); this.delegationEvents.push(safe); return true; }
   ingest(record) {
     const raw = sanitizeProvenance({ ...record.raw, proposalId: record.raw.proposalId || record.proposal?.proposalId || record.vote?.proposalId || null, contentHash: record.raw.contentHash || record.proposal?.contentHash || null }); const key = eventKey(raw);
-    const existing = this.rawRecords.find((x) => eventKey(x) === key);
+    const existingIndex = this.rawRecords.findIndex((x) => eventKey(x) === key);
+    const existing = this.rawRecords[existingIndex];
     if (existing) {
-      if (canonicalMaterial(existing) !== canonicalMaterial(raw)) throw new Error(`canonical event drift for ${key}`);
+      const refreshableProposal = raw.recordType === "proposal" && raw.sourceRecordKey;
+      const sameMaterial = refreshableProposal
+        ? immutableEventMaterial(existing) === immutableEventMaterial(raw)
+        : canonicalMaterial(existing) === canonicalMaterial(raw);
+      if (!sameMaterial) throw new Error(`canonical event drift for ${key}`);
+      if (refreshableProposal) {
+        // A finalized snapshot may be replaced at the same height after a reorg,
+        // but an older block/head can never make canonical state look fresh.
+        if (BigInt(raw.blockNumber) < BigInt(existing.blockNumber)
+          || BigInt(raw.observedHead) < BigInt(existing.observedHead)) return false;
+        this.rawRecords[existingIndex] = { ...raw, ingestedAt: new Date(this.clock()).toISOString() };
+      }
       if (record.proposal) this.upsertProposal(record.proposal);
       if (record.vote) this.insertVote(record.vote);
       if (record.delegation) this.insertDelegation(record.delegation);
       return false;
     }
-    this._keys.add(`r:${key}`); this.rawRecords.push(raw);
+    this._keys.add(`r:${key}`); this.rawRecords.push({ ...raw, ingestedAt: new Date(this.clock()).toISOString() });
     if (record.proposal) this.upsertProposal(record.proposal);
     if (record.vote) this.insertVote(record.vote);
     if (record.delegation) this.insertDelegation(record.delegation);
@@ -128,7 +146,7 @@ class MemoryGovernanceStore {
   reconcileProposals({ daoId, sourceId, records }) {
     const incoming = new Map(records.map((record) => [eventKey(record.raw), sanitizeProvenance({ ...record.raw, proposalId: record.raw.proposalId || record.proposal?.proposalId || null, contentHash: record.raw.contentHash || record.proposal?.contentHash || null })]));
     const existing = this.rawRecords.filter((row) => row.daoId === daoId && row.sourceId === sourceId && row.recordType === "proposal" && row.sourceRecordKey);
-    for (const row of existing) { const next = incoming.get(eventKey(row)); if (next && canonicalMaterial(row) !== canonicalMaterial(next)) throw new Error(`canonical event drift for ${eventKey(row)}`); }
+    for (const row of existing) { const next = incoming.get(eventKey(row)); if (next && immutableEventMaterial(row) !== immutableEventMaterial(next)) throw new Error(`canonical event drift for ${eventKey(row)}`); }
     const orphans = existing.filter((row) => !incoming.has(eventKey(row)));
     const orphanKeys = new Set(orphans.map(eventKey));
     this.rawRecords = this.rawRecords.filter((row) => !orphanKeys.has(eventKey(row)));
@@ -184,6 +202,31 @@ class MemoryGovernanceStore {
   async getProposal(daoId, proposalId) {
     const row = this.proposals.find((x) => x.daoId === daoId && x.proposalId === proposalId);
     return row ? presentProposal(row.normalized, row) : null;
+  }
+  async getGateProposal(daoId, proposalId) {
+    const proposal = this.proposals.find((row) => row.daoId === daoId && row.proposalId === proposalId);
+    if (!proposal) return null;
+    const provenance = this.rawRecords
+      .filter((row) => row.daoId === daoId && row.proposalId === proposalId && row.recordType === "proposal"
+        && row.sourceId === "nouns-subgraph" && row.sourceRecordKey === `proposal:${proposalId}`
+        && row.contentHash === proposal.contentHash && row.blockHash && row.ingestedAt)
+      .sort((a, b) => BigInt(a.blockNumber) < BigInt(b.blockNumber) ? 1 : -1)[0];
+    if (!provenance) return null;
+    return {
+      proposalId,
+      refreshedAt: provenance.ingestedAt,
+      sourceBlock: String(provenance.blockNumber),
+      sourceBlockHash: provenance.blockHash,
+      effectiveStatus: proposal.effectiveStatus,
+      contentHash: `0x${String(proposal.contentHash).replace(/^0x/, "")}`,
+      actions: canonicalGateActions(this.proposalActions
+        .filter((row) => row.daoId === daoId && row.proposalId === proposalId)
+        .sort((a, b) => (a.actionIndex ?? a.index) - (b.actionIndex ?? b.index))
+        .map(({ index, actionIndex, target, valueWei, signature, calldata }) => ({
+          actionIndex: actionIndex ?? index,
+          target, valueWei: String(valueWei), signature: signature || "", calldata,
+        }))),
+    };
   }
   async listProposals({ daoId, limit, cursor }) {
     const decoded = typeof cursor === "string" && !/^\d+$/.test(cursor) ? decodeProposalCursor(cursor) : cursor;

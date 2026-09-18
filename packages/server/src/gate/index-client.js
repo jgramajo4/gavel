@@ -5,6 +5,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
+const { canonicalGateActions } = require("../../../governance-index/src/gate-action");
 
 class IndexUnavailableError extends Error {
   constructor(message = "Nouns governance index is unavailable") {
@@ -128,7 +129,10 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
         sourceBlock: decimal(proposal.sourceBlock, "proposal.sourceBlock"),
         sourceBlockHash: hash(proposal.sourceBlockHash, "proposal.sourceBlockHash"),
         contentHash: hash(proposal.contentHash, "proposal.contentHash"),
-        canonicalActions: structuredClone(proposal.actions),
+        canonicalActions: (() => {
+          try { return canonicalGateActions(proposal.actions, { exact: true }); }
+          catch { throw new IndexUnavailableError("proposal action is invalid"); }
+        })(),
       };
     },
   });

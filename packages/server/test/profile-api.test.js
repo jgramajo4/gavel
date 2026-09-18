@@ -5,6 +5,8 @@ const { Wallet } = require("ethers");
 
 const { createAuthService } = require("../src/gate/auth");
 const { MemoryGateStore } = require("../src/gate/store-memory");
+const { createReadOnlyApi } = require("../../governance-index/src/api");
+const { MemoryGovernanceStore } = require("../../governance-index/src/memory-store");
 
 const WALLET = "0x1111111111111111111111111111111111111111";
 const HASH = `0x${"ab".repeat(32)}`;
@@ -71,7 +73,7 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
         dao: "nouns", proposalId: "42", nativeState: "ACTIVE", effectiveStatus: "ACTIVE",
         refreshedAt: "2026-09-14T00:00:01.000Z",
         sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH,
-        actions: [{ target: WALLET, valueWei: "0", calldata: "0x" }],
+        actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
       };
     },
   };
@@ -80,7 +82,96 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
   assert.deepEqual(await client.getProposalSnapshot("42"), {
     dao: "nouns", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
     refreshedAt: "2026-09-14T00:00:01.000Z", sourceBlock: "123", sourceBlockHash: BLOCK_HASH,
-    contentHash: HASH, canonicalActions: [{ target: WALLET, valueWei: "0", calldata: "0x" }],
+    contentHash: HASH, canonicalActions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
+  });
+});
+
+test("Nouns index client rejects malformed or non-canonical proposal actions", async () => {
+  const { createNounsIndexClient, IndexUnavailableError } = loadIndexClient();
+  const now = new Date("2026-09-14T00:10:00.000Z");
+  const base = {
+    dao: "nouns", proposalId: "42", effectiveStatus: "ACTIVE",
+    refreshedAt: "2026-09-14T00:00:01.000Z", sourceBlock: "123",
+    sourceBlockHash: BLOCK_HASH, contentHash: HASH,
+  };
+  const invalid = [
+    { actionIndex: 0, target: "not-an-address", valueWei: "0", signature: "", calldata: "0x" },
+    { actionIndex: 0, target: WALLET, valueWei: "-1", signature: "", calldata: "0x" },
+    { actionIndex: 0, target: WALLET, valueWei: "0", signature: 17, calldata: "0x" },
+    { actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "not-hex" },
+    { actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x", privateDestination: "secret" },
+  ];
+  for (const action of invalid) {
+    const source = {
+      async getHealth() { return { healthy: true, refreshedAt: base.refreshedAt }; },
+      async getProposal() { return { ...base, actions: [action] }; },
+    };
+    const client = createNounsIndexClient({ source, clock: () => now });
+    await assert.rejects(client.getProposalSnapshot("42"), IndexUnavailableError);
+  }
+  const valid = (actionIndex) => ({ actionIndex, target: WALLET, valueWei: "0", signature: "", calldata: "0x" });
+  for (const actions of [
+    [valid(1), valid(0)],
+    [valid(0), valid(0)],
+    [valid(0), valid(2)],
+    [{ ...valid(0), actionIndex: 2_147_483_648 }],
+    new Array(1),
+  ]) {
+    const source = {
+      async getHealth() { return { healthy: true, refreshedAt: base.refreshedAt }; },
+      async getProposal() { return { ...base, actions }; },
+    };
+    await assert.rejects(
+      createNounsIndexClient({ source, clock: () => now }).getProposalSnapshot("42"),
+      IndexUnavailableError,
+    );
+  }
+});
+
+test("dedicated governance HTTP projection preserves every field required by Gate", async () => {
+  const refreshedAt = "2026-09-14T00:00:01.000Z";
+  const store = new MemoryGovernanceStore({ clock: () => new Date(refreshedAt) });
+  const normalized = { id: "42", state: "ACTIVE", effectiveStatus: "ACTIVE", actions: [] };
+  store.ingest({
+    raw: {
+      daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: "proposal:42",
+      chainId: 1, contractAddress: WALLET, transactionHash: null, logIndex: null,
+      blockNumber: "123", blockHash: BLOCK_HASH, observedHead: "130", recordType: "proposal",
+      proposalId: "42", contentHash: HASH.slice(2), payload: { id: "42" },
+      sourceKind: "nouns-subgraph", sourceEndpoint: "https://index.example",
+    },
+    proposal: { daoId: "nouns", proposalId: "42", contentHash: HASH.slice(2), normalized,
+      actions: [{ index: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }] },
+  });
+
+  await withServer(createReadOnlyApi({ store }), async (baseUrl) => {
+    const ordinary = await requestJson(baseUrl, "/v1/daos/nouns/proposals/42");
+    assert.equal(ordinary.status, 200);
+    assert.equal(ordinary.body.sourceBlock, undefined);
+
+    store.proposals.push({ ...store.proposals[0], proposalId: "43", normalized: { ...normalized, id: "43" } });
+    const missingProvenance = await requestJson(baseUrl, "/v1/gate/daos/nouns/proposals/43");
+    assert.deepEqual({ status: missingProvenance.status, body: missingProvenance.body }, {
+      status: 404, body: { error: "proposal_not_found" },
+    });
+
+    const source = {
+      async getHealth() { return { healthy: true, refreshedAt }; },
+      async getProposal(dao, proposalId) {
+        const response = await requestJson(baseUrl, `/v1/gate/daos/nouns/proposals/${proposalId}`);
+        assert.equal(response.status, 200);
+        assert.deepEqual(Object.keys(response.body).sort(), [
+          "actions", "contentHash", "effectiveStatus", "proposalId", "refreshedAt", "sourceBlock", "sourceBlockHash",
+        ]);
+        return { dao, ...response.body };
+      },
+    };
+    const client = loadIndexClient().createNounsIndexClient({ source, clock: () => new Date("2026-09-14T00:10:00.000Z") });
+    assert.deepEqual(await client.getProposalSnapshot("42"), {
+      dao: "nouns", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
+      refreshedAt, sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH,
+      canonicalActions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
+    });
   });
 });
 
