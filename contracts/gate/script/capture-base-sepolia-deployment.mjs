@@ -91,11 +91,15 @@ function callString(rpc, target, signature) {
 }
 
 function decimal(value, label) {
-  try {
-    return BigInt(value).toString(10);
-  } catch {
-    fail(`${label} is not an integer`);
-  }
+  const token = String(value ?? "").trim().split(/\s+/, 1)[0];
+  if (!/^[0-9]+$/.test(token)) fail(`${label} is not an integer`);
+  return BigInt(token).toString(10);
+}
+
+function rpcQuantity(value, label) {
+  const quantity = String(value ?? "");
+  if (!/^(?:0|[1-9][0-9]*|0x[0-9a-fA-F]+)$/.test(quantity)) fail(`${label} is not an RPC quantity`);
+  return BigInt(quantity).toString(10);
 }
 
 function keccak(value) {
@@ -220,10 +224,10 @@ function receipt(rpc, deployment, expectedAddress, label) {
     fail(`${label} deployment receipt is missing or malformed`);
   }
   object(value, `${label} deployment receipt`);
-  if (decimal(value.status, `${label} receipt status`) !== "1") fail(`${label} deployment failed`);
+  if (rpcQuantity(value.status, `${label} receipt status`) !== "1") fail(`${label} deployment failed`);
   same(value.transactionHash, deployment.hash, `${label} receipt transaction`);
   same(address(value.contractAddress, `${label} receipt contractAddress`), expectedAddress, `${label} receipt contractAddress`);
-  if (decimal(value.blockNumber, `${label} receipt block`) !== deployment.block) fail(`${label} receipt block mismatch`);
+  if (rpcQuantity(value.blockNumber, `${label} receipt block`) !== deployment.block) fail(`${label} receipt block mismatch`);
 }
 
 function readOnchain(rpc, tokenAddress, splitterAddress) {
@@ -336,10 +340,10 @@ function capture(args, rpc) {
   const receiptFor = (tx, label) => {
     let value;
     try { value = JSON.parse(cast(["receipt", tx.hash, "--json"], rpc)); } catch { fail(`${label} receipt unavailable`); }
-    if (decimal(value.status, `${label} receipt status`) !== "1") fail(`${label} deployment failed`);
+    if (rpcQuantity(value.status, `${label} receipt status`) !== "1") fail(`${label} deployment failed`);
     same(value.transactionHash, tx.hash, `${label} receipt transaction`);
     same(value.contractAddress, tx.address, `${label} broadcast address`);
-    return { hash: tx.hash, block: decimal(value.blockNumber, `${label} receipt block`) };
+    return { hash: tx.hash, block: rpcQuantity(value.blockNumber, `${label} receipt block`) };
   };
   const tokenDeployment = receiptFor(tokenTx, "token");
   const splitterDeployment = receiptFor(splitterTx, "splitter");
