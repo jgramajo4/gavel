@@ -160,6 +160,12 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     const cursor = await store.getScannerState({ chainId: adapter.chainId, splitter: adapter.splitter });
     if (!cursor) throw new Error("settlement scanner deployment is not configured");
     if (Number(cursor.overlap) !== adapter.overlap) throw new Error("durable scanner overlap does not match adapter overlap");
+    if (safeThrough < BigInt(cursor.nextRangeFrom) - 1n) {
+      accepted += await settleDurableObservations();
+      return { scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
+        ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
+        cursorLag: 0, overlapLag: 0 };
+    }
     const requested = scannerWindow({ deploymentBlock: cursor.deploymentBlock, nextRangeFrom: cursor.nextRangeFrom,
       safeThrough, overlap: cursor.overlap });
     const window = requested && Object.freeze({ fromBlock: requested.fromBlock,

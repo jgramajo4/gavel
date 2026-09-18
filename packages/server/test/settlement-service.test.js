@@ -600,7 +600,7 @@ test("24a. a failed durable cursor checkpoint emits one redacted operator alert 
 
 test("25. a lagging safe head drains a current-generation durable observation without scanning or moving the cursor", async () => {
   const durable = candidate({ settledAt: new Date(101_000) });
-  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n,
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 98n,
     unsettled: [{ quoteId: QUOTE_ID, settlement: durable }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
@@ -624,8 +624,8 @@ test("25a. durable observations settle while the safe head is before deployment"
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
 });
 
-test("25b. a shallow head regression neither fabricates canonical coverage nor releases capacity", async () => {
-  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 35n,
+test("25b. a deep head regression drains durable observations without scanning or checkpointing", async () => {
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 50n,
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
@@ -634,7 +634,16 @@ test("25b. a shallow head regression neither fabricates canonical coverage nor r
   assert.deepEqual(h.operatorAlerts, []);
 });
 
-test("25c. a pending lifecycle claim remains retryable when the safe head is lagging", async () => {
+test("25c. the durable frontier boundary still performs the normal overlap scan", async () => {
+  const h = fakeHarness({ nextRangeFrom: "100", safeHead: 99n, candidates: [] });
+
+  const result = await h.service.scanOnce();
+  assert.equal(result.scanned, 64);
+  assert.deepEqual(h.calls.find(([name]) => name === "scan")[1], { fromBlock: 36n, throughBlock: 99n });
+  assert.equal(h.calls.filter(([name]) => name === "range").length, 1);
+});
+
+test("25d. a pending lifecycle claim remains retryable when the safe head is lagging", async () => {
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, lifecycleClaimPending: true,
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
@@ -645,7 +654,7 @@ test("25c. a pending lifecycle claim remains retryable when the safe head is lag
   assert.equal(h.state.unsettled.length, 1);
 });
 
-test("25d. a lagging safe head with no durable observations is a no-op", async () => {
+test("25e. a lagging safe head with no durable observations is a no-op", async () => {
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, unsettled: [], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
