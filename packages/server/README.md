@@ -11,8 +11,13 @@ composition instead of exposing a nonfunctional route.
 
 PR6 settlement settings:
 
-- `GAVEL_GATE_BASE_CHAIN_ID` — defaults to `8453`
+- `GAVEL_GATE_ENVIRONMENT` — required when configured; exactly `production` or `test`
+- `GAVEL_GATE_BASE_CHAIN_ID` — `8453` for production or `84532` for test
+- `GAVEL_GATE_BASE_USDC` — canonical Base native USDC in production; an explicitly configured test-token address in test
+- `GAVEL_GATE_TEST_TOKEN_LABEL` — required and nonblank for test; the variable must be completely absent in production (empty or whitespace values are rejected)
 - `GAVEL_GATE_SPLITTER` — enables settlement and is then required to be an address
+- `GAVEL_GATE_QUOTE_SIGNER_ADDRESS` — required public signer identity; must match the registry, splitter immutable, and quote service
+- `GAVEL_GATE_OWNER_RECIPIENT` — required recipient identity; must match the registry and splitter immutable
 - `GAVEL_GATE_CONFIRMATION_DEPTH` — defaults to `1`
 - `GAVEL_GATE_REORG_OVERLAP_BLOCKS` — defaults to `64`
 - `GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE` — defaults to `5000` and must exceed the overlap
@@ -27,6 +32,15 @@ hashes, complete per-block receipt enumeration, and an independent transaction c
 when the canonical transaction hashes, receipt transaction hashes, and independent
 count agree exactly; filtered `eth_getLogs` results are never authoritative for
 capacity release.
+
+Configured startup calls `store.getDeployment({ chainId, splitter })`, verifies the
+RPC-reported chain, then uses the bundled RPC attestor (`getCode` plus read-only
+`call`) before HTTP composition. It reads deployed runtime bytecode, splitter
+`usdc`, `quoteSigner`, `gavelRecipient`, `GAVEL_FEE_AMOUNT`, splitter domain
+separator, and token `name`, `version`, and domain separator. Startup compares
+those values to explicit runtime configuration, the persisted registry tuple,
+the quote service's frozen non-secret issuance identity, fixed fee `250000`, and
+computed EIP-712 domains.
 
 The Base RPC client, lifecycle reader, and optional narrow notification provider
 are injected. A notification provider must set `durableIdempotency = true` and
@@ -49,13 +63,58 @@ redirects. That flag is justified by AgentMail's primary docs, not by a mock:
 Those pages document send-path idempotency via `Idempotency-Key` (not
 `clientId`, which is create-only): a retry with the same key returns the
 original message and sends no second email; the same key with a different body
-is `409 Conflict`; keys expire 24 hours after the send completes. This adapter
-has not live-probed AgentMail. A `409` is treated as a completed send, not a
-retryable failure. An unusable `message_id` is dropped (`null`) instead of
-failing a send that already went out.
+is `409 Conflict`; keys expire 24 hours after the send completes. This guarantee
+is time-bounded, not perpetual. The first attempt and 24-hour deadline are
+persisted; retries stop before the deadline and enter private manual
+reconciliation. A `409` follows the same terminal reconciliation path and is
+never treated as a successful or automatically retryable send. Missing or
+invalid keys fail before any fetch. Operator alerts contain only a stable error
+code and source, never the key, destination, body, response, or headers. Legacy
+claimed attempts with unknowable provider history also require reconciliation.
+An unusable `message_id` is dropped (`null`) instead of failing a send that
+already went out.
 
-The adapter is not composed into `createGateServerRuntime` in this PR. There is
-no `resolveDestination` decryptor and no `AGENTMAIL_*` wiring.
+Notification mode is explicit through `GAVEL_GATE_NOTIFIER_MODE=disabled` or
+`agentmail`. AgentMail mode requires all of `AGENTMAIL_API_KEY`,
+`AGENTMAIL_FROM_INBOX`, and `GAVEL_GATE_ENCRYPTION_KEY`; partial configuration
+fails startup. `AGENTMAIL_API_URL` is optional and must be exactly one of these
+HTTPS origins (no path, query, credentials, or fragment):
+
+- `https://api.agentmail.to`
+- `https://x402.api.agentmail.to`
+- `https://mpp.api.agentmail.to`
+- `https://api.agentmail.eu`
+
+`GAVEL_GATE_ENCRYPTION_KEY` is exactly
+`<key-id>:<43-character unpadded base64url encoding of 32 bytes>`. Delivery
+settings use a `gg1.<key-id>.<nonce>.<ciphertext>.<tag>` AES-256-GCM envelope
+with authenticated version/key identity. The database and worker retain only
+the envelope. The notifier decrypts it only after the send deadline precheck,
+immediately before the final deadline check and outbound request. A wrong key,
+unknown key ID, malformed envelope, or tamper produces only the private
+`DESTINATION_UNAVAILABLE` code.
+
+The canonical runtime constructs the complete narrow chain:
+
+`createNotificationWorker -> createEmailNotifier -> resolveDestination -> createAgentMailSender`
+
+The email closure receives only the decrypt resolver, AgentMail sender, and a
+redacted logger. It receives no quote signer, wallet/session material, Base RPC
+client, raw pitch, payment authorization, or evidence-fetch capability.
+
+An opt-in non-send credential/reachability probe is available after setting the
+complete AgentMail environment:
+
+```sh
+npm run probe:agentmail --workspace @gavel/server
+```
+
+It performs only documented `GET /v0/inboxes/{inbox_id}` with bearer auth, a
+five-second timeout, and redirects disabled. It never reads or prints the
+response body or headers. Output is only `result` (`pass`/`fail`) and a status
+class (`2xx`, `4xx`, `network`, etc.); configuration failures are similarly
+redacted. This probe validates neither sending nor send-path idempotency. No
+live probe or email send was performed while implementing this integration.
 
 Private inbox HTTP (exact `dao_inbox` session equal to the enrolled profile
 wallet):
@@ -64,3 +123,24 @@ wallet):
 - `GET /v1/gate/me/inbox`
 - `GET /v1/gate/me/inbox/:id`
 - `POST /v1/gate/me/inbox/:id/archive` — idempotent; does not change public accepted state
+
+## Canonical process and smoke check
+
+`npm start --workspace @gavel/server` runs the single canonical Gate HTTP and
+worker process. Startup fails before listening unless the `gavel_gate` database
+role is least-privilege, the Gate migration sentinels exist, the canonical index
+is healthy, Ethereum RPC reports chain 1, and Base deployment/RPC attestation
+matches the persisted registry. `GET /health` is exposed only after those checks
+and returns exactly `{ "ok": true, "status": "ready" }`.
+
+Container packaging lives in `Dockerfile.server` and
+`docker-compose.server.yml`; it is deliberately separate from the existing
+read-only index deployment. Validate a running instance without credentials or
+response-body relay:
+
+```sh
+GAVEL_GATE_URL=http://127.0.0.1:8081 npm run smoke --workspace @gavel/server
+```
+
+See `docs/deployment/GAVEL_GATE_EXPERIMENTAL.md` for the fail-closed deployment,
+rotation, rollback, and activation gates.

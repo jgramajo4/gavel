@@ -92,7 +92,8 @@ function publicProfile(profile, policy, power) {
   return result;
 }
 
-function createProfileService({ repository, authService, indexClient, baseChainId, clock = () => new Date() } = {}) {
+function createProfileService({ repository, authService, indexClient, baseChainId, encryptDestination,
+  clock = () => new Date() } = {}) {
   if (!repository || typeof repository.withProfileTransaction !== "function") throw new TypeError("repository.withProfileTransaction is required");
   if (!authService || typeof authService.verifyProfileProofs !== "function" || typeof authService.consumeProfileProofs !== "function") {
     throw new TypeError("authService profile proof methods are required");
@@ -119,6 +120,12 @@ function createProfileService({ repository, authService, indexClient, baseChainI
   }
 
   return Object.freeze({
+    withDestinationEncryption(boundEncryptDestination) {
+      if (typeof boundEncryptDestination !== "function") throw new TypeError("destination encryption is required");
+      return createProfileService({ repository, authService, indexClient, baseChainId: configuredBaseChainId,
+        encryptDestination: boundEncryptDestination, clock });
+    },
+
     async listPublicProfiles({ dao = "nouns", availability = "accepting_now", minVotingPower, sort = "recent" } = {}) {
       if (dao !== "nouns") throw new ProfileRequestError("only dao=nouns is supported");
       if (availability !== "accepting_now") return [];
@@ -171,7 +178,7 @@ function createProfileService({ repository, authService, indexClient, baseChainI
       return profile ? decorate(profile) : null;
     },
 
-    async updateProfile({ session, gateEnrollmentProof, basePayoutControlProof } = {}) {
+    async updateProfile({ session, gateEnrollmentProof, basePayoutControlProof, deliveryDestination } = {}) {
       if (!session || session.role !== "dao_profile") throw new ProfileRequestError("dao_profile session is required", 403, "FORBIDDEN");
       const sessionWallet = address(session.wallet, "session wallet");
       const message = exactMessage(gateEnrollmentProof, "GateEnrollment", ENROLLMENT_FIELDS);
@@ -187,6 +194,15 @@ function createProfileService({ repository, authService, indexClient, baseChainI
           || message.acceptPreVote !== false || message.acceptVoting !== true || String(message.version) !== "1"
           || !AVAILABILITY.has(message.availability)) throw new ProfileRequestError("GateEnrollment policy is invalid");
       assertDecimal(message.attentionAmount, "attentionAmount", 1_000_000n);
+      if (deliveryDestination !== undefined) {
+        if (typeof deliveryDestination !== "string" || deliveryDestination.length < 3
+            || deliveryDestination.length > 254 || !deliveryDestination.includes("@")) {
+          throw new ProfileRequestError("deliveryDestination is invalid");
+        }
+        if (typeof encryptDestination !== "function") {
+          throw new ProfileRequestError("delivery encryption unavailable", 503, "SERVICE_UNAVAILABLE");
+        }
+      }
 
       const committed = await repository.withProfileTransaction(sessionWallet, async (transaction) => {
         if (!transaction || typeof transaction.getProfileByWallet !== "function" || typeof transaction.mutateProfile !== "function") {
@@ -227,15 +243,29 @@ function createProfileService({ repository, authService, indexClient, baseChainI
           attentionAmount: message.attentionAmount,
           tags: Array.isArray(gateEnrollmentProof.publicTags) ? structuredClone(gateEnrollmentProof.publicTags) : [],
         };
+        const profileId = existing?.id || sessionWallet;
+        let deliveryEnvelope;
+        if (deliveryDestination !== undefined) {
+          try { deliveryEnvelope = await encryptDestination(profileId, deliveryDestination); }
+          catch { throw new ProfileRequestError("delivery encryption unavailable", 503, "SERVICE_UNAVAILABLE"); }
+          if (typeof deliveryEnvelope !== "string" || deliveryEnvelope.length > 1024
+              || !/^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(deliveryEnvelope)) {
+            throw new ProfileRequestError("delivery encryption unavailable", 503, "SERVICE_UNAVAILABLE");
+          }
+          if (typeof transaction.setDeliverySetting !== "function") {
+            throw new TypeError("profile transaction setDeliverySetting is required");
+          }
+        }
         const profile = await transaction.mutateProfile({
           profile: {
-            id: existing?.id || sessionWallet, wallet: sessionWallet, walletKind: verified.walletKind,
+            id: profileId, wallet: sessionWallet, walletKind: verified.walletKind,
             walletKindAuthoritative: true, availability: message.availability,
             ...(gateEnrollmentProof.publicDisplay !== undefined ? { display: publicDisplay(gateEnrollmentProof.publicDisplay) } : {}),
             ...(basePayoutCodeHash ? { basePayoutCodeHash, basePayoutVerifiedAt } : {}),
           },
           policy,
         });
+        if (deliveryEnvelope !== undefined) await transaction.setDeliverySetting(profileId, deliveryEnvelope);
         await authService.consumeProfileProofs({ ...verified, transaction });
         return { profile, policy };
       });

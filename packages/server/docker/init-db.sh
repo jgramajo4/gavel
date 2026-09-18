@@ -14,5 +14,10 @@ SET log_min_error_statement = 'panic';
 SELECT format('CREATE ROLE gavel_gate LOGIN PASSWORD %L', :'gate_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gavel_gate') \gexec
 ALTER ROLE gavel_gate LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+SELECT format('REVOKE %I FROM gavel_gate', parent.rolname)
+FROM pg_auth_members membership
+JOIN pg_roles member ON member.oid = membership.member
+JOIN pg_roles parent ON parent.oid = membership.roleid
+WHERE member.rolname = 'gavel_gate' \gexec
 GRANT CONNECT ON DATABASE gavel TO gavel_gate;
 SQL

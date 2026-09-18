@@ -34,6 +34,7 @@ const INBOX_LIFECYCLE_SET = new Set(INBOX_LIFECYCLES);
 const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
+const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 
 function clone(value) { return value == null ? value : structuredClone(value); }
 function publicDisplay(value) {
@@ -83,6 +84,16 @@ function compareShape(value) {
     return item;
   });
 }
+function validDeploymentEnvironment(deployment) {
+  const environment = deployment.config?.environment;
+  const label = deployment.config?.testTokenLabel;
+  if (environment === "production") {
+    return deployment.chainId === "8453" && deployment.token === PRODUCTION_BASE_USDC
+      && !Object.hasOwn(deployment.config, "testTokenLabel");
+  }
+  return environment === "test" && deployment.chainId === "84532"
+    && typeof label === "string" && label.trim() !== "";
+}
 class MemoryGateStore {
   #randomBytes;
   #clock;
@@ -103,6 +114,7 @@ class MemoryGateStore {
   #reservations;
   #inboxItems;
   #notifications;
+  #deliverySettings;
   #monitors;
   #authNonces;
   #authSessions;
@@ -132,6 +144,7 @@ class MemoryGateStore {
     this.#reservations = new Map();
     this.#inboxItems = new Map();
     this.#notifications = new Map();
+    this.#deliverySettings = new Map();
     this.#monitors = new Map();
     this.#authNonces = new Map();
     this.#authSessions = new Map();
@@ -298,6 +311,7 @@ class MemoryGateStore {
         const profiles = structuredClone(this.#profiles);
         const policies = structuredClone(this.#policies);
         const nonces = structuredClone(this.#authNonces);
+        const deliverySettings = structuredClone(this.#deliverySettings);
         try {
           const auth = this.#authTransactionView();
           const transaction = Object.freeze({
@@ -310,12 +324,22 @@ class MemoryGateStore {
               }
               return this.#mutateProfileUnsafe(input);
             },
+            setDeliverySetting: async (profileId, ciphertext) => {
+              const profile = this.#profiles.get(profileId);
+              if (!profile || profile.wallet !== canonicalWallet) throw new Error("delivery setting profile mismatch");
+              if (typeof ciphertext !== "string" || ciphertext.length > 1024
+                  || !/^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(ciphertext)) {
+                throw new TypeError("delivery setting must be a canonical encrypted envelope");
+              }
+              this.#deliverySettings.set(profileId, ciphertext);
+            },
           });
           return await callback(transaction);
         } catch (error) {
           this.#profiles = profiles;
           this.#policies = policies;
           this.#authNonces = nonces;
+          this.#deliverySettings = deliverySettings;
           throw error;
         }
       });
@@ -423,11 +447,18 @@ class MemoryGateStore {
     if (!Number.isSafeInteger(normalized.config.overlap) || normalized.config.overlap < 1) {
       throw new TypeError("deployment.config.overlap must be a positive integer");
     }
+    if (!validDeploymentEnvironment(normalized)) {
+      throw new TypeError("deployment environment is not valid for its chain and token");
+    }
     return this.#serialized(() => {
       const existing = this.#deployments.get(normalized.id);
       if (existing) {
         for (const field of ["chainId", "splitter", "signer", "token", "gavelRecipient", "deploymentBlock", "contractCodeHash"]) {
           if (existing[field] !== normalized[field]) throw new Error("immutable deployment identity mismatch");
+        }
+        if (existing.config.environment !== normalized.config.environment
+            || existing.config.testTokenLabel !== normalized.config.testTokenLabel) {
+          throw new Error("immutable deployment identity mismatch");
         }
       }
       const duplicateMaterial = [...this.#deployments.values()].find((row) =>
@@ -450,6 +481,13 @@ class MemoryGateStore {
       }
       return clone(normalized);
     });
+  }
+
+  async getDeployment({ chainId, splitter } = {}) {
+    const expectedChain = block(chainId, "chainId").raw;
+    const expectedSplitter = address(splitter, "splitter");
+    return clone([...this.#deployments.values()].find((row) =>
+      row.chainId === expectedChain && row.splitter === expectedSplitter) ?? null);
   }
 
   async getScannerState({ chainId, splitter } = {}) {
@@ -584,6 +622,46 @@ class MemoryGateStore {
           throw new Error("canonical scanner range does not join persisted ancestry");
         }
       }
+      const priorLatestByBlock = new Map();
+      for (const stored of this.#scannerRanges.values()) {
+        if (stored.deploymentId !== deployment.id) continue;
+        for (const item of stored.canonicalBlocks) {
+          const current = priorLatestByBlock.get(item.blockNumber);
+          if (current == null || BigInt(stored.generation) > BigInt(current)) priorLatestByBlock.set(item.blockNumber, stored.generation);
+        }
+      }
+      const priorAnomalies = new Set();
+      const priorExact = new Set();
+      const previouslyReorgedExact = new Set();
+      const seenExact = new Map();
+      const historicalRanges = [...this.#scannerRanges.values()]
+        .filter((stored) => stored.deploymentId === deployment.id)
+        .sort((left, right) => BigInt(left.generation) === BigInt(right.generation) ? 0
+          : BigInt(left.generation) < BigInt(right.generation) ? -1 : 1);
+      for (const stored of historicalRanges) {
+        const coveredBlocks = new Set(stored.canonicalBlocks.map((item) => String(item.blockNumber)));
+        const currentKeys = new Set(stored.observations.filter((item) => item.kind === "exact_log" && item.exactMatch === true)
+          .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+        for (const [identity, blockNumber] of seenExact) {
+          if (coveredBlocks.has(blockNumber) && !currentKeys.has(identity)) previouslyReorgedExact.add(identity);
+        }
+        for (const item of stored.observations) {
+          if (item.kind === "exact_log" && item.exactMatch === true) {
+            seenExact.set(`${item.quoteId}:${item.txHash}:${item.logIndex}`, String(item.blockNumber));
+          }
+        }
+      }
+      for (const stored of this.#scannerRanges.values()) {
+        if (stored.deploymentId !== deployment.id) continue;
+        for (const item of stored.observations) {
+          if (BigInt(item.blockNumber) < fromBlock.number || BigInt(item.blockNumber) > throughBlock.number) continue;
+          if (item.kind === "anomaly") priorAnomalies.add(`${item.txHash}:${item.logIndex}:${item.details?.code}`);
+          if (item.kind === "exact_log" && priorLatestByBlock.get(String(item.blockNumber)) === stored.generation) {
+            const quote = this.#quoteEntry(item.quoteId)?.[1];
+            if (quote && quote.state !== "settled") priorExact.add(`${item.quoteId}:${item.txHash}:${item.logIndex}`);
+          }
+        }
+      }
       this.#scannerRanges.set(replayKey, normalized);
       this.#settlementCursors.set(key, { ...clone(cursor), nextRangeFrom: (throughBlock.number + 1n).toString(),
         checkpointBlock: throughBlock.raw, canonicalBlockHash: normalized.canonicalBlockHash,
@@ -624,7 +702,8 @@ class MemoryGateStore {
           && String(item.blockNumber) === quote.receiptBlock && item.blockHash === quote.receiptBlockHash
           && instant(item.blockTimestamp, "observation.blockTimestamp").valueOf() === quote.receiptBlockTimestamp.valueOf());
         if (exact) continue;
-        const detectedAt = quote.settlementReorgedAt ?? instant(this.#clock(), "clock");
+        if (quote.settlementReorgedAt) continue;
+        const detectedAt = instant(this.#clock(), "clock");
         this.#quotes.set(quoteInternalId, { ...clone(quote), settlementReorgedAt: detectedAt });
         const monitorKey = `${quote.baseChainId}:${quote.splitter}:${quote.quoteId}`;
         const monitor = this.#monitors.get(monitorKey);
@@ -635,7 +714,16 @@ class MemoryGateStore {
         } });
         reorged += 1;
       }
-      return { released, reorged };
+      const anomalyKeys = observations.filter((item) => item.kind === "anomaly")
+        .map((item) => `${item.txHash}:${item.logIndex}:${item.details?.code}`);
+      const currentExact = new Set(observations.filter((item) => item.kind === "exact_log")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+      const unknownQuotes = anomalyKeys.filter((key) => key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const mismatches = anomalyKeys.filter((key) => !key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const preAcceptanceReorged = [...priorExact]
+        .filter((key) => !currentExact.has(key) && !previouslyReorgedExact.has(key)).length;
+      return { released, reorged, ...(unknownQuotes ? { unknownQuotes } : {}), ...(mismatches ? { mismatches } : {}),
+        ...(preAcceptanceReorged ? { preAcceptanceReorged } : {}) };
     });
   }
 
@@ -717,6 +805,7 @@ class MemoryGateStore {
       if (attentionAmount !== policy.attentionAmount) throw new Error("issuance context changed");
       const deployment = this.#deployments.get(quote.deploymentId);
       if (!deployment?.issuanceActive) throw new Error("issuance unavailable");
+      if (!validDeploymentEnvironment(deployment)) throw new Error("deployment environment is invalid");
       if (String(quote.baseChainId) !== deployment.chainId || splitter !== deployment.splitter || token !== deployment.token) {
         throw new Error("quote deployment material mismatch");
       }
@@ -836,7 +925,9 @@ class MemoryGateStore {
       submission.pendingSettlementTxHash = transactionHash;
       submission.status = "SETTLEMENT_PENDING";
       submission.publicStateChangedAt = now;
-      return clone(publicSubmissionProjection(submission, null));
+      const receipt = clone(publicSubmissionProjection(submission, null));
+      Object.defineProperty(receipt, "newlyPending", { value: true });
+      return receipt;
     });
   }
 
@@ -882,7 +973,8 @@ class MemoryGateStore {
       token: quote.token, submissionHash: submission.submissionHash, quoteVersion: quote.quoteVersion,
       baseChainId: quote.baseChainId, splitter: quote.splitter, expiresAt: quote.expiresAt,
       issuanceLifecycle: snapshot.eligibility, dao: snapshot.dao, proposalId: snapshot.proposalId,
-      destinationRef: `profile:${submission.profileId}`,
+      profileId: submission.profileId,
+      destinationRef: this.#deliverySettings.get(submission.profileId) ?? null,
       trustedSummary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
   }
 
@@ -1003,7 +1095,7 @@ class MemoryGateStore {
     if (!inbox.currentLifecycleUnavailable && inbox.privateUnavailabilityReason != null) {
       throw new TypeError("private unavailability reason requires unavailable lifecycle");
     }
-    if (!notification?.id || notification.status !== "pending") throw new TypeError("notification must initially be pending");
+
     if (!monitor?.id) throw new TypeError("monitor id is required");
     const nextCheck = block(monitor.nextCheckBlock, "monitor.nextCheckBlock");
     if (nextCheck.number < BigInt(normalized.receiptBlock)) throw new Error("monitor nextCheckBlock must cover receiptBlock");
@@ -1027,8 +1119,12 @@ class MemoryGateStore {
         const existingInbox = [...this.#inboxItems.values()].find((row) => row.submissionId === submission.id);
         const existingMonitor = this.#monitors.get(monitorKey);
         const existingNotification = existingInbox && [...this.#notifications.values()].find((row) => row.inboxId === existingInbox.id);
-        if (!existingInbox || !existingMonitor || !existingNotification) throw new Error("idempotent settlement is incomplete: inbox, notification, and monitor are required");
-        if (existingInbox.id !== inbox.id || existingNotification.id !== notification.id || existingMonitor.id !== monitor.id) {
+        if (!existingInbox || !existingMonitor) {
+          throw new Error("idempotent settlement side effects are incomplete");
+        }
+        if (existingInbox.id !== inbox.id
+            || (existingNotification && notification && existingNotification.id !== notification.id)
+            || existingMonitor.id !== monitor.id) {
           throw new Error("conflicting settlement side effects");
         }
         return false;
@@ -1052,13 +1148,16 @@ class MemoryGateStore {
         ...clone(inbox), submissionId: submission.id, profileId: submission.profileId,
         inboxCreatedAt: now, readAt: null, archivedAt: null,
       };
-      const stagedNotification = { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
-        nextAttemptAt: now, claimedUntil: null, createdAt: now, updatedAt: now };
+      const notificationIsValid = Boolean(notification?.id && notification.status === "pending"
+        && !this.#notifications.has(notification.id));
+      const stagedNotification = notificationIsValid ? { ...clone(notification), inboxId: inbox.id, status: "pending", retryCount: 0, claimGeneration: 0,
+        nextAttemptAt: now, claimedUntil: null, firstAttemptAt: null, dedupeDeadline: null,
+        manualReconciliationAt: null, createdAt: now, updatedAt: now } : null;
       const stagedMonitor = {
         ...clone(monitor), quoteId: quote.quoteId, chainId: quote.baseChainId, splitter: quote.splitter,
         receiptBlock: normalizedSettlement.receiptBlock, receiptBlockHash: normalizedSettlement.receiptBlockHash,
         txHash: normalizedSettlement.txHash, logIndex: normalizedSettlement.logIndex, completedAt: null,
-        claimedUntil: null, claimGeneration: 0, reconciliationMetadata: {},
+        claimedUntil: null, claimGeneration: 0, reconciliationMetadata: {}, createdAt: now,
       };
       await this.#beforeSettlementCommit();
       return this.#serialized(async () => {
@@ -1071,7 +1170,7 @@ class MemoryGateStore {
           return false;
         }
         if (this.#inboxItems.has(inbox.id)) throw new Error("duplicate inbox id");
-        if (this.#notifications.has(notification.id)) throw new Error("duplicate notification id");
+
         if (this.#monitors.has(monitorKey)) throw new Error("duplicate settlement monitor");
         const settlementCollision = [...this.#quotes.values()].some((row) => row.state === "settled"
           && row.baseChainId === quote.baseChainId && row.splitter === quote.splitter
@@ -1081,10 +1180,27 @@ class MemoryGateStore {
         this.#reservations.set(reservation.id, stagedReservation);
         this.#submissions.set(submission.id, stagedSubmission);
         this.#inboxItems.set(inbox.id, stagedInbox);
-        this.#notifications.set(notification.id, stagedNotification);
+        if (stagedNotification) this.#notifications.set(notification.id, stagedNotification);
         this.#monitors.set(monitorKey, stagedMonitor);
         return { settled: true, inboxCreatedAt: clone(now) };
       });
+    });
+  }
+
+  async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    const head = block(headBlock, "headBlock").number;
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      const active = [...this.#monitors.values()].filter((row) => row.chainId === settlementChain
+        && row.splitter === settlementSplitter && !row.completedAt);
+      return {
+        queueDepth: active.length,
+        oldestAgeSeconds: active.length ? Math.max(0, (now - new Date(Math.min(...active.map((row) => row.createdAt.valueOf())))) / 1000) : 0,
+        progressLag: active.reduce((lag, row) => Math.max(lag,
+          Number(head - BigInt(row.progressBlock ?? row.receiptBlock) > 0n ? head - BigInt(row.progressBlock ?? row.receiptBlock) : 0n)), 0),
+      };
     });
   }
 
@@ -1128,19 +1244,24 @@ class MemoryGateStore {
     });
   }
 
-  async claimNotificationAttempts({ limit = 20, now = this.#clock() } = {}) {
+  async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000, now = this.#clock() } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
     const at = instant(now, "now");
     return this.#serialized(() => {
       const rows = [...this.#notifications.values()].filter((row) => ["pending", "failed"].includes(row.status)
         && (row.nextAttemptAt ?? row.createdAt) <= at && (!row.claimedUntil || row.claimedUntil <= at)
-        && row.retryCount <= this.#notificationRetryLimit).slice(0, limit);
+        && !row.manualReconciliationAt && row.retryCount <= this.#notificationRetryLimit).slice(0, limit);
       for (const row of rows) {
         row.status = "pending";
         row.claimGeneration += 1;
-        row.claimedUntil = new Date(at.valueOf() + 30_000);
+        row.claimedUntil = new Date(at.valueOf() + leaseMs);
+        row.firstAttemptAt ??= at;
+        row.dedupeDeadline ??= new Date(row.firstAttemptAt.valueOf() + 24 * 60 * 60 * 1000);
       }
       return clone(rows.map((row) => ({ id: row.id, claimToken: String(row.claimGeneration), retryCount: row.retryCount,
+        firstAttemptAt: row.firstAttemptAt, dedupeDeadline: row.dedupeDeadline,
+        profileId: this.#inboxItems.get(row.inboxId)?.profileId,
         destinationRef: row.destinationRef, summary: row.summary })));
     });
   }
@@ -1151,7 +1272,8 @@ class MemoryGateStore {
       if (!row) throw new Error("notification not found");
       if (row.status === "sent") return false;
       const now = instant(this.#clock(), "clock");
-      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
       row.status = "sent"; row.providerOpaqueId = providerOpaqueId; row.claimedUntil = null;
       row.updatedAt = now; return true;
     });
@@ -1164,9 +1286,28 @@ class MemoryGateStore {
       if (!row) throw new Error("notification not found");
       if (row.status === "sent") return false;
       const now = instant(this.#clock(), "clock");
-      if (String(row.claimGeneration) !== claimToken || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
       row.status = "failed"; row.errorCode = String(errorCode); row.retryCount += 1;
       row.nextAttemptAt = next; row.claimedUntil = null; row.updatedAt = now; return true;
+    });
+  }
+
+  async reconcileNotification({ id, claimToken, errorCode } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof errorCode !== "string" || !errorCode) throw new TypeError("notification id, claimToken, and errorCode are required");
+    return this.#serialized(() => {
+      const row = this.#notifications.get(id);
+      if (!row) throw new Error("notification not found");
+      const now = instant(this.#clock(), "clock");
+      if (row.manualReconciliationAt || String(row.claimGeneration) !== claimToken
+          || !row.claimedUntil || row.claimedUntil <= now || row.status !== "pending") return false;
+      row.status = "failed";
+      row.errorCode = errorCode;
+      row.manualReconciliationAt = now;
+      row.claimedUntil = null;
+      row.updatedAt = now;
+      return true;
     });
   }
 
@@ -1174,6 +1315,9 @@ class MemoryGateStore {
     return this.#withProfileLock(`notification:${id}`, async () => {
       const row = this.#notifications.get(id);
       if (!row) throw new Error("notification not found");
+      if (row.manualReconciliationAt && patch.status !== undefined && patch.status !== "failed") {
+        throw new Error("manual reconciliation notification state is terminal");
+      }
       const transition = notificationTransition(row, patch, this.#notificationRetryLimit);
       const updated = { ...clone(row), ...clone(transition),
         updatedAt: instant(this.#clock(), "clock") };

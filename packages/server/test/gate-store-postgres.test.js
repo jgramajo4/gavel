@@ -22,7 +22,7 @@ const WALLET = addr("1");
 const PAYER = addr("2");
 const SPLITTER = addr("3");
 const SIGNER = addr("4");
-const TOKEN = addr("5");
+const TOKEN = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const CODE_HASH = hash("6");
 const GAVEL_RECIPIENT = addr("7");
 
@@ -95,6 +95,8 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
       AND settlement_fee_amount IS NOT NULL AND settlement_gavel_recipient IS NOT NULL AND settlement_token IS NOT NULL
       AND settlement_submission_hash IS NOT NULL AND settlement_quote_version IS NOT NULL
       AND settlement_source_chain_id IS NOT NULL AND settlement_splitter IS NOT NULL))`);
+    await pool.query("ALTER TABLE gate.quotes DROP CONSTRAINT quotes_base_chain_check");
+    await pool.query("ALTER TABLE gate.quotes ADD CONSTRAINT quotes_base_chain_id_check CHECK(base_chain_id=8453)");
     await pool.query(`UPDATE public.schema_migrations
       SET migration_checksum='sha256:gate-001-v3-durable-auth-profile-hardening',
           catalog_manifest=public.gavel_gate_catalog_manifest()
@@ -135,9 +137,124 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
     await pool.query(migration);
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v3-legacy-upgrade-hardening",
+      migration_checksum: "sha256:gate-001-v3-runtime-readiness",
       catalog_manifest: manifestBeforeRerun,
     });
+    const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='gate' AND t.relname='splitter_deployments'
+        AND c.conname='splitter_deployments_environment_check'`)).rows[0];
+    assert.match(deploymentConstraint.definition, /environment.*production.*8453.*833589fcd6edb6e08f4c7c32d4f71b54bda02913/i);
+    assert.match(deploymentConstraint.definition, /environment.*test.*84532.*testTokenLabel/i);
+    assert.doesNotMatch(deploymentConstraint.definition, /issuance_active/i);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM pg_trigger t
+      JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='gate' AND c.relname='splitter_deployments'
+        AND t.tgname='splitter_deployments_immutable_identity' AND NOT t.tgisinternal`)).rows[0].n, 1);
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
+test("real PostgreSQL closes deployment environments for active, inactive, legacy, and test issuance", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const store = new PostgresGateStore({ pool, baseCodeReader: async () => "0x6000" });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  const TEST_SPLITTER = addr("9");
+  const TEST_TOKEN = addr("8");
+  const TEST_SIGNER_KEY = `0x${"6".repeat(64)}`;
+  const TEST_SIGNER = createQuoteSigner({ signer: TEST_SIGNER_KEY, chainId: 84532, splitter: TEST_SPLITTER });
+  const insert = (id, chainId, splitter, token, config, active = false) => pool.query(`INSERT INTO gate.splitter_deployments
+    (id,chain_id,splitter,signer,token,gavel_recipient,deployment_block,scanner_cursor,contract_code_hash,config,rpc_access_ciphertext,issuance_active)
+    VALUES($1,$2,$3,$4,$5,$6,1,1,$7,$8::jsonb,'ciphertext',$9)`,
+  [id, chainId, splitter, SIGNER, token, GAVEL_RECIPIENT, CODE_HASH, JSON.stringify(config), active]);
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(migration);
+
+    await store.configureDeployment({ id: "prod-inactive", chainId: "8453", splitter: SPLITTER,
+      signer: SIGNER, token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "1",
+      contractCodeHash: CODE_HASH, config: { environment: "production" }, rpcAccess: "ciphertext", issuanceActive: false });
+    await store.configureDeployment({ id: "test-active", chainId: "84532", splitter: TEST_SPLITTER,
+      signer: TEST_SIGNER.address, token: TEST_TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "1",
+      contractCodeHash: hash("e"), config: { environment: "test", testTokenLabel: "base-sepolia-eip3009-test" },
+      rpcAccess: "ciphertext", issuanceActive: true });
+
+    for (const [id, chainId, token, config] of [
+      ["test-on-mainnet", 8453, TEST_TOKEN, { environment: "test", testTokenLabel: "test" }],
+      ["prod-on-sepolia", 84532, TOKEN, { environment: "production" }],
+      ["unknown-chain", 1, TEST_TOKEN, { environment: "test", testTokenLabel: "test" }],
+      ["wrong-prod-token", 8453, TEST_TOKEN, { environment: "production" }],
+      ["prod-empty-label", 8453, TOKEN, { environment: "production", testTokenLabel: "" }],
+      ["prod-space-label", 8453, TOKEN, { environment: "production", testTokenLabel: "   " }],
+      ["prod-null-label", 8453, TOKEN, { environment: "production", testTokenLabel: null }],
+      ["test-number-label", 84532, TEST_TOKEN, { environment: "test", testTokenLabel: 1 }],
+      ["test-boolean-label", 84532, TEST_TOKEN, { environment: "test", testTokenLabel: true }],
+      ["test-array-label", 84532, TEST_TOKEN, { environment: "test", testTokenLabel: [] }],
+      ["test-object-label", 84532, TEST_TOKEN, { environment: "test", testTokenLabel: { label: "test" } }],
+    ]) {
+      await assert.rejects(insert(id, chainId, addr("a"), token, config), (error) => error.code === "23514", id);
+    }
+
+    for (const id of ["prod-inactive", "test-active"]) {
+      await assert.rejects(pool.query(`UPDATE gate.splitter_deployments SET signer=$2 WHERE id=$1`, [id, addr("b")]),
+        /immutable deployment identity/, `${id} signer`);
+      const changedEnvironment = id === "prod-inactive" ? "test" : "production";
+      await assert.rejects(pool.query(`UPDATE gate.splitter_deployments
+        SET config=jsonb_set(config,'{environment}',to_jsonb($2::text)) WHERE id=$1`, [id, changedEnvironment]),
+      /immutable deployment identity/, `${id} environment`);
+    }
+
+    await store.mutateProfile({ profile: { id: "test-profile", wallet: WALLET, walletKind: "eoa", availability: "accepting_now" },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
+        attentionAmount: "1000000", pendingReservationCapacity: 12, settledCapacity: 25, tags: [] } });
+    const command = issuance("a");
+    command.signer = TEST_SIGNER;
+    command.context.deploymentCodeHash = hash("e");
+    command.context.expectedProfileVersion = "1";
+    command.submission.profileId = "test-profile";
+    command.reservation.profileId = "test-profile";
+    command.quote.baseChainId = "84532";
+    command.quote.splitter = TEST_SPLITTER;
+    command.quote.token = TEST_TOKEN;
+    command.quote.deploymentId = "test-active";
+    const issued = await store.issue(command);
+    assert.equal(issued.quote.domain.chainId, 84532);
+    assert.equal(issued.quote.message.token.toLowerCase(), TEST_TOKEN);
+
+    await pool.query(`ALTER TABLE gate.splitter_deployments
+      ADD CONSTRAINT splitter_deployments_unrelated_preserved CHECK(chain_id>0)`);
+    await pool.query(`UPDATE public.schema_migrations
+      SET migration_checksum='sha256:gate-001-v3-closed-base-environments',
+          catalog_manifest=public.gavel_gate_catalog_manifest()
+      WHERE version='gate/001_gate-v3'`);
+    await pool.query(migration);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM pg_constraint
+      WHERE conname='splitter_deployments_unrelated_preserved'`)).rows[0].n, 1);
+
+    await pool.query("ALTER TABLE gate.splitter_deployments DROP CONSTRAINT splitter_deployments_environment_check");
+    await pool.query("ALTER TABLE gate.quotes DROP CONSTRAINT quotes_base_chain_check");
+    await pool.query(`ALTER TABLE gate.quotes ADD CONSTRAINT quotes_base_chain_id_check
+      CHECK(base_chain_id=8453 OR base_chain_id=84532)`);
+    await insert("invalid-legacy", 8453, addr("c"), TEST_TOKEN, { environment: "production" });
+    await pool.query(`UPDATE public.schema_migrations
+      SET migration_checksum='sha256:gate-001-v3-durable-auth-profile-hardening',
+          catalog_manifest=public.gavel_gate_catalog_manifest()
+      WHERE version='gate/001_gate-v3'`);
+    await assert.rejects(pool.query(migration), /splitter_deployments_environment_check|violated by some row/i);
+    await pool.query("ALTER TABLE gate.splitter_deployments DISABLE TRIGGER splitter_deployments_immutable_identity");
+    try { await pool.query("DELETE FROM gate.splitter_deployments WHERE id='invalid-legacy'"); }
+    finally { await pool.query("ALTER TABLE gate.splitter_deployments ENABLE TRIGGER splitter_deployments_immutable_identity"); }
+    await pool.query(migration);
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
@@ -177,6 +294,8 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     await pool.query(`ALTER TABLE gate.proposal_snapshots ALTER COLUMN mapping_version TYPE integer
       USING CASE WHEN mapping_version='nouns-lifecycle/1' THEN 1 ELSE NULL END`);
     await pool.query("ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_mapping_version_check CHECK(mapping_version=1)");
+    await pool.query("ALTER TABLE gate.quotes DROP CONSTRAINT quotes_base_chain_check");
+    await pool.query("ALTER TABLE gate.quotes ADD CONSTRAINT quotes_base_chain_id_check CHECK(base_chain_id=8453)");
     await pool.query(`UPDATE public.schema_migrations SET migration_checksum='sha256:gate-001-v3-durable-auth-profile',
       catalog_manifest=public.gavel_gate_catalog_manifest() WHERE version='gate/001_gate-v3'`);
     await pool.query(migration);
@@ -212,7 +331,14 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
 
     await store.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER, token: TOKEN,
       gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "5", nextBlock: "99", contractCodeHash: CODE_HASH,
-      config: { overlap: 2 }, rpcAccess: "ciphertext", issuanceActive: true });
+      config: { environment: "production", overlap: 2 }, rpcAccess: "ciphertext", issuanceActive: true });
+    await assert.rejects(pool.query(`UPDATE gate.splitter_deployments
+      SET config=jsonb_set(config,'{environment}','"test"'::jsonb) WHERE id='deployment-1'`), /immutable deployment identity/);
+    await store.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER, token: TOKEN,
+      gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "5", nextBlock: "99", contractCodeHash: CODE_HASH,
+      config: { environment: "production", overlap: 3 }, rpcAccess: "rotated-ciphertext", issuanceActive: true });
+    assert.equal((await pool.query("SELECT (config->>'overlap')::int AS overlap FROM gate.splitter_deployments WHERE id='deployment-1'"))
+      .rows[0].overlap, 3);
     assert.deepEqual((await pool.query("SELECT scanner_cursor::text,next_range_from::text FROM gate.splitter_deployments d JOIN gate.settlement_cursors c ON c.deployment_id=d.id WHERE d.id='deployment-1'")).rows[0],
       { scanner_cursor: "5", next_range_from: "5" });
     const commandA = issuance("1", hash("b")); commandA.context.expectedProfileVersion = "4";
@@ -251,15 +377,21 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     { generation: "1", next: "8", ranges: 1 }, "conflicting replay must not advance or duplicate durable scanner state");
     assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
       FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [settledQuoteId])).rows[0],
-    { quote_state: "quoted", quote_reservation_state: "active", reservation_state: "active" });
-    const rollbackCommand = structuredClone(settleCommand);
-    rollbackCommand.notification.summary = { subject: "missing-text" };
-    await assert.rejects(store.settle(rollbackCommand));
+    { quote_state: "quoted", quote_reservation_state: "reserved", reservation_state: "active" });
+    const isolatedNotificationFailure = structuredClone(settleCommand);
+    isolatedNotificationFailure.notification.summary = { subject: "missing-text" };
+    assert.equal((await store.settle(isolatedNotificationFailure)).settled, true);
     assert.deepEqual(await store.counts(),
-      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 0, notifications: 0, monitors: 0 });
+      { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 0, monitors: 1 });
+    assert.equal(await store.settle(isolatedNotificationFailure), false,
+      "replaying a settlement whose optional notification insert failed must be idempotent");
+    await pool.query(`INSERT INTO gate.notification_attempts
+      (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at)
+      VALUES($1,$2,$3,$4,$5::jsonb,'pending',clock_timestamp())`,
+    [settleCommand.notification.id, settleCommand.inbox.id, settleCommand.notification.channel,
+      settleCommand.notification.destinationRef, JSON.stringify({ subject: "Paid pitch ready", text: "Open your private Gate inbox." })]);
     const concurrentSettlement = await Promise.all([store.settle(settleCommand), store.settle(settleCommand)]);
-    assert.equal(concurrentSettlement.filter((result) => result?.settled === true).length, 1);
-    assert.equal(concurrentSettlement.filter((result) => result === false).length, 1);
+    assert.deepEqual(concurrentSettlement, [false, false]);
     assert.deepEqual(await store.counts(),
       { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 1, monitors: 1 });
     await assert.rejects(store.settle({ ...settleCommand, settlement: { ...settlement, txHash: hash("e") } }), /conflicting/);
@@ -269,10 +401,26 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     assert.deepEqual(Object.keys(receipt).sort(), ["acceptedAt", "publicId", "state"].sort());
     assert.equal(receipt.state, "accepted");
 
+    const notificationJob = (await store.claimNotificationAttempts({ limit: 1 }))[0];
+    assert.ok(notificationJob.firstAttemptAt instanceof Date);
+    assert.equal(notificationJob.dedupeDeadline.valueOf() - notificationJob.firstAttemptAt.valueOf(), 24 * 60 * 60 * 1000);
+    await pool.query(migration);
+    assert.deepEqual((await pool.query(`SELECT manual_reconciliation_at,error_code
+      FROM gate.notification_attempts WHERE id=$1`, [notificationJob.id])).rows[0], {
+      manual_reconciliation_at: null, error_code: null,
+    });
+    assert.equal(await store.reconcileNotification({ id: notificationJob.id, claimToken: notificationJob.claimToken,
+      errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT" }), true);
+    assert.deepEqual(await store.claimNotificationAttempts({ limit: 1 }), []);
+    assert.deepEqual((await pool.query(`SELECT state::text,manual_reconciliation_at IS NOT NULL AS manual,error_code
+      FROM gate.notification_attempts WHERE id=$1`, [notificationJob.id])).rows[0], {
+      state: "failed", manual: true, error_code: "PROVIDER_IDEMPOTENCY_CONFLICT",
+    });
+
     const rewrittenAt = new Date();
-    const rewritten = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "6", throughBlock: "8",
+    const rewritten = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "5", throughBlock: "8",
       canonicalBlockHash: hash("d"), canonicalBlockTimestamp: rewrittenAt,
-      canonicalBlocks: canonicalBlocks(6, 8, { changedBlock: 7, changedHash: hash("e"), timestamp: rewrittenAt }), observations: [] });
+      canonicalBlocks: canonicalBlocks(5, 8, { changedBlock: 7, changedHash: hash("e"), timestamp: rewrittenAt }), observations: [] });
     assert.deepEqual(rewritten, { released: 0, reorged: 1 });
     const reorged = (await pool.query("SELECT settlement_reorged_at FROM gate.quotes WHERE quote_id=$1", [settledQuoteId])).rows[0];
     assert.ok(reorged.settlement_reorged_at, "accepted overlap rewrite must be privately marked");
@@ -296,16 +444,27 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     const pendingSettlement = { ...settlement, txHash: hash("a"), receiptBlock: "9", receiptBlockHash: hash("d"),
       receiptBlockTimestamp: pendingObservedAt, settledAt: pendingObservedAt,
       event: { ...settlement.event, quoteId: hash("f"), submissionHash: hash("f") } };
-    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "3", fromBlock: "7", throughBlock: "9",
+    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "3", fromBlock: "6", throughBlock: "9",
       canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingObservedAt,
-      canonicalBlocks: canonicalBlocks(7, 9, { timestamp: pendingObservedAt }),
+      canonicalBlocks: canonicalBlocks(6, 9, { timestamp: pendingObservedAt }),
       observations: [{ kind: "exact_log", quoteId: hash("f"), txHash: hash("a"), logIndex: 0, blockNumber: "9",
         blockHash: hash("d"), blockTimestamp: pendingObservedAt, exactMatch: true }] });
     const pendingRewriteAt = new Date();
-    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "8", throughBlock: "10",
+    const firstPendingRewrite = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "7", throughBlock: "10",
+      canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingRewriteAt,
+      canonicalBlocks: canonicalBlocks(7, 10, { changedBlock: 9, changedHash: hash("e"), timestamp: pendingRewriteAt }), observations: [] });
+    assert.equal(firstPendingRewrite.preAcceptanceReorged, 1);
+    await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "8", throughBlock: "10",
+      canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingObservedAt,
+      canonicalBlocks: canonicalBlocks(8, 10, { timestamp: pendingObservedAt }),
+      observations: [{ kind: "exact_log", quoteId: hash("f"), txHash: hash("a"), logIndex: 0, blockNumber: "9",
+        blockHash: hash("d"), blockTimestamp: pendingObservedAt, exactMatch: true }] });
+    const repeatedPendingRewrite = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "6", fromBlock: "8", throughBlock: "10",
       canonicalBlockHash: hash("d"), canonicalBlockTimestamp: pendingRewriteAt,
       canonicalBlocks: canonicalBlocks(8, 10, { changedBlock: 9, changedHash: hash("e"), timestamp: pendingRewriteAt }), observations: [] });
-    assert.equal((await createPublicGateReader(pool).getSubmission(issuedExpiring.publicId)).state, "payment_required");
+    assert.equal(Object.hasOwn(repeatedPendingRewrite, "preAcceptanceReorged"), false,
+      "PostgreSQL must count a recurring pre-acceptance reorg only once");
+    assert.equal((await createPublicGateReader(pool).getSubmission(issuedExpiring.publicId)).state, "pending_settlement");
     await assert.rejects(store.settle({ quoteId: hash("f"), settlement: pendingSettlement,
       inbox: { id: "inbox-stale", issuanceLifecycle: "VOTING", currentLifecycle: "UNKNOWN", lifecycleChanged: false,
         currentLifecycleUnavailable: true, privateUnavailabilityReason: "private" },
@@ -314,37 +473,45 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
     // The production TTL is exactly ten minutes and cannot be caller-shortened. Move this
     // disposable fixture past expiry without weakening the production immutability triggers.
     await pool.query("ALTER TABLE gate.quotes DISABLE TRIGGER quotes_immutable_issuance");
+    await pool.query("ALTER TABLE gate.quotes DISABLE TRIGGER quotes_validate_bindings");
     await pool.query("ALTER TABLE gate.capacity_reservations DISABLE TRIGGER capacity_reservations_immutable_relationship");
+    await pool.query("ALTER TABLE gate.capacity_reservations DISABLE TRIGGER capacity_reservations_validate_bindings");
     try {
-      await pool.query(`UPDATE gate.quotes SET expires_at=clock_timestamp()-interval '1 second' WHERE quote_id=$1`, [hash("f")]);
-      await pool.query(`UPDATE gate.capacity_reservations SET expires_at=clock_timestamp()-interval '1 second' WHERE quote_id=$1`, ["quote-f"]);
+      const forcedExpiry = new Date(Date.now() - 1_000);
+      await pool.query(`UPDATE gate.quotes SET expires_at=$2 WHERE quote_id=$1`, [hash("f"), forcedExpiry]);
+      await pool.query(`UPDATE gate.capacity_reservations SET expires_at=$2 WHERE quote_id=$1`, ["quote-f", forcedExpiry]);
     } finally {
       await pool.query("ALTER TABLE gate.quotes ENABLE TRIGGER quotes_immutable_issuance");
+      await pool.query("ALTER TABLE gate.quotes ENABLE TRIGGER quotes_validate_bindings");
       await pool.query("ALTER TABLE gate.capacity_reservations ENABLE TRIGGER capacity_reservations_immutable_relationship");
+      await pool.query("ALTER TABLE gate.capacity_reservations ENABLE TRIGGER capacity_reservations_validate_bindings");
     }
     await store.markExpired();
     const releaseScanAt = new Date();
     await assert.rejects(pool.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb)",
-      ["deployment-1", "9", "12", hash("f"), releaseScanAt, JSON.stringify({ generation: "5", kind: "no_match",
-        canonicalBlocks: canonicalBlocks(9, 11, { defaultHash: hash("f"), timestamp: releaseScanAt })
-          .map((block) => ({ ...block, blockTimestamp: block.blockTimestamp.toISOString() })), observations: [], metadata: {} })]),
+      ["deployment-1", "8", "12", hash("f"), releaseScanAt, JSON.stringify({ generation: "7", kind: "no_match",
+        canonicalBlocks: canonicalBlocks(8, 11, { defaultHash: hash("f"), timestamp: releaseScanAt })
+          .map((block, index) => ({ ...block, ...(index === 0 ? { parentHash: hash("d") } : {}),
+            blockTimestamp: block.blockTimestamp.toISOString() })), observations: [], metadata: {} })]),
     /scanner result does not completely describe its canonical range/);
     assert.equal((await pool.query("SELECT next_range_from::text AS next FROM gate.settlement_cursors WHERE deployment_id='deployment-1'")).rows[0].next, "11");
-    assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_ranges WHERE deployment_id='deployment-1'")).rows[0].n, 4);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM gate.settlement_scan_ranges WHERE deployment_id='deployment-1'")).rows[0].n, 6);
     assert.deepEqual((await pool.query(`SELECT q.state AS quote_state,q.reservation_state AS quote_reservation_state,r.state AS reservation_state
       FROM gate.quotes q JOIN gate.capacity_reservations r ON r.quote_id=q.id WHERE q.quote_id=$1`, [hash("f")])).rows[0],
-    { quote_state: "expired", quote_reservation_state: "expiry_pending_reconciliation", reservation_state: "expiry_pending_reconciliation" },
+    { quote_state: "expired", quote_reservation_state: "reserved", reservation_state: "expiry_pending_reconciliation" },
     "incomplete canonical coverage must not release an expired reservation");
-    await assert.rejects(store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "10", throughBlock: "12",
+    await assert.rejects(store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "10", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
       canonicalBlocks: canonicalBlocks(10, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] }), /discontinuous/);
-    const scan = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "9", throughBlock: "12",
+    const scan = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "8", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
-      canonicalBlocks: canonicalBlocks(9, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] });
+      canonicalBlocks: canonicalBlocks(8, 12, { defaultHash: hash("f"), timestamp: releaseScanAt })
+        .map((block, index) => index === 0 ? { ...block, parentHash: hash("d") } : block), observations: [] });
     assert.equal(scan.released, 1);
-    assert.deepEqual(await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "9", throughBlock: "12",
+    assert.deepEqual(await store.recordScannerRange({ deploymentId: "deployment-1", generation: "7", fromBlock: "8", throughBlock: "12",
       canonicalBlockHash: hash("f"), canonicalBlockTimestamp: releaseScanAt,
-      canonicalBlocks: canonicalBlocks(9, 12, { defaultHash: hash("f"), timestamp: releaseScanAt }), observations: [] }), { released: 0, reorged: 0 },
+      canonicalBlocks: canonicalBlocks(8, 12, { defaultHash: hash("f"), timestamp: releaseScanAt })
+        .map((block, index) => index === 0 ? { ...block, parentHash: hash("d") } : block), observations: [] }), { released: 0, reorged: 0 },
     "an exact scanner replay must not double release");
     const releaseEvidence = { deploymentId: "deployment-1" };
     assert.equal(await store.releaseReservation(hash("f"), releaseEvidence), false);
@@ -421,7 +588,7 @@ test("owner-bound hash lookup and resume run against real SQL and refresh nothin
     });
     await store.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER,
       token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "5", nextBlock: "5", contractCodeHash: CODE_HASH,
-      config: {}, rpcAccess: "ciphertext", issuanceActive: true });
+      config: { environment: "production" }, rpcAccess: "ciphertext", issuanceActive: true });
 
     const command = issuance("1", hash("b"));
     command.context.expectedProfileVersion = "1";

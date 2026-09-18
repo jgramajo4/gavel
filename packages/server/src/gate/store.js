@@ -25,6 +25,8 @@ const CURRENT_LIFECYCLES = new Set(["VOTING", "CLOSED", "UNKNOWN"]);
 const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
+const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const SETTLEMENT_CHAINS = new Set(["8453", "84532"]);
 const SETTLEMENT_EVENT_FIELDS = Object.freeze([
   "attentionAmount", "gavelFeeAmount", "gavelRecipient", "payer", "quoteId", "submissionHash", "token", "voter",
 ]);
@@ -73,6 +75,18 @@ function publicIdFrom(value) {
 }
 function sameTimestamp(a, b) { return new Date(a).valueOf() === new Date(b).valueOf(); }
 function invariant(condition, message) { if (!condition) throw new Error(message); }
+function explicitDeploymentEnvironment(deployment) {
+  const environment = deployment?.config?.environment;
+  const chainId = String(deployment?.chain_id ?? deployment?.chainId);
+  const token = deployment?.token;
+  const label = deployment?.config?.testTokenLabel;
+  if (environment === "production") {
+    return chainId === "8453" && token === PRODUCTION_BASE_USDC
+      && !Object.hasOwn(deployment.config, "testTokenLabel");
+  }
+  return environment === "test" && chainId === "84532"
+    && typeof label === "string" && label.trim() !== "";
+}
 function resume(row) { return { resumed: true, publicId: row.publicId, state: publicState(row.status) }; }
 function publicDisplay(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("display must be an object");
@@ -244,6 +258,13 @@ class PostgresGateStore {
             "profile transaction wallet mismatch");
           return this.#mutateProfile(input, client);
         },
+        setDeliverySetting: async (profileId, ciphertext) => {
+          invariant(typeof profileId === "string" && profileId.length > 0, "delivery setting profile is required");
+          invariant(typeof ciphertext === "string" && ciphertext.length <= 1024
+            && /^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(ciphertext),
+          "delivery setting must be a canonical encrypted envelope");
+          await client.query("SELECT gate.set_delivery_setting($1,$2,$3)", [profileId, canonicalWallet, ciphertext]);
+        },
       }));
     });
   }
@@ -309,6 +330,8 @@ class PostgresGateStore {
     const codeHash = bytes32(deployment.contractCodeHash, "contractCodeHash");
     const config = { ...(deployment.config || {}),
       overlap: positiveInteger(Number(deployment.config?.overlap ?? 64), "deployment.config.overlap") };
+    invariant(explicitDeploymentEnvironment({ chainId, token, config }),
+      "deployment environment is not valid for its chain and token");
     return this.#transaction(async (client) => {
       const row = (await client.query(`INSERT INTO gate.splitter_deployments
         (id,chain_id,splitter,signer,token,gavel_recipient,deployment_block,scanner_cursor,contract_code_hash,config,rpc_access_ciphertext,issuance_active,retired_at,retirement_ready_at)
@@ -318,6 +341,8 @@ class PostgresGateStore {
         WHERE (gate.splitter_deployments.chain_id,gate.splitter_deployments.splitter,gate.splitter_deployments.signer,
           gate.splitter_deployments.token,gate.splitter_deployments.gavel_recipient,gate.splitter_deployments.deployment_block,gate.splitter_deployments.contract_code_hash)
           = (EXCLUDED.chain_id,EXCLUDED.splitter,EXCLUDED.signer,EXCLUDED.token,EXCLUDED.gavel_recipient,EXCLUDED.deployment_block,EXCLUDED.contract_code_hash)
+          AND gate.splitter_deployments.config->>'environment' IS NOT DISTINCT FROM EXCLUDED.config->>'environment'
+          AND gate.splitter_deployments.config->'testTokenLabel' IS NOT DISTINCT FROM EXCLUDED.config->'testTokenLabel'
         RETURNING id,chain_id::text AS "chainId",splitter,signer,token,deployment_block::text AS "deploymentBlock",
           scanner_cursor::text AS "nextBlock",contract_code_hash AS "contractCodeHash",gavel_recipient AS "gavelRecipient",config,rpc_access_ciphertext AS "rpcAccess",
           issuance_active AS "issuanceActive",retired_at AS "retiredAt",retirement_ready_at AS "retirementReadyAt"`,
@@ -329,6 +354,16 @@ class PostgresGateStore {
         VALUES($1,$2,$3,$4,$5) ON CONFLICT(deployment_id) DO NOTHING`, [deployment.id, chainId, splitter, block, block]);
       return clone(row);
     });
+  }
+
+  async getDeployment({ chainId, splitter } = {}) {
+    const row = (await this.pool.query(`SELECT id,chain_id::text AS "chainId",splitter,signer,token,
+      gavel_recipient AS "gavelRecipient",deployment_block::text AS "deploymentBlock",
+      contract_code_hash AS "contractCodeHash",config,issuance_active AS "issuanceActive",
+      retired_at AS "retiredAt",retirement_ready_at AS "retirementReadyAt"
+      FROM gate.splitter_deployments WHERE chain_id=$1 AND splitter=$2`,
+    [positiveBigint(chainId, "chainId"), address(splitter, "splitter")])).rows[0];
+    return row ? clone(row) : null;
   }
 
   async recordScannerRange(range) {
@@ -397,11 +432,49 @@ class PostgresGateStore {
       metadata: range.metadata || {},
     };
     return this.#transaction(async (client) => {
+      await client.query("SELECT id FROM gate.settlement_cursors WHERE deployment_id=$1 FOR UPDATE", [range.deploymentId]);
+      const priorAnomalies = new Set((await client.query(`SELECT tx_hash,"log_index",details->>'code' AS code
+        FROM gate.settlement_scan_observations WHERE deployment_id=$1 AND kind='anomaly'
+          AND block_number BETWEEN $2 AND $3`, [range.deploymentId, fromBlock, throughBlock])).rows
+        .map((item) => `${item.tx_hash}:${item.log_index}:${item.code}`));
+      const priorExact = new Set((await client.query(`SELECT o.quote_id,o.tx_hash,o.log_index
+        FROM gate.settlement_scan_observations o JOIN gate.quotes q ON q.quote_id=o.quote_id
+        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match AND q.state<>'settled'
+          AND o.block_number BETWEEN $2 AND $3 AND o.scan_generation=(SELECT max(b.scan_generation)
+            FROM gate.settlement_scan_blocks b WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
+      const previouslyReorgedExact = new Set((await client.query(`SELECT DISTINCT o.quote_id,o.tx_hash,o.log_index
+        FROM gate.settlement_scan_observations o
+        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match
+          AND o.block_number BETWEEN $2 AND $3 AND EXISTS (
+            SELECT 1 FROM gate.settlement_scan_blocks b
+            WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number
+              AND b.scan_generation>o.scan_generation AND NOT EXISTS (
+                SELECT 1 FROM gate.settlement_scan_observations later
+                WHERE later.deployment_id=o.deployment_id AND later.scan_generation=b.scan_generation
+                  AND later.block_number=o.block_number AND later.kind='exact_log' AND later.exact_match
+                  AND later.quote_id=o.quote_id AND later.tx_hash=o.tx_hash AND later.log_index=o.log_index))`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
+      const alreadyReorged = new Set((await client.query(`SELECT id FROM gate.quotes WHERE deployment_id=$1
+        AND state='settled' AND settlement_reorged_at IS NOT NULL AND receipt_block BETWEEN $2 AND $3`,
+      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => item.id));
       const row = (await client.query("SELECT gate.record_scanner_range($1,$2,$3,$4,$5,$6::jsonb) AS released",
         [range.deploymentId, fromBlock, throughBlock, canonicalBlockHash, canonicalBlockTimestamp, JSON.stringify(result)])).rows[0];
-      const reorged = (await client.query(`SELECT count(*)::int AS count FROM gate.settlement_reorg_monitors
-        WHERE reconciliation_metadata#>>'{trailingOverlapReorg,generation}'=$1`, [generation])).rows[0];
-      return { released: Number(row?.released || 0), reorged: Number(reorged?.count || 0) };
+      const reorgedRows = (await client.query(`SELECT m.quote_id FROM gate.settlement_reorg_monitors m
+        JOIN gate.quotes q ON q.id=m.quote_id WHERE q.deployment_id=$2
+          AND m.reconciliation_metadata#>>'{trailingOverlapReorg,generation}'=$1`, [generation, range.deploymentId])).rows;
+      const anomalyKeys = observations.filter((item) => item.kind === "anomaly")
+        .map((item) => `${item.txHash}:${item.logIndex}:${item.details?.code}`);
+      const currentExact = new Set(observations.filter((item) => item.kind === "exact_log")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+      const reorged = reorgedRows.filter((item) => !alreadyReorged.has(item.quote_id)).length;
+      const unknownQuotes = anomalyKeys.filter((key) => key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const mismatches = anomalyKeys.filter((key) => !key.endsWith(":UNKNOWN_QUOTE") && !priorAnomalies.has(key)).length;
+      const preAcceptanceReorged = [...priorExact]
+        .filter((key) => !currentExact.has(key) && !previouslyReorgedExact.has(key)).length;
+      return { released: Number(row?.released || 0), reorged,
+        ...(unknownQuotes ? { unknownQuotes } : {}), ...(mismatches ? { mismatches } : {}),
+        ...(preAcceptanceReorged ? { preAcceptanceReorged } : {}) };
     });
   }
 
@@ -445,7 +518,7 @@ class PostgresGateStore {
     invariant(normalized.quote.payer === normalized.submission.payer, "quote payer must equal submission payer");
     invariant(normalized.quote.feeAmount === "250000", "feeAmount must equal 250000");
     invariant(normalized.quote.quoteVersion === 1, "quoteVersion must equal 1");
-    invariant(normalized.quote.baseChainId === "8453", "quote settlement chain must be Base 8453");
+    invariant(SETTLEMENT_CHAINS.has(normalized.quote.baseChainId), "quote settlement chain must be Base 8453 or Base Sepolia 84532");
     invariant(normalized.snapshot.mappingVersion === NOUNS_LIFECYCLE_MAPPING_VERSION,
       `mappingVersion must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
     invariant(normalized.snapshot.dao !== "nouns" || (normalized.context.stage === "VOTING"
@@ -489,6 +562,7 @@ class PostgresGateStore {
       const deployment = (await client.query("SELECT * FROM gate.splitter_deployments WHERE id=$1 FOR SHARE", [quote.deploymentId])).rows[0];
       invariant(deployment?.issuance_active === true && String(deployment.chain_id) === quote.baseChainId && deployment.splitter === quote.splitter
         && deployment.token === quote.token && deployment.contract_code_hash === context.deploymentCodeHash, "issuance context changed");
+      invariant(explicitDeploymentEnvironment(deployment), "deployment environment is not valid for its chain and token");
       if (profile.wallet_kind === "contract") {
         invariant(typeof this.baseCodeReader === "function", "Base code reader unavailable");
         let timer;
@@ -686,7 +760,7 @@ class PostgresGateStore {
       q.fee_amount::text AS "feeAmount",d.gavel_recipient AS "gavelRecipient",q.token,s.submission_hash AS "submissionHash",
       q.quote_version AS "quoteVersion",q.base_chain_id::text AS "baseChainId",q.splitter,q.expires_at AS "expiresAt",
       ps.normalized_eligibility AS "issuanceLifecycle",ps.dao,ps.proposal_id::text AS "proposalId",
-      COALESCE(ds.ciphertext,'profile:'||s.profile_id) AS "destinationRef",
+      s.profile_id AS "profileId",ds.ciphertext AS "destinationRef",
       jsonb_build_object('subject','Paid pitch ready','text','Open your private Gate inbox.') AS "trustedSummary"
       FROM gate.quotes q JOIN gate.submissions s ON s.id=q.submission_id
       JOIN gate.proposal_snapshots ps ON ps.id=s.issuance_snapshot_id
@@ -727,7 +801,9 @@ class PostgresGateStore {
       const changed = (await client.query(`UPDATE gate.submissions SET status='SETTLEMENT_PENDING',pending_settlement_tx_hash=$2,
         public_state_changed_at=clock_timestamp() WHERE id=$1 RETURNING public_state_changed_at AS "updatedAt"`,
       [row.id, transactionHash])).rows[0];
-      return { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(changed.updatedAt) };
+      const receipt = { publicId: row.publicId, state: "pending_settlement", updatedAt: clone(changed.updatedAt) };
+      Object.defineProperty(receipt, "newlyPending", { value: true });
+      return receipt;
     });
   }
 
@@ -827,7 +903,7 @@ class PostgresGateStore {
         && e.confirmations === 1,
       "canonical one-confirmation scanner evidence is required");
     invariant(e.quoteId === publicQuoteId, "settlement quoteId does not match public quote");
-    if (!notification?.id || notification.status !== "pending") throw new TypeError("notification must start pending");
+
     if (!inbox?.id || typeof inbox.lifecycleChanged !== "boolean" || typeof inbox.currentLifecycleUnavailable !== "boolean") {
       throw new TypeError("inbox lifecycle flags must be boolean");
     }
@@ -871,10 +947,11 @@ class PostgresGateStore {
           && quote.settlement_event_quote_id === e.quoteId;
         invariant(evidenceMatches, "conflicting settlement evidence");
         const related = (await client.query(`SELECT i.id AS inbox_id,n.id AS notification_id,m.id AS monitor_id
-          FROM gate.inbox_items i JOIN gate.notification_attempts n ON n.inbox_id=i.id
+          FROM gate.inbox_items i LEFT JOIN gate.notification_attempts n ON n.inbox_id=i.id
           JOIN gate.settlement_reorg_monitors m ON m.quote_id=$2 WHERE i.submission_id=$1`,
         [quote.submission_internal_id, quote.id])).rows[0];
-        invariant(related && related.inbox_id === inbox.id && related.notification_id === notification.id
+        invariant(related && related.inbox_id === inbox.id
+          && (related.notification_id == null || notification == null || related.notification_id === notification.id)
           && related.monitor_id === monitor.id, "conflicting settlement side effects");
         return false;
       }
@@ -896,15 +973,37 @@ class PostgresGateStore {
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING inbox_created_at AS "inboxCreatedAt"`, [inbox.id, quote.submission_internal_id,
         quote.profile_id, inbox.issuanceLifecycle, inbox.currentLifecycle, inbox.lifecycleChanged === true,
         inbox.currentLifecycleUnavailable === true, inbox.privateUnavailabilityReason ?? null])).rows[0];
-      await client.query(`INSERT INTO gate.notification_attempts
-        (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,clock_timestamp())`,
-      [notification.id, inbox.id, notification.channel, notification.destinationRef,
-        JSON.stringify(notification.summary ?? { subject: "Paid pitch ready", text: "Open your private Gate inbox." }), notification.status]);
+      if (notification) {
+        await client.query("SAVEPOINT optional_notification");
+        try {
+          await client.query(`INSERT INTO gate.notification_attempts
+            (id,inbox_id,channel,destination_ref_ciphertext,trusted_summary,state,next_attempt_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,clock_timestamp())`,
+          [notification.id, inbox.id, notification.channel, notification.destinationRef,
+            JSON.stringify(notification.summary ?? { subject: "Paid pitch ready", text: "Open your private Gate inbox." }), notification.status]);
+          await client.query("RELEASE SAVEPOINT optional_notification");
+        } catch {
+          await client.query("ROLLBACK TO SAVEPOINT optional_notification");
+          await client.query("RELEASE SAVEPOINT optional_notification");
+        }
+      }
       await client.query(`INSERT INTO gate.settlement_reorg_monitors(id,chain_id,splitter,quote_id,receipt_block,receipt_block_hash,tx_hash,log_index,next_check_block)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(chain_id,splitter,quote_id) DO NOTHING`,
       [monitor.id, e.sourceChainId, e.splitter, quote.id, e.receiptBlock, e.receiptBlockHash, e.txHash, e.logIndex, nextCheckBlock]);
       return { settled: true, inboxCreatedAt: accepted.inboxCreatedAt };
     });
+  }
+
+  async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
+    const settlementChain = positiveBigint(chainId, "chainId");
+    const settlementSplitter = address(splitter, "splitter");
+    const head = uint78(headBlock, "headBlock");
+    const row = (await this.pool.query(`SELECT count(*)::int AS "queueDepth",
+      COALESCE(EXTRACT(epoch FROM (clock_timestamp()-min(created_at))),0)::float8 AS "oldestAgeSeconds",
+      COALESCE(max(GREATEST($3::bigint-COALESCE(progress_block,receipt_block),0)),0)::float8 AS "progressLag"
+      FROM gate.settlement_reorg_monitors WHERE chain_id=$1 AND splitter=$2 AND completed_at IS NULL`,
+    [settlementChain, settlementSplitter, head])).rows[0];
+    return { queueDepth: Number(row?.queueDepth || 0), oldestAgeSeconds: Number(row?.oldestAgeSeconds || 0),
+      progressLag: Number(row?.progressLag || 0) };
   }
 
   async claimSettlementMonitors({ chainId, splitter, headBlock, limit = 50, leaseMs = 5 * 60_000 } = {}) {
@@ -946,7 +1045,7 @@ class PostgresGateStore {
   async claimNotificationAttempts({ limit = 20, leaseMs = 5 * 60_000 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 3_600_000) throw new TypeError("leaseMs must be from 1 to 3600000");
-    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","destinationRef",summary
+    const rows = (await this.pool.query(`SELECT id,"claimToken","retryCount","firstAttemptAt","dedupeDeadline","profileId","destinationRef",summary
       FROM gate.claim_notification_attempts($1,$2,$3)`,
     [limit, this.notificationRetryLimit, leaseMs])).rows;
     return clone(rows);
@@ -968,6 +1067,14 @@ class PostgresGateStore {
     const row = (await this.pool.query("SELECT gate.fail_notification_attempt($1,$2,$3,$4) AS failed",
       [id, claimToken, errorCode, exactDate(nextAttemptAt, "nextAttemptAt")])).rows[0];
     return Boolean(row?.failed);
+  }
+
+  async reconcileNotification({ id, claimToken, errorCode } = {}) {
+    if (!id || typeof claimToken !== "string" || !/^[1-9][0-9]*$/.test(claimToken)
+        || typeof errorCode !== "string" || !errorCode) throw new TypeError("notification id, claimToken, and errorCode are required");
+    const row = (await this.pool.query("SELECT gate.reconcile_notification_attempt($1,$2,$3) AS reconciled",
+      [id, claimToken, errorCode])).rows[0];
+    return Boolean(row?.reconciled);
   }
 
   async updateNotification(id, patch = {}) {

@@ -62,16 +62,18 @@ function bounded(operation, timeoutMs) {
 }
 
 function createSettlementService({ store, adapter, lifecycleReader, lifecycleTimeoutMs = 2_000,
-  operatorAlert, clock = () => new Date(), batchSize = 50 } = {}) {
+  operatorAlert, clock = () => new Date(), batchSize = 50, monitorConfirmations = 64 } = {}) {
   for (const method of ["recordSettlementHint", "getScannerState", "findSettlementQuote", "recordScannerRange",
     "listUnsettledSettlementObservations", "claimSettlementLifecycle", "recordSettlementLifecycle", "settle",
-    "listPendingSettlementHints", "resolveSettlementHint", "claimSettlementMonitors", "advanceSettlementMonitor"]) {
+    "listPendingSettlementHints", "resolveSettlementHint",
+    "claimSettlementMonitors", "advanceSettlementMonitor"]) {
     if (!store || typeof store[method] !== "function") throw new TypeError(`store.${method} is required`);
   }
   for (const method of ["getCanonicalHead", "getSafeHead", "scanRange", "inspectTransaction", "revalidateMonitor"]) {
     if (!adapter || typeof adapter[method] !== "function") throw new TypeError(`adapter.${method} is required`);
   }
   if (adapter.confirmationDepth !== 1) throw new TypeError("adapter.confirmationDepth must be exactly 1 for the MVP");
+  if (monitorConfirmations !== 64) throw new TypeError("monitorConfirmations must be exactly 64 for the MVP");
   if (typeof lifecycleReader !== "function") throw new TypeError("lifecycleReader must be a function");
   if (typeof operatorAlert !== "function") throw new TypeError("operatorAlert must be a function");
   if (!Number.isSafeInteger(lifecycleTimeoutMs) || lifecycleTimeoutMs < 1 || lifecycleTimeoutMs > 10_000) {
@@ -140,8 +142,10 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
       const ids = settlementIdentity({ chainId: adapter.chainId, splitter: adapter.splitter, quoteId: quote.quoteId });
       const result = await store.settle({ quoteId: quote.quoteId, settlement,
         inbox: { id: ids.inboxId, ...inbox },
-        notification: { id: ids.notificationId, channel: "private", destinationRef: quote.destinationRef,
-          summary: quote.trustedSummary, status: "pending" },
+        ...(quote.destinationRef == null ? {} : { notification: {
+          id: ids.notificationId, channel: "private", destinationRef: quote.destinationRef,
+          summary: quote.trustedSummary, status: "pending",
+        } }),
         monitor: { id: ids.monitorId, nextCheckBlock: (BigInt(settlement.receiptBlock) + 1n).toString() } });
       if (result !== false) accepted += 1;
     }
@@ -151,15 +155,28 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
   async function scanOnce() {
     let accepted = 0;
     const safeThrough = await adapter.getSafeHead();
+    let canonicalHead;
+    try { canonicalHead = await adapter.getCanonicalHead(); } catch {}
     const cursor = await store.getScannerState({ chainId: adapter.chainId, splitter: adapter.splitter });
     if (!cursor) throw new Error("settlement scanner deployment is not configured");
     if (Number(cursor.overlap) !== adapter.overlap) throw new Error("durable scanner overlap does not match adapter overlap");
+    if (safeThrough < BigInt(cursor.nextRangeFrom) - 1n) {
+      accepted += await settleDurableObservations();
+      return { scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
+        ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
+        cursorLag: 0, overlapLag: 0 };
+    }
     const requested = scannerWindow({ deploymentBlock: cursor.deploymentBlock, nextRangeFrom: cursor.nextRangeFrom,
       safeThrough, overlap: cursor.overlap });
     const window = requested && Object.freeze({ fromBlock: requested.fromBlock,
       throughBlock: requested.throughBlock - requested.fromBlock + 1n > BigInt(adapter.maxBlockRange)
         ? requested.fromBlock + BigInt(adapter.maxBlockRange) - 1n : requested.throughBlock });
-    if (!window) return { scanned: 0, accepted, anomalies: 0 };
+    if (!window || window.throughBlock < window.fromBlock) {
+      accepted += await settleDurableObservations();
+      return { scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
+        ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
+        cursorLag: 0, overlapLag: 0 };
+    }
     const scanned = await adapter.scanRange(window);
     const unique = new Map();
     for (const item of scanned.candidates || []) unique.set(`${item.txHash}:${item.logIndex}`, item);
@@ -174,16 +191,38 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
       logIndex: item.logIndex, blockNumber: String(item.blockNumber), blockHash: item.blockHash,
       blockTimestamp: item.blockTimestamp, exactMatch: false, details: { code: item.code || "INVALID_SETTLEMENT_EVIDENCE" } });
     const checkpoint = scanned.canonicalBlocks.at(-1);
-    const persisted = await store.recordScannerRange({ deploymentId: cursor.deploymentId, generation: (BigInt(cursor.generation) + 1n).toString(),
-      fromBlock: window.fromBlock.toString(), throughBlock: window.throughBlock.toString(),
-      canonicalBlockHash: checkpoint.blockHash, canonicalBlockTimestamp: checkpoint.blockTimestamp,
-      canonicalBlocks: scanned.canonicalBlocks, observations });
+    let persisted;
+    try {
+      persisted = await store.recordScannerRange({ deploymentId: cursor.deploymentId, generation: (BigInt(cursor.generation) + 1n).toString(),
+        fromBlock: window.fromBlock.toString(), throughBlock: window.throughBlock.toString(),
+        canonicalBlockHash: checkpoint.blockHash, canonicalBlockTimestamp: checkpoint.blockTimestamp,
+        canonicalBlocks: scanned.canonicalBlocks, observations });
+    } catch (error) {
+      try { await operatorAlert({ code: "CHECKPOINT_FAILED", source: "cursor" }); } catch {}
+      throw error;
+    }
     if (Number(persisted?.reorged) > 0) {
       await operatorAlert({ code: "POST_ACCEPTANCE_SETTLEMENT_REORG", source: "scanner_overlap",
         chainId: adapter.chainId, splitter: adapter.splitter });
     }
+    if (Number(persisted?.preAcceptanceReorged) > 0) {
+      await operatorAlert({ code: "PRE_ACCEPTANCE_SETTLEMENT_REORG", source: "scanner_overlap" });
+    }
+    if (Number(persisted?.unknownQuotes) > 0) await operatorAlert({ code: "UNKNOWN_QUOTE", source: "scanner_overlap" });
+    if (Number(persisted?.mismatches) > 0) await operatorAlert({ code: "MISMATCHED_SETTLEMENT", source: "scanner_overlap" });
     accepted += await settleDurableObservations();
-    return { scanned: scanned.canonicalBlocks.length, accepted, anomalies: observations.filter((x) => x.kind === "anomaly").length };
+    return {
+      scanned: scanned.canonicalBlocks.length,
+      accepted,
+      anomalies: Number(persisted?.unknownQuotes || 0) + Number(persisted?.mismatches || 0),
+      unknownQuotes: Number(persisted?.unknownQuotes || 0),
+      mismatches: Number(persisted?.mismatches || 0),
+      reorged: Number(persisted?.reorged || 0),
+      preAcceptanceReorged: Number(persisted?.preAcceptanceReorged || 0),
+      ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
+      cursorLag: Number(safeThrough > window.throughBlock ? safeThrough - window.throughBlock : 0n),
+      overlapLag: Number(safeThrough > BigInt(checkpoint.blockNumber) ? safeThrough - BigInt(checkpoint.blockNumber) : 0n),
+    };
   }
 
   async function reconcileSubmitted() {
@@ -204,23 +243,48 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
 
   async function monitorOnce() {
     const head = await adapter.getCanonicalHead();
+    let stats;
+    try {
+      if (typeof store.getSettlementMonitorStats === "function") {
+        const raw = await store.getSettlementMonitorStats({
+          chainId: adapter.chainId, splitter: adapter.splitter, headBlock: head.toString(),
+        });
+        const values = [raw?.queueDepth, raw?.oldestAgeSeconds, raw?.progressLag].map(Number);
+        if (values.every((value) => Number.isFinite(value) && value >= 0)) {
+          stats = { queueDepth: values[0], oldestAgeSeconds: values[1], progressLag: values[2] };
+        }
+      }
+    } catch {}
     const monitors = await store.claimSettlementMonitors({ chainId: adapter.chainId, splitter: adapter.splitter,
       headBlock: head.toString(), limit: 1, leaseMs: 5 * 60_000 });
     let reorged = 0; let completed = 0;
     for (const monitor of monitors) {
-      const check = await adapter.revalidateMonitor(monitor);
-      const final = head >= BigInt(monitor.receiptBlock) + 63n;
+      const target = BigInt(monitor.receiptBlock) + BigInt(monitorConfirmations - 1);
+      const final = head >= target;
+      let check;
+      try { check = await adapter.revalidateMonitor(monitor); }
+      catch (error) {
+        if (final) { try { await operatorAlert({ code: "FINAL_CHECK_FAILED", source: "monitor" }); } catch {} }
+        throw error;
+      }
       const wasReorged = check.canonical !== true;
       const done = wasReorged || final;
-      const advanced = await store.advanceSettlementMonitor({ id: monitor.id, claimToken: monitor.claimToken,
-        progressBlock: head.toString(), nextCheckBlock: done ? null : (head + 1n).toString(), completed: done, reorged: wasReorged });
+      let advanced;
+      try {
+        advanced = await store.advanceSettlementMonitor({ id: monitor.id, claimToken: monitor.claimToken,
+          progressBlock: head.toString(), nextCheckBlock: done ? null : (head + 1n).toString(), completed: done, reorged: wasReorged });
+      } catch (error) {
+        if (final) { try { await operatorAlert({ code: "FINAL_CHECK_FAILED", source: "monitor" }); } catch {} }
+        throw error;
+      }
       if (advanced === false) continue;
       if (wasReorged) await operatorAlert({ code: "POST_ACCEPTANCE_SETTLEMENT_REORG", source: "monitor",
         chainId: adapter.chainId, splitter: adapter.splitter });
       if (wasReorged) reorged += 1;
       if (done) completed += 1;
     }
-    return { checked: monitors.length, completed, reorged };
+    return { checked: monitors.length, completed, reorged,
+      ...(stats || {}) };
   }
 
   return Object.freeze({ submitTxHash, scanOnce, reconcileSubmitted, monitorOnce });

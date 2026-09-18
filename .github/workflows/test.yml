@@ -39,6 +39,27 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - name: Create disposable Gate database
+        env:
+          PGPASSWORD: gavel-ci-only
+        run: createdb -h 127.0.0.1 -U postgres gavel_gate_ci_disposable
+      - name: PostgreSQL 16 Gate integration (zero skips)
+        shell: bash
+        env:
+          GAVEL_GATE_TEST_DATABASE_URL: postgres://postgres:gavel-ci-only@127.0.0.1:5432/gavel_gate_ci_disposable
+          GAVEL_GATE_TEST_DATABASE_DISPOSABLE: yes
+        run: |
+          set +e
+          output="$(node --test --test-concurrency=1 \
+            packages/server/test/gate-store-postgres.test.js \
+            packages/server/test/durable-persistence.test.js 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ] || grep -Eq '# skipped [1-9]|# SKIP' <<<"$output"; then
+            echo "Gate PostgreSQL integration failed or skipped" >&2
+            exit 1
+          fi
       - run: npm test
         env:
           GAVEL_TEST_DATABASE_URL: postgres://postgres:gavel-ci-only@127.0.0.1:5432/gavel_ci

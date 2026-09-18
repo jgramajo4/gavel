@@ -6,6 +6,7 @@ const { PostgresGateStore } = require("../src/gate/store");
 
 const A = `0x${"a".repeat(40)}`;
 const B = `0x${"b".repeat(40)}`;
+const CANONICAL_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const H = (digit) => `0x${digit.repeat(64)}`;
 const blocks = (from, through, hashDigit = "2") => Array.from(
   { length: through - from + 1 },
@@ -28,8 +29,9 @@ test("scanner deployment starts exactly at deployment block and cannot be cursor
   const { calls, store } = mockStore((sql) => /INSERT INTO gate\.splitter_deployments/.test(sql)
     ? { rows: [{ id: "d", deploymentBlock: "40", nextBlock: "40" }] }
     : { rows: [], rowCount: 1 });
-  await store.configureDeployment({ id: "d", chainId: "8453", splitter: A, signer: B, token: A,
-    gavelRecipient: B, deploymentBlock: "40", nextBlock: "999", contractCodeHash: H("1"), rpcAccess: "cipher" });
+  await store.configureDeployment({ id: "d", chainId: "8453", splitter: A, signer: B, token: CANONICAL_BASE_USDC,
+    gavelRecipient: B, deploymentBlock: "40", nextBlock: "999", contractCodeHash: H("1"),
+    config: { environment: "production" }, rpcAccess: "cipher" });
   const deployment = calls.find(({ sql }) => /INSERT INTO gate\.splitter_deployments/.test(sql));
   const cursor = calls.find(({ sql }) => /INSERT INTO gate\.settlement_cursors/.test(sql));
   assert.equal(deployment.values[7], "40");

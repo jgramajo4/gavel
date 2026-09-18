@@ -58,6 +58,7 @@ const GATE_REQUIRED_FUNCTIONS = Object.freeze([
   "gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint)",
   "gate.consume_auth_nonce(text,bigint)",
   "gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint)",
+  "gate.set_delivery_setting(text,text,text)",
   "gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamp with time zone,boolean,text,boolean,jsonb)",
   "gate.transition_notification(text,gate.notification_state,text,text)",
   "gate.claim_notification_attempts(integer,integer,integer)",

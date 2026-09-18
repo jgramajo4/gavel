@@ -78,7 +78,7 @@ function bearerToken(request) {
 }
 
 function createGateHttpServer({ authService, profileService, submissionService, settlementService, inboxService,
-  maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
+  observability, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
   if (!profileService || typeof profileService.updateProfile !== "function"
@@ -99,8 +99,13 @@ function createGateHttpServer({ authService, profileService, submissionService, 
   }
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1) throw new TypeError("maxBodyBytes must be a positive integer");
   if (!challengeLimiter || typeof challengeLimiter.allow !== "function") throw new TypeError("challengeLimiter.allow is required");
+  if (observability !== undefined && typeof observability?.counter !== "function") {
+    throw new TypeError("observability.counter must be a function");
+  }
+  const count = (name, labels) => { try { observability?.counter(name, 1, labels); } catch {} };
 
   return http.createServer(async (request, response) => {
+    let quoteRequest = false;
     try {
       if (typeof request.url !== "string" || !/^\/(?![\\/])/.test(request.url)) {
         return sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
@@ -108,6 +113,9 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       const url = new URL(request.url, "http://gate.invalid");
       const path = url.pathname;
 
+      if (request.method === "GET" && path === "/health") {
+        return sendJson(response, 200, { ok: true, status: "ready" });
+      }
       if (request.method === "POST" && path === "/v1/gate/auth/challenge") {
         let allowed = false;
         try { allowed = await challengeLimiter.allow(request.socket.remoteAddress || "unknown"); } catch { /* fail closed */ }
@@ -182,6 +190,7 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       }
       const submissions = /^\/v1\/gates\/(0x[0-9a-fA-F]{40})\/submissions$/.exec(path);
       if (submissionService && request.method === "POST" && submissions) {
+        quoteRequest = true;
         const token = bearerToken(request);
         let session;
         try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
@@ -190,6 +199,7 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         const result = await submissionService.createSubmission({
           session, voterWallet: submissions[1], request: payload, ip: request.socket.remoteAddress,
         });
+        if (result.state !== "duplicate") count("gate_quote_issued_total");
         // A duplicate is an owner-bound receipt, never a second quoted row.
         return result.state === "duplicate"
           ? sendJson(response, 409, result)
@@ -202,9 +212,11 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
         catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
         const body = await readJson(request, maxBodyBytes);
-        return sendJson(response, 202, await settlementService.submitTxHash({
+        const receipt = await settlementService.submitTxHash({
           session, publicId: settlement[1], txHash: body.txHash, chainId: body.chainId,
-        }));
+        });
+        if (receipt.newlyPending === true) count("gate_settlement_pending_total");
+        return sendJson(response, 202, receipt);
       }
       // Resume is owner-bound: identity comes only from the session, never from
       // the path, query string, or body. A non-owner gets a plain 404.
@@ -234,6 +246,16 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       return sendJson(response, 404, { error: { code: "NOT_FOUND", message: "Not found" } });
     } catch (error) {
       if (response.headersSent || response.destroyed) return;
+      if (quoteRequest) {
+        const reasons = new Map([
+          ["UNAUTHORIZED", "unauthorized"], ["NOT_ACCEPTING", "not_accepting"], ["NOT_FOUND", "not_found"],
+          ["CANONICAL_DATA_UNAVAILABLE", "canonical_data_unavailable"], ["ACTIVE_QUOTE_EXISTS", "active_quote_exists"],
+          ["SENDER_PROPOSAL_LIMIT", "sender_proposal_limit"], ["SENDER_BLOCKED", "sender_blocked"],
+          ["RATE_LIMITED", "rate_limited"], ["INVALID_SUBMISSION", "invalid_request"],
+          ["INVALID_REQUEST", "invalid_request"], ["REQUEST_TOO_LARGE", "request_too_large"],
+        ]);
+        count("gate_quote_rejected_total", { reason: reasons.get(error?.code) || "internal_error" });
+      }
       if (error instanceof SubmissionPolicyError) {
         return sendJson(response, error.statusCode, {
           state: error.state, error: { code: error.code, message: error.message },

@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gavel
+      POSTGRES_USER: gavel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      GAVEL_GATE_DB_PASSWORD: ${GAVEL_GATE_DB_PASSWORD:?set GAVEL_GATE_DB_PASSWORD}
+    volumes:
+      - gate-postgres-data:/var/lib/postgresql/data
+      - ./packages/server/docker/init-db.sh:/docker-entrypoint-initdb.d/20-gavel-gate-role.sh:ro
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gavel -d gavel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      POSTGRES_DB: gavel
+      POSTGRES_USER: gavel
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      GAVEL_GATE_DB_PASSWORD: ${GAVEL_GATE_DB_PASSWORD:?set GAVEL_GATE_DB_PASSWORD}
+    command:
+      - /bin/sh
+      - -ec
+      - /opt/gavel/init-db.sh && psql -v ON_ERROR_STOP=1 --username "$${POSTGRES_USER}" --dbname "$${POSTGRES_DB}" --file /opt/gavel/001_gate.sql
+    volumes:
+      - ./packages/server/docker/init-db.sh:/opt/gavel/init-db.sh:ro
+      - ./packages/server/migrations/001_gate.sql:/opt/gavel/001_gate.sql:ro
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gate:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    # This file is injected only into the Gate process. It must be mode 0600 and
+    # must not be reused by the index API, indexer, browser, or CLI.
+    env_file:
+      - ${GAVEL_GATE_ENV_FILE:-.env.server.local}
+    environment:
+      GAVEL_GATE_HOST: 0.0.0.0
+      GAVEL_GATE_PORT: "8080"
+    ports:
+      - "${GAVEL_GATE_PORT:-8081}:8080"
+    networks: [database, public]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "GAVEL_GATE_URL=http://127.0.0.1:8080 node scripts/gate-smoke.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  gate-postgres-data:
+
+networks:
+  database:
+    internal: true
+  public:

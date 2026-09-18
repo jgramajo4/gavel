@@ -84,6 +84,32 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
   });
 });
 
+test("Nouns index client reports aggregate freshness age and health without source details", async () => {
+  const { createNounsIndexClient, IndexUnavailableError } = loadIndexClient();
+  const gauges = [];
+  const source = {
+    async getHealth() { return { healthy: true, refreshedAt: "2026-09-14T00:00:00.000Z" }; },
+    async getProposal() { return {
+      dao: "nouns", proposalId: "42", effectiveStatus: "ACTIVE", refreshedAt: "2026-09-14T00:00:00.000Z",
+      sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
+    }; },
+  };
+  const observability = { gauge(...args) { gauges.push(args); } };
+  const healthy = createNounsIndexClient({ source, observability,
+    clock: () => new Date("2026-09-14T00:00:12.500Z") });
+  await healthy.getProposalSnapshot("42");
+  assert.deepEqual(gauges, [
+    ["gate_dao_freshness_age_seconds", 12.5, { health: "healthy" }],
+    ["gate_dao_freshness_age_seconds", 12.5, { health: "healthy" }],
+  ]);
+
+  gauges.length = 0;
+  const stale = createNounsIndexClient({ source, observability, freshnessMs: 1_000,
+    clock: () => new Date("2026-09-14T00:00:12.500Z") });
+  await assert.rejects(stale.getProposalSnapshot("42"), IndexUnavailableError);
+  assert.deepEqual(gauges, [["gate_dao_freshness_age_seconds", 12.5, { health: "stale" }]]);
+});
+
 test("Nouns index client never exposes stale ACTIVE as VOTING after canonical terminalization", async () => {
   const { createNounsIndexClient } = loadIndexClient();
   const source = {
@@ -427,6 +453,59 @@ test("profile update persists only allowlisted scalar public display fields", as
   const nested = enrollmentProof();
   nested.publicDisplay = { ens: { destination: "secret@example.com" } };
   await assert.rejects(service.updateProfile({ session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: nested }), /publicDisplay\.ens/);
+});
+
+test("authenticated profile update encrypts a private top-level delivery destination and stores only its envelope transactionally", async () => {
+  const { createProfileService } = loadProfileService();
+  const events = [];
+  const plaintext = "private-voter@example.com";
+  const envelope = "gg1.primary.AAAAAAAAAAAAAAAA.ciphertext.AAAAAAAAAAAAAAAAAAAAAA";
+  const service = createProfileService({
+    repository: { async withProfileTransaction(_wallet, callback) {
+      return callback({
+        getProfileByWallet: async () => null,
+        mutateProfile: async ({ profile }) => ({ ...profile, display: {}, profileVersion: 1 }),
+        async setDeliverySetting(profileId, ciphertext) { events.push(["store", profileId, ciphertext]); },
+      });
+    } },
+    authService: {
+      async verifyProfileProofs() { return { wallet: WALLET, walletKind: "eoa", proofIds: [HASH] }; },
+      async consumeProfileProofs() { events.push(["consume"]); },
+    },
+    indexClient: { async getVotingPower() { return null; } },
+    baseChainId: BASE_CHAIN_ID,
+    encryptDestination(profileId, destination) {
+      events.push(["encrypt", profileId, destination]);
+      return envelope;
+    },
+  });
+  const result = await service.updateProfile({
+    session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof(),
+    deliveryDestination: plaintext,
+  });
+  assert.deepEqual(events, [
+    ["encrypt", WALLET, plaintext],
+    ["store", WALLET, envelope],
+    ["consume"],
+  ]);
+  assert.equal(JSON.stringify(result).includes(plaintext), false);
+  assert.equal(JSON.stringify(result).includes(envelope), false);
+});
+
+test("delivery destination fails closed without encryption and is never accepted inside signed or public display data", async () => {
+  const { createProfileService } = loadProfileService();
+  const service = createProfileService({
+    repository: { async withProfileTransaction(_wallet, callback) {
+      return callback({ getProfileByWallet: async () => null, mutateProfile: async ({ profile }) => ({ ...profile, display: {}, profileVersion: 1 }) });
+    } },
+    authService: { async verifyProfileProofs() { return { wallet: WALLET, walletKind: "eoa", proofIds: [HASH] }; }, async consumeProfileProofs() {} },
+    indexClient: { async getVotingPower() { return null; } },
+    baseChainId: BASE_CHAIN_ID,
+  });
+  await assert.rejects(service.updateProfile({
+    session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof(),
+    deliveryDestination: "private-voter@example.com",
+  }), /delivery encryption unavailable/i);
 });
 
 test("profile update returns a safe committed projection when post-commit index decoration fails", async () => {

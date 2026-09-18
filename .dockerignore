@@ -1,0 +1,45 @@
+# Default-deny the Docker build context. Only files copied by Dockerfile.server
+# may reach the daemon/build backend; local env files, VCS data, private data,
+# logs, coverage, and unrelated artifacts remain outside the context.
+**
+!Dockerfile.server
+!package.json
+!package-lock.json
+!packages
+!packages/**
+!integrations
+!integrations/**
+!scripts
+!scripts/gate-smoke.js
+
+# Re-exclude sensitive and generated files after recursive directory includes.
+# Later rules win, so these apply inside packages/** and integrations/** too.
+**/.env
+**/.env.*
+**/.git
+**/.git/**
+**/.npmrc
+**/.yarnrc*
+**/node_modules
+**/node_modules/**
+**/private
+**/private/**
+**/data/private
+**/data/private/**
+**/secrets
+**/secrets/**
+**/credentials
+**/credentials/**
+**/coverage
+**/coverage/**
+**/dist
+**/dist/**
+**/tmp
+**/tmp/**
+**/*.log
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.sqlite*
+**/*.db

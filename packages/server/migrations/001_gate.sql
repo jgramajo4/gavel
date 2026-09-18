@@ -40,14 +40,33 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables <> 20)
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          = 'sha256:gate-001-v3-legacy-upgrade-hardening' AND installed_tables <> 20)
+          IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
+            'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
+            'sha256:gate-001-v3-runtime-readiness') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
          AND column_name='scanner_result' AND is_nullable='NO' AND data_type='jsonb')
-       OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-         WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
-           AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%')
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND NOT EXISTS(
+            SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+            WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
+              AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') AND (
+            NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+              WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
+            OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+              WHERE n.nspname='gate' AND t.relname='splitter_deployments' AND c.conname='splitter_deployments_environment_check')
+            OR NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+              WHERE n.nspname='gate' AND p.proname='validate_relational_bindings' AND p.pronargs=0)
+            OR NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+              WHERE n.nspname='gate' AND c.relname='quotes' AND t.tgname='quotes_validate_bindings' AND NOT t.tgisinternal)
+            OR NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+              WHERE n.nspname='gate' AND c.relname='splitter_deployments'
+                AND t.tgname='splitter_deployments_immutable_identity' AND NOT t.tgisinternal)))
        OR NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
          WHERE n.nspname='gate' AND p.proname='mutate_profile' AND p.pronargs=12)
        OR NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -60,7 +79,9 @@ BEGIN
          WHERE n.nspname='gate' AND p.proname='transition_notification' AND p.pronargs=4)
        OR COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
           NOT IN ('sha256:gate-001-v3-postgres-parity','sha256:gate-001-v3-durable-auth-profile',
-            'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening')
+            'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
+            'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
+            'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -357,6 +378,22 @@ CREATE TABLE IF NOT EXISTS gate.splitter_deployments (
  rpc_access_ciphertext text NOT NULL, issuance_active boolean NOT NULL DEFAULT false, retired_at timestamptz, retirement_ready_at timestamptz,
  UNIQUE(chain_id,splitter), UNIQUE(id,chain_id,splitter), UNIQUE(id,chain_id,splitter,token)
 );
+UPDATE gate.splitter_deployments
+SET config=jsonb_set(config,'{environment}','"production"'::jsonb,true) - 'testTokenLabel'
+WHERE chain_id=8453
+  AND token='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+  AND NOT (config ? 'environment');
+ALTER TABLE gate.splitter_deployments DROP CONSTRAINT IF EXISTS splitter_deployments_environment_check;
+ALTER TABLE gate.splitter_deployments ADD CONSTRAINT splitter_deployments_environment_check CHECK (
+  COALESCE((
+  (config->>'environment'='production' AND chain_id=8453
+    AND token='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+    AND NOT (config ? 'testTokenLabel')) OR
+  (config->>'environment'='test' AND chain_id=84532
+    AND jsonb_typeof(config->'testTokenLabel')='string'
+    AND NULLIF(btrim(config->>'testTokenLabel'),'') IS NOT NULL)
+  ),false)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS splitter_one_active_per_chain_idx ON gate.splitter_deployments(chain_id) WHERE issuance_active;
 
 CREATE TABLE IF NOT EXISTS gate.submissions (
@@ -377,7 +414,7 @@ CREATE TABLE IF NOT EXISTS gate.quotes (
  id text PRIMARY KEY, quote_id text NOT NULL UNIQUE CHECK(quote_id ~ '^0x[0-9a-f]{64}$'), submission_id text NOT NULL UNIQUE REFERENCES gate.submissions(id),
  payer text NOT NULL CHECK(payer ~ '^0x[0-9a-f]{40}$'), voter text NOT NULL CHECK(voter ~ '^0x[0-9a-f]{40}$'),
  attention_amount numeric(78,0) NOT NULL CHECK(attention_amount >= 1000000), fee_amount numeric(78,0) NOT NULL CHECK(fee_amount = 250000),
- token text NOT NULL CHECK(token ~ '^0x[0-9a-f]{40}$'), base_chain_id bigint NOT NULL CHECK(base_chain_id=8453), splitter text NOT NULL CHECK(splitter ~ '^0x[0-9a-f]{40}$'),
+ token text NOT NULL CHECK(token ~ '^0x[0-9a-f]{40}$'), base_chain_id bigint NOT NULL CHECK(base_chain_id IN(8453,84532)), splitter text NOT NULL CHECK(splitter ~ '^0x[0-9a-f]{40}$'),
  deployment_id text NOT NULL REFERENCES gate.splitter_deployments(id), quote_version integer NOT NULL DEFAULT 1 CHECK(quote_version = 1), expires_at timestamptz NOT NULL,
  quote_signature text, reservation_state text NOT NULL DEFAULT 'reserved' CHECK(reservation_state IN('reserved','consumed','released')),
  state gate.quote_state NOT NULL DEFAULT 'quoted', settled_tx_hash text CHECK(settled_tx_hash IS NULL OR settled_tx_hash ~ '^0x[0-9a-f]{64}$'),
@@ -396,6 +433,9 @@ CREATE TABLE IF NOT EXISTS gate.quotes (
  settlement_reorged_at timestamptz, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  FOREIGN KEY(deployment_id,base_chain_id,splitter,token) REFERENCES gate.splitter_deployments(id,chain_id,splitter,token)
 );
+ALTER TABLE gate.quotes DROP CONSTRAINT IF EXISTS quotes_base_chain_id_check;
+ALTER TABLE gate.quotes DROP CONSTRAINT IF EXISTS quotes_base_chain_check;
+ALTER TABLE gate.quotes ADD CONSTRAINT quotes_base_chain_check CHECK (base_chain_id IN(8453,84532));
 ALTER TABLE gate.quotes ADD COLUMN IF NOT EXISTS lifecycle_recheck_attempted_at timestamptz;
 ALTER TABLE gate.quotes ADD COLUMN IF NOT EXISTS lifecycle_recheck jsonb;
 ALTER TABLE gate.quotes DROP CONSTRAINT IF EXISTS quotes_lifecycle_recheck_check;
@@ -470,25 +510,40 @@ ALTER TABLE gate.notification_attempts ALTER COLUMN next_attempt_at SET DEFAULT 
 ALTER TABLE gate.notification_attempts ALTER COLUMN next_attempt_at SET NOT NULL;
 ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS claimed_until timestamptz;
 ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS claim_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS first_attempt_at timestamptz;
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS dedupe_deadline timestamptz;
+ALTER TABLE gate.notification_attempts ADD COLUMN IF NOT EXISTS manual_reconciliation_at timestamptz;
+
+ALTER TABLE gate.notification_attempts DROP CONSTRAINT IF EXISTS notification_dedupe_window_check;
+ALTER TABLE gate.notification_attempts ADD CONSTRAINT notification_dedupe_window_check CHECK(
+  (first_attempt_at IS NULL AND dedupe_deadline IS NULL)
+  OR (first_attempt_at IS NOT NULL AND dedupe_deadline=first_attempt_at+interval '24 hours'));
+ALTER TABLE gate.notification_attempts DROP CONSTRAINT IF EXISTS notification_manual_reconciliation_check;
+ALTER TABLE gate.notification_attempts ADD CONSTRAINT notification_manual_reconciliation_check CHECK(
+  manual_reconciliation_at IS NULL OR (state='failed' AND error_code IS NOT NULL));
 CREATE UNIQUE INDEX IF NOT EXISTS notification_inbox_unique_idx ON gate.notification_attempts(inbox_id);
 CREATE INDEX IF NOT EXISTS notification_pending_idx ON gate.notification_attempts(state,created_at);
 
 DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,timestamptz,integer);
 DROP FUNCTION IF EXISTS gate.claim_notification_attempts(integer,integer,integer);
 CREATE OR REPLACE FUNCTION gate.claim_notification_attempts(p_limit integer,p_retry_limit integer,p_lease_ms integer)
-RETURNS TABLE(id text,"claimToken" text,"retryCount" integer,"destinationRef" text,summary jsonb)
+RETURNS TABLE(id text,"claimToken" text,"retryCount" integer,"firstAttemptAt" timestamptz,"dedupeDeadline" timestamptz,"profileId" text,"destinationRef" text,summary jsonb)
 LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
  WITH candidates AS (
    SELECT n.id FROM gate.notification_attempts n
    WHERE n.state IN('pending','failed') AND n.next_attempt_at<=clock_timestamp()
+     AND n.manual_reconciliation_at IS NULL
      AND n.retry_count<=p_retry_limit AND (n.claimed_until IS NULL OR n.claimed_until<=clock_timestamp())
      AND p_lease_ms BETWEEN 1 AND 3600000
    ORDER BY n.next_attempt_at,n.created_at LIMIT p_limit FOR UPDATE SKIP LOCKED
  )
  UPDATE gate.notification_attempts n SET state='pending',claim_generation=claim_generation+1,
-   claimed_until=clock_timestamp()+make_interval(secs => p_lease_ms / 1000.0),updated_at=clock_timestamp()
+   claimed_until=clock_timestamp()+make_interval(secs => p_lease_ms / 1000.0),
+   first_attempt_at=COALESCE(first_attempt_at,statement_timestamp()),
+   dedupe_deadline=COALESCE(dedupe_deadline,statement_timestamp()+interval '24 hours'),updated_at=clock_timestamp()
  FROM candidates c WHERE n.id=c.id
- RETURNING n.id,n.claim_generation::text,n.retry_count,n.destination_ref_ciphertext,n.trusted_summary
+ RETURNING n.id,n.claim_generation::text,n.retry_count,n.first_attempt_at,n.dedupe_deadline,
+   (SELECT i.profile_id FROM gate.inbox_items i WHERE i.id=n.inbox_id),n.destination_ref_ciphertext,n.trusted_summary
 $$;
 REVOKE ALL ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) FROM PUBLIC;
 
@@ -498,7 +553,8 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gat
 BEGIN
  UPDATE gate.notification_attempts SET state='sent',provider_opaque_id=p_provider_opaque_id,
    claimed_until=NULL,updated_at=clock_timestamp() WHERE id=p_id AND state='pending'
-     AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp();
+     AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp()
+     AND manual_reconciliation_at IS NULL;
  IF FOUND THEN RETURN true; END IF;
  RETURN false;
 END $$;
@@ -510,22 +566,38 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gat
 BEGIN
  UPDATE gate.notification_attempts SET state='failed',error_code=p_error_code,retry_count=retry_count+1,
    next_attempt_at=p_next_attempt_at,claimed_until=NULL,updated_at=clock_timestamp()
- WHERE id=p_id AND state='pending' AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp();
+ WHERE id=p_id AND state='pending' AND claim_generation=p_claim_token::bigint AND claimed_until>clock_timestamp()
+   AND manual_reconciliation_at IS NULL;
  RETURN FOUND;
 END $$;
 REVOKE ALL ON FUNCTION gate.fail_notification_attempt(text,text,text,timestamptz) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.reconcile_notification_attempt(p_id text,p_claim_token text,p_error_code text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ UPDATE gate.notification_attempts SET state='failed',error_code=p_error_code,
+   manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
+ WHERE id=p_id AND state='pending' AND claim_generation=p_claim_token::bigint
+   AND claimed_until>clock_timestamp() AND manual_reconciliation_at IS NULL;
+ RETURN FOUND;
+END $$;
+REVOKE ALL ON FUNCTION gate.reconcile_notification_attempt(text,text,text) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION gate.transition_notification(p_id text,p_state gate.notification_state,p_provider text,p_has_provider boolean,
   p_error text,p_has_error boolean,p_retry_limit integer)
 RETURNS TABLE(id text,"inboxId" text,channel text,status gate.notification_state,"providerOpaqueId" text,"errorCode" text,
   "retryCount" integer,"createdAt" timestamptz,"updatedAt" timestamptz)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
-DECLARE old_state gate.notification_state; next_state gate.notification_state; old_retry_count integer;
+DECLARE old_state gate.notification_state; next_state gate.notification_state; old_retry_count integer; old_manual_reconciliation_at timestamptz;
 BEGIN
  IF p_retry_limit<0 THEN RAISE EXCEPTION 'notification retry limit must be nonnegative' USING ERRCODE='23514'; END IF;
- SELECT n.state,n.retry_count INTO old_state,old_retry_count FROM gate.notification_attempts n WHERE n.id=p_id FOR UPDATE;
+ SELECT n.state,n.retry_count,n.manual_reconciliation_at INTO old_state,old_retry_count,old_manual_reconciliation_at
+   FROM gate.notification_attempts n WHERE n.id=p_id FOR UPDATE;
  IF NOT FOUND THEN RETURN; END IF;
  next_state := COALESCE(p_state,old_state);
+ IF old_manual_reconciliation_at IS NOT NULL AND next_state<>'failed' THEN
+   RAISE EXCEPTION 'manual reconciliation is terminal' USING ERRCODE='23514';
+ END IF;
  IF NOT ((old_state='pending' AND next_state IN('pending','sent','failed')) OR (old_state='failed' AND next_state IN('failed','pending'))
     OR (old_state='sent' AND next_state='sent')) THEN
    RAISE EXCEPTION 'invalid notification transition' USING ERRCODE='23514';
@@ -561,9 +633,26 @@ CREATE TABLE IF NOT EXISTS gate.rate_limit_events (
 );
 CREATE INDEX IF NOT EXISTS rate_limit_lookup_idx ON gate.rate_limit_events(subject_hash,operation,occurred_at DESC);
 CREATE TABLE IF NOT EXISTS gate.delivery_settings (
- profile_id text PRIMARY KEY REFERENCES gate.profiles(id), ciphertext text NOT NULL, encrypted_config jsonb NOT NULL DEFAULT '{}'::jsonb,
- updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+  profile_id text PRIMARY KEY REFERENCES gate.profiles(id), ciphertext text NOT NULL, encrypted_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE gate.delivery_settings DROP CONSTRAINT IF EXISTS delivery_settings_envelope_check;
+ALTER TABLE gate.delivery_settings ADD CONSTRAINT delivery_settings_envelope_check CHECK (
+  length(ciphertext)<=1024
+  AND ciphertext ~ '^gg1\.[A-Za-z0-9_-]{1,32}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+);
+CREATE OR REPLACE FUNCTION gate.set_delivery_setting(p_profile_id text,p_wallet text,p_ciphertext text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM gate.profiles p WHERE p.id=p_profile_id AND p.wallet=p_wallet) THEN
+  RAISE EXCEPTION 'delivery setting profile mismatch' USING ERRCODE='23514';
+ END IF;
+ INSERT INTO gate.delivery_settings(profile_id,ciphertext,encrypted_config,updated_at)
+ VALUES(p_profile_id,p_ciphertext,'{}'::jsonb,clock_timestamp())
+ ON CONFLICT(profile_id) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,encrypted_config='{}'::jsonb,
+   updated_at=clock_timestamp();
+END $$;
+REVOKE ALL ON FUNCTION gate.set_delivery_setting(text,text,text) FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS gate.settlement_cursors (
  id bigserial PRIMARY KEY, deployment_id text NOT NULL UNIQUE REFERENCES gate.splitter_deployments(id), chain_id bigint NOT NULL,
  splitter text NOT NULL, deployment_block bigint NOT NULL CHECK(deployment_block>=0), next_range_from bigint NOT NULL CHECK(next_range_from>=deployment_block),
@@ -873,6 +962,7 @@ DECLARE
   expected_log_index integer;
   expected_submission_hash text;
   expected_gavel_recipient text;
+  issuance_deployment gate.splitter_deployments%ROWTYPE;
   release_cursor gate.settlement_cursors%ROWTYPE;
 BEGIN
  IF TG_TABLE_NAME='quotes' THEN
@@ -881,6 +971,21 @@ BEGIN
      WHERE s.id=NEW.submission_id;
    IF NOT FOUND OR NEW.payer<>expected_payer OR NEW.voter<>expected_voter THEN
      RAISE EXCEPTION 'quote is not bound to its submission payer and profile voter' USING ERRCODE='23514'; END IF;
+   IF TG_OP='INSERT' THEN
+     SELECT * INTO issuance_deployment FROM gate.splitter_deployments WHERE id=NEW.deployment_id;
+     IF NOT FOUND OR NOT issuance_deployment.issuance_active
+        OR issuance_deployment.chain_id<>NEW.base_chain_id OR issuance_deployment.splitter<>NEW.splitter
+        OR issuance_deployment.token<>NEW.token
+        OR NOT COALESCE((issuance_deployment.config->>'environment'='production'
+              AND NEW.base_chain_id=8453
+              AND NEW.token='0x833589fcd6edb6e08f4c7c32d4f71b54bda02913')
+          OR (issuance_deployment.config->>'environment'='test'
+              AND NEW.base_chain_id=84532
+              AND jsonb_typeof(issuance_deployment.config->'testTokenLabel')='string'
+              AND NULLIF(btrim(issuance_deployment.config->>'testTokenLabel'),'') IS NOT NULL),false) THEN
+       RAISE EXCEPTION 'quote deployment environment is not issuance-active for its chain and token' USING ERRCODE='23514';
+     END IF;
+   END IF;
    IF NEW.state='settled' AND (NEW.settlement_event_quote_id<>NEW.quote_id OR NEW.settlement_payer<>NEW.payer
       OR NEW.settlement_voter<>NEW.voter OR NEW.settlement_attention_amount<>NEW.attention_amount
       OR NEW.settlement_fee_amount<>NEW.fee_amount OR NEW.settlement_gavel_recipient<>expected_gavel_recipient OR NEW.settlement_token<>NEW.token
@@ -948,15 +1053,20 @@ CREATE TRIGGER settlement_monitors_validate_bindings BEFORE INSERT OR UPDATE ON 
 
 CREATE OR REPLACE FUNCTION gate.protect_immutable_issuance() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'immutable Gate record' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='proposal_snapshots' AND NEW IS DISTINCT FROM OLD THEN RAISE EXCEPTION 'immutable proposal snapshot' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='submissions' AND ROW(NEW.public_id,NEW.submission_hash,NEW.profile_id,NEW.issuance_snapshot_id,NEW.payer,NEW.signed_sender,NEW.material)
-   IS DISTINCT FROM ROW(OLD.public_id,OLD.submission_hash,OLD.profile_id,OLD.issuance_snapshot_id,OLD.payer,OLD.signed_sender,OLD.material) THEN
-   RAISE EXCEPTION 'immutable submission issuance material' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='quotes' AND ROW(NEW.quote_id,NEW.submission_id,NEW.payer,NEW.voter,NEW.attention_amount,NEW.fee_amount,NEW.token,NEW.base_chain_id,NEW.splitter,NEW.deployment_id,NEW.quote_version,NEW.expires_at)
-   IS DISTINCT FROM ROW(OLD.quote_id,OLD.submission_id,OLD.payer,OLD.voter,OLD.attention_amount,OLD.fee_amount,OLD.token,OLD.base_chain_id,OLD.splitter,OLD.deployment_id,OLD.quote_version,OLD.expires_at) THEN
-   RAISE EXCEPTION 'immutable quote issuance material' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='quotes' AND OLD.quote_signature IS NOT NULL AND NEW.quote_signature IS DISTINCT FROM OLD.quote_signature THEN
-   RAISE EXCEPTION 'immutable quote signature' USING ERRCODE='23514'; END IF; RETURN NEW;
+ IF TG_TABLE_NAME='proposal_snapshots' THEN
+   IF NEW IS DISTINCT FROM OLD THEN RAISE EXCEPTION 'immutable proposal snapshot' USING ERRCODE='23514'; END IF;
+ ELSIF TG_TABLE_NAME='submissions' THEN
+   IF ROW(NEW.public_id,NEW.submission_hash,NEW.profile_id,NEW.issuance_snapshot_id,NEW.payer,NEW.signed_sender,NEW.material)
+     IS DISTINCT FROM ROW(OLD.public_id,OLD.submission_hash,OLD.profile_id,OLD.issuance_snapshot_id,OLD.payer,OLD.signed_sender,OLD.material) THEN
+     RAISE EXCEPTION 'immutable submission issuance material' USING ERRCODE='23514'; END IF;
+ ELSIF TG_TABLE_NAME='quotes' THEN
+   IF ROW(NEW.quote_id,NEW.submission_id,NEW.payer,NEW.voter,NEW.attention_amount,NEW.fee_amount,NEW.token,NEW.base_chain_id,NEW.splitter,NEW.deployment_id,NEW.quote_version,NEW.expires_at)
+     IS DISTINCT FROM ROW(OLD.quote_id,OLD.submission_id,OLD.payer,OLD.voter,OLD.attention_amount,OLD.fee_amount,OLD.token,OLD.base_chain_id,OLD.splitter,OLD.deployment_id,OLD.quote_version,OLD.expires_at) THEN
+     RAISE EXCEPTION 'immutable quote issuance material' USING ERRCODE='23514'; END IF;
+   IF OLD.quote_signature IS NOT NULL AND NEW.quote_signature IS DISTINCT FROM OLD.quote_signature THEN
+     RAISE EXCEPTION 'immutable quote signature' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
 END $$;
 CREATE OR REPLACE FUNCTION gate.protect_settlement_evidence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  IF OLD.settled_tx_hash IS NOT NULL AND ROW(NEW.settled_tx_hash,NEW.settled_log_index,NEW.settled_at,NEW.receipt_block,NEW.receipt_block_hash,NEW.receipt_block_timestamp,
@@ -967,16 +1077,34 @@ CREATE OR REPLACE FUNCTION gate.protect_settlement_evidence() RETURNS trigger LA
  OLD.settlement_gavel_recipient,OLD.settlement_token,OLD.settlement_submission_hash,OLD.settlement_quote_version,OLD.settlement_source_chain_id,OLD.settlement_splitter)
  THEN RAISE EXCEPTION 'immutable settlement evidence' USING ERRCODE='23514'; END IF; RETURN NEW;
 END $$;
+CREATE OR REPLACE FUNCTION gate.protect_splitter_deployment_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'immutable Gate relationship' USING ERRCODE='23514'; END IF;
+ IF ROW(NEW.chain_id,NEW.splitter,NEW.signer,NEW.token,NEW.gavel_recipient,NEW.deployment_block,NEW.contract_code_hash,
+      NEW.config->'environment',NEW.config->'testTokenLabel')
+    IS DISTINCT FROM
+    ROW(OLD.chain_id,OLD.splitter,OLD.signer,OLD.token,OLD.gavel_recipient,OLD.deployment_block,OLD.contract_code_hash,
+      OLD.config->'environment',OLD.config->'testTokenLabel')
+ THEN RAISE EXCEPTION 'immutable deployment identity' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END $$;
 CREATE OR REPLACE FUNCTION gate.protect_immutable_relationship() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'immutable Gate relationship' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='capacity_reservations' AND ROW(NEW.profile_id,NEW.quote_id,NEW.amount,NEW.expires_at) IS DISTINCT FROM ROW(OLD.profile_id,OLD.quote_id,OLD.amount,OLD.expires_at)
- THEN RAISE EXCEPTION 'immutable capacity reservation relationship' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='inbox_items' AND ROW(NEW.submission_id,NEW.profile_id,NEW.inbox_created_at) IS DISTINCT FROM ROW(OLD.submission_id,OLD.profile_id,OLD.inbox_created_at)
- THEN RAISE EXCEPTION 'immutable inbox relationship' USING ERRCODE='23514'; END IF;
- IF TG_TABLE_NAME='settlement_reorg_monitors' AND ROW(NEW.chain_id,NEW.splitter,NEW.quote_id,NEW.receipt_block,NEW.receipt_block_hash,NEW.tx_hash,NEW.log_index)
- IS DISTINCT FROM ROW(OLD.chain_id,OLD.splitter,OLD.quote_id,OLD.receipt_block,OLD.receipt_block_hash,OLD.tx_hash,OLD.log_index)
- THEN RAISE EXCEPTION 'immutable settlement evidence' USING ERRCODE='23514'; END IF; RETURN NEW;
+ IF TG_TABLE_NAME='capacity_reservations' THEN
+   IF ROW(NEW.profile_id,NEW.quote_id,NEW.amount,NEW.expires_at) IS DISTINCT FROM ROW(OLD.profile_id,OLD.quote_id,OLD.amount,OLD.expires_at)
+   THEN RAISE EXCEPTION 'immutable capacity reservation relationship' USING ERRCODE='23514'; END IF;
+ ELSIF TG_TABLE_NAME='inbox_items' THEN
+   IF ROW(NEW.submission_id,NEW.profile_id,NEW.inbox_created_at) IS DISTINCT FROM ROW(OLD.submission_id,OLD.profile_id,OLD.inbox_created_at)
+   THEN RAISE EXCEPTION 'immutable inbox relationship' USING ERRCODE='23514'; END IF;
+ ELSIF TG_TABLE_NAME='settlement_reorg_monitors' THEN
+   IF ROW(NEW.chain_id,NEW.splitter,NEW.quote_id,NEW.receipt_block,NEW.receipt_block_hash,NEW.tx_hash,NEW.log_index)
+   IS DISTINCT FROM ROW(OLD.chain_id,OLD.splitter,OLD.quote_id,OLD.receipt_block,OLD.receipt_block_hash,OLD.tx_hash,OLD.log_index)
+   THEN RAISE EXCEPTION 'immutable settlement evidence' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS splitter_deployments_immutable_identity ON gate.splitter_deployments;
+CREATE TRIGGER splitter_deployments_immutable_identity BEFORE UPDATE OR DELETE ON gate.splitter_deployments
+  FOR EACH ROW EXECUTE FUNCTION gate.protect_splitter_deployment_identity();
 DROP TRIGGER IF EXISTS proposal_snapshots_immutable ON gate.proposal_snapshots;
 CREATE TRIGGER proposal_snapshots_immutable BEFORE UPDATE OR DELETE ON gate.proposal_snapshots FOR EACH ROW EXECUTE FUNCTION gate.protect_immutable_issuance();
 DROP TRIGGER IF EXISTS submissions_immutable_issuance ON gate.submissions;
@@ -993,24 +1121,32 @@ DROP TRIGGER IF EXISTS settlement_monitors_immutable_evidence ON gate.settlement
 CREATE TRIGGER settlement_monitors_immutable_evidence BEFORE UPDATE OR DELETE ON gate.settlement_reorg_monitors FOR EACH ROW EXECUTE FUNCTION gate.protect_immutable_relationship();
 
 CREATE OR REPLACE FUNCTION gate.enforce_state_transition() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
- IF TG_OP='INSERT' AND TG_TABLE_NAME='notification_attempts' AND NEW.state<>'pending' THEN
-   RAISE EXCEPTION 'notification must start pending' USING ERRCODE='23514';
- ELSIF TG_OP='UPDATE' AND TG_TABLE_NAME='notification_attempts'
-   AND NOT ((OLD.state='pending' AND NEW.state IN('pending','sent','failed')) OR (OLD.state='failed' AND NEW.state IN('failed','pending')) OR (OLD.state='sent' AND NEW.state='sent')) THEN
-   RAISE EXCEPTION 'invalid notification transition' USING ERRCODE='23514';
- ELSIF TG_OP='UPDATE' AND TG_TABLE_NAME='capacity_reservations'
-   AND NOT ((OLD.state='active' AND NEW.state IN('active','expiry_pending_reconciliation','consumed'))
+ IF TG_TABLE_NAME='notification_attempts' THEN
+   IF TG_OP='INSERT' AND NEW.state<>'pending' THEN
+     RAISE EXCEPTION 'notification must start pending' USING ERRCODE='23514';
+   ELSIF TG_OP='UPDATE' AND OLD.manual_reconciliation_at IS NOT NULL
+     AND (NEW.manual_reconciliation_at IS DISTINCT FROM OLD.manual_reconciliation_at OR NEW.state<>'failed') THEN
+     RAISE EXCEPTION 'manual reconciliation is terminal' USING ERRCODE='23514';
+   ELSIF TG_OP='UPDATE'
+     AND NOT ((OLD.state='pending' AND NEW.state IN('pending','sent','failed')) OR (OLD.state='failed' AND NEW.state IN('failed','pending')) OR (OLD.state='sent' AND NEW.state='sent')) THEN
+     RAISE EXCEPTION 'invalid notification transition' USING ERRCODE='23514';
+   END IF;
+ ELSIF TG_TABLE_NAME='capacity_reservations' THEN
+   IF TG_OP='UPDATE' AND NOT ((OLD.state='active' AND NEW.state IN('active','expiry_pending_reconciliation','consumed'))
      OR (OLD.state='expiry_pending_reconciliation' AND NEW.state IN('expiry_pending_reconciliation','released','consumed'))
      OR (OLD.state='released' AND NEW.state IN('released','consumed')) OR (OLD.state='consumed' AND NEW.state='consumed')) THEN
-   RAISE EXCEPTION 'invalid reservation transition' USING ERRCODE='23514';
- ELSIF TG_OP='UPDATE' AND TG_TABLE_NAME='quotes'
-   AND NOT ((OLD.state='quoted' AND NEW.state IN('quoted','expired','settled')) OR (OLD.state='expired' AND NEW.state IN('expired','settled')) OR (OLD.state='settled' AND NEW.state='settled')) THEN
-   RAISE EXCEPTION 'invalid quote transition' USING ERRCODE='23514';
- ELSIF TG_OP='UPDATE' AND TG_TABLE_NAME='submissions'
-   AND NOT ((OLD.status='QUOTED' AND NEW.status IN('QUOTED','SETTLEMENT_PENDING','EXPIRED','SETTLED'))
+     RAISE EXCEPTION 'invalid reservation transition' USING ERRCODE='23514';
+   END IF;
+ ELSIF TG_TABLE_NAME='quotes' THEN
+   IF TG_OP='UPDATE' AND NOT ((OLD.state='quoted' AND NEW.state IN('quoted','expired','settled')) OR (OLD.state='expired' AND NEW.state IN('expired','settled')) OR (OLD.state='settled' AND NEW.state='settled')) THEN
+     RAISE EXCEPTION 'invalid quote transition' USING ERRCODE='23514';
+   END IF;
+ ELSIF TG_TABLE_NAME='submissions' THEN
+   IF TG_OP='UPDATE' AND NOT ((OLD.status='QUOTED' AND NEW.status IN('QUOTED','SETTLEMENT_PENDING','EXPIRED','SETTLED'))
      OR (OLD.status='SETTLEMENT_PENDING' AND NEW.status IN('SETTLEMENT_PENDING','QUOTED','EXPIRED','SETTLED'))
      OR (OLD.status='EXPIRED' AND NEW.status IN('EXPIRED','SETTLED')) OR (OLD.status='SETTLED' AND NEW.status='SETTLED')) THEN
-   RAISE EXCEPTION 'invalid submission transition' USING ERRCODE='23514';
+     RAISE EXCEPTION 'invalid submission transition' USING ERRCODE='23514';
+   END IF;
  END IF; RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS quotes_state_transition ON gate.quotes;
@@ -1021,6 +1157,16 @@ CREATE TRIGGER quotes_state_transition BEFORE UPDATE ON gate.quotes FOR EACH ROW
 CREATE TRIGGER submissions_state_transition BEFORE UPDATE ON gate.submissions FOR EACH ROW EXECUTE FUNCTION gate.enforce_state_transition();
 CREATE TRIGGER reservations_state_transition BEFORE UPDATE ON gate.capacity_reservations FOR EACH ROW EXECUTE FUNCTION gate.enforce_state_transition();
 CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.notification_attempts FOR EACH ROW EXECUTE FUNCTION gate.enforce_state_transition();
+
+DO $$ BEGIN
+ IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
+    NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness') THEN
+  UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
+    manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
+  WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
+    AND state IN('pending','failed') AND manual_reconciliation_at IS NULL;
+ END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION gate.validate_state_consistency() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE qid text; qstate gate.quote_state; qsig text; sstate text; rstate gate.reservation_state; inbox_count integer; notice_count integer; monitor_count integer;
@@ -1040,7 +1186,7 @@ BEGIN
  SELECT count(*) INTO monitor_count FROM gate.settlement_reorg_monitors WHERE quote_id=qid;
  IF (qstate='quoted' AND (sstate NOT IN('QUOTED','SETTLEMENT_PENDING') OR rstate<>'active' OR inbox_count<>0 OR notice_count<>0 OR monitor_count<>0))
    OR (qstate='expired' AND (sstate<>'EXPIRED' OR rstate NOT IN('expiry_pending_reconciliation','released') OR inbox_count<>0 OR notice_count<>0 OR monitor_count<>0))
-   OR (qstate='settled' AND (sstate<>'SETTLED' OR rstate<>'consumed' OR inbox_count<>1 OR notice_count<>1 OR monitor_count<>1)) THEN
+   OR (qstate='settled' AND (sstate<>'SETTLED' OR rstate<>'consumed' OR inbox_count<>1 OR notice_count NOT BETWEEN 0 AND 1 OR monitor_count<>1)) THEN
    RAISE EXCEPTION 'inconsistent Gate quote/submission/reservation/inbox/notification/monitor graph' USING ERRCODE='23514';
  END IF; RETURN NULL;
 END $$;
@@ -1104,11 +1250,13 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.complete_notification_attempt(text,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.fail_notification_attempt(text,text,text,timestamptz) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.reconcile_notification_attempt(text,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.record_scanner_range(text,bigint,bigint,text,timestamptz,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.set_delivery_setting(text,text,text) TO gavel_gate;
  END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_api') THEN
   REVOKE ALL ON SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL TABLES IN SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL SEQUENCES IN SCHEMA gate FROM gavel_api;
@@ -1170,8 +1318,42 @@ LANGUAGE sql SET search_path=pg_catalog AS $catalog_manifest$
 $catalog_manifest$;
 REVOKE ALL ON FUNCTION public.gavel_gate_catalog_manifest() FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.runtime_migration_status()
+RETURNS TABLE("migrationVersion" text,"migrationChecksum" text,"manifestMatches" boolean)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public AS $runtime_migration_status$
+ SELECT m.version,m.migration_checksum,
+   m.catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
+ FROM public.schema_migrations m WHERE m.version='gate/001_gate-v3'
+$runtime_migration_status$;
+REVOKE ALL ON FUNCTION gate.runtime_migration_status() FROM PUBLIC;
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_gate') THEN
+  GRANT EXECUTE ON FUNCTION gate.runtime_migration_status() TO gavel_gate;
+ END IF;
+END $$;
+
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-legacy-upgrade-hardening',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v3-runtime-readiness',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
-   catalog_manifest=EXCLUDED.catalog_manifest;
+   catalog_manifest=EXCLUDED.catalog_manifest
+ WHERE public.schema_migrations.migration_checksum IN (
+   'sha256:gate-001-v3-postgres-parity',
+   'sha256:gate-001-v3-durable-auth-profile',
+   'sha256:gate-001-v3-durable-auth-profile-hardening',
+   'sha256:gate-001-v3-legacy-upgrade-hardening',
+   'sha256:gate-001-v3-closed-base-environments',
+   'sha256:gate-001-v3-agentmail-idempotency',
+   'sha256:gate-001-v3-bound-delivery-settings',
+   'sha256:gate-001-v3-runtime-readiness'
+ );
+DO $$ BEGIN
+ IF NOT EXISTS (
+   SELECT 1 FROM public.schema_migrations
+   WHERE version='gate/001_gate-v3'
+     AND migration_checksum='sha256:gate-001-v3-runtime-readiness'
+     AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
+ ) THEN
+  RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';
+ END IF;
+END $$;

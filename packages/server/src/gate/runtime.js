@@ -1,16 +1,37 @@
 "use strict";
 
+const { Interface, TypedDataEncoder, keccak256 } = require("ethers");
 const { createBaseSettlementAdapter } = require("./base-settlement-adapter");
 const { createGateHttpServer } = require("./http");
 const { createNotificationWorker } = require("./notification-worker");
+const { createAgentMailSender, createDeliverySettingsCipher, createEmailNotifier } = require("./notifiers/email");
 const { createSettlementService } = require("./settlement-service");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const DECIMAL = /^[1-9][0-9]*$/;
+const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const AGENTMAIL_ORIGINS = new Set([
+  "https://api.agentmail.to",
+  "https://x402.api.agentmail.to",
+  "https://mpp.api.agentmail.to",
+  "https://api.agentmail.eu",
+]);
+const INBOX_LOCAL = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/;
+const INBOX_DOMAIN_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+const NOTIFIER_CONFIG_KEYS = Object.freeze([
+  "GAVEL_GATE_NOTIFIER_MODE", "GAVEL_GATE_ENCRYPTION_KEY", "AGENTMAIL_API_KEY",
+  "AGENTMAIL_FROM_INBOX", "AGENTMAIL_API_URL",
+]);
 const SETTLEMENT_CONFIG_KEYS = Object.freeze([
+  "GAVEL_GATE_ENVIRONMENT",
   "GAVEL_GATE_SPLITTER",
+  "GAVEL_GATE_BASE_USDC",
+  "GAVEL_GATE_TEST_TOKEN_LABEL",
   "GAVEL_GATE_BASE_RPC_URL",
   "GAVEL_GATE_BASE_CHAIN_ID",
+  "GAVEL_GATE_QUOTE_SIGNER_ADDRESS",
+  "GAVEL_GATE_OWNER_RECIPIENT",
   "GAVEL_GATE_CONFIRMATION_DEPTH",
   "GAVEL_GATE_REORG_OVERLAP_BLOCKS",
   "GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE",
@@ -27,6 +48,157 @@ function positive(value, name, fallback) {
   return parsed;
 }
 
+function validAddress(value) { return typeof value === "string" && ADDRESS.test(value); }
+function validInboxAddress(value) {
+  if (typeof value !== "string" || value.length > 254) return false;
+  const parts = value.split("@");
+  if (parts.length !== 2) return false;
+  const [local, domain] = parts;
+  return local.length > 0 && local.length <= 64 && INBOX_LOCAL.test(local)
+    && !local.startsWith(".") && !local.endsWith(".") && !local.includes("..")
+    && domain.length > 0 && domain.length <= 253
+    && domain.split(".").every((label) => INBOX_DOMAIN_LABEL.test(label));
+}
+function sameAddress(actual, expected) {
+  return validAddress(actual) && validAddress(expected) && actual.toLowerCase() === expected.toLowerCase();
+}
+
+function notifierRuntimeConfigFromEnv(env = process.env) {
+  const mode = env.GAVEL_GATE_NOTIFIER_MODE;
+  if (typeof mode !== "string" || mode === "") {
+    throw new TypeError("GAVEL_GATE_NOTIFIER_MODE is required and must be exactly disabled or agentmail");
+  }
+  if (mode !== "disabled" && mode !== "agentmail") {
+    throw new TypeError("GAVEL_GATE_NOTIFIER_MODE must be exactly disabled or agentmail");
+  }
+  if (mode === "disabled") {
+    const unexpected = NOTIFIER_CONFIG_KEYS.slice(1)
+      .some((name) => Object.prototype.hasOwnProperty.call(env, name));
+    if (unexpected) throw new TypeError("disabled notifier mode cannot include AgentMail or encryption configuration");
+    return Object.freeze({ mode });
+  }
+  if (typeof env.AGENTMAIL_API_KEY !== "string" || env.AGENTMAIL_API_KEY === "") {
+    throw new TypeError("AGENTMAIL_API_KEY is required for AgentMail notifier mode");
+  }
+  if (!validInboxAddress(env.AGENTMAIL_FROM_INBOX)) {
+    throw new TypeError("AGENTMAIL_FROM_INBOX must be a valid inbox address");
+  }
+  createDeliverySettingsCipher({ encodedKey: env.GAVEL_GATE_ENCRYPTION_KEY });
+  const apiUrl = env.AGENTMAIL_API_URL || "https://api.agentmail.to";
+  let parsed;
+  try { parsed = new URL(apiUrl); } catch { throw new TypeError("AGENTMAIL_API_URL must be an allowlisted HTTPS origin"); }
+  if (!AGENTMAIL_ORIGINS.has(parsed.origin) || parsed.href !== `${parsed.origin}/`
+      || parsed.username || parsed.password) {
+    throw new TypeError("AGENTMAIL_API_URL must be an allowlisted HTTPS origin");
+  }
+  return Object.freeze({ mode, encryptionKey: env.GAVEL_GATE_ENCRYPTION_KEY,
+    apiKey: env.AGENTMAIL_API_KEY, fromInbox: env.AGENTMAIL_FROM_INBOX, apiUrl: parsed.origin });
+}
+
+function authoritativeDeploymentMatches(deployment, config) {
+  const persistedConfig = deployment?.config;
+  if (!persistedConfig || typeof persistedConfig !== "object" || Array.isArray(persistedConfig)) return false;
+  if (persistedConfig.environment !== config.environment || String(deployment.chainId) !== config.chainId
+      || !sameAddress(deployment.token, config.token) || !sameAddress(deployment.splitter, config.splitter)
+      || !sameAddress(deployment.signer, config.quoteSigner)
+      || !sameAddress(deployment.gavelRecipient, config.gavelRecipient)
+      || typeof deployment.contractCodeHash !== "string" || !BYTES32.test(deployment.contractCodeHash)) return false;
+  if (config.environment === "production") return !Object.hasOwn(persistedConfig, "testTokenLabel");
+  return persistedConfig.testTokenLabel === config.testTokenLabel;
+}
+
+function submissionIdentityMatches(service, deployment) {
+  const identity = service?.runtimeIdentity;
+  return identity && typeof identity === "object"
+    && identity.deploymentId === deployment.id
+    && String(identity.chainId) === String(deployment.chainId)
+    && sameAddress(identity.splitter, deployment.splitter)
+    && sameAddress(identity.token, deployment.token)
+    && sameAddress(identity.quoteSigner, deployment.signer)
+    && typeof identity.codeHash === "string"
+    && identity.codeHash.toLowerCase() === deployment.contractCodeHash.toLowerCase();
+}
+
+const SPLITTER_READS = new Interface([
+  "function usdc() view returns (address)",
+  "function quoteSigner() view returns (address)",
+  "function gavelRecipient() view returns (address)",
+  "function GAVEL_FEE_AMOUNT() view returns (uint256)",
+  "function DOMAIN_SEPARATOR() view returns (bytes32)",
+]);
+const TOKEN_READS = new Interface([
+  "function name() view returns (string)",
+  "function version() view returns (string)",
+  "function DOMAIN_SEPARATOR() view returns (bytes32)",
+]);
+
+async function boundedRpc(operation, timeoutMs, name) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Base RPC ${name} timed out`)), timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+async function readContract(client, target, iface, method, timeoutMs) {
+  const result = await boundedRpc(() => client.call({ to: target, data: iface.encodeFunctionData(method) }),
+    timeoutMs, method);
+  const data = typeof result === "string" ? result : result?.data;
+  if (typeof data !== "string") throw new Error(`${method} RPC result is incomplete`);
+  return iface.decodeFunctionResult(method, data)[0];
+}
+
+async function readOnchainDeployment({ client, splitter, token, rpcTimeoutMs = 10_000 }) {
+  if (!client || typeof client.getCode !== "function") {
+    throw new TypeError("baseClient.getCode is required for deployment attestation");
+  }
+  if (typeof client.call !== "function") throw new TypeError("baseClient.call is required for deployment attestation");
+  const deployedBytecode = await boundedRpc(() => client.getCode(splitter), rpcTimeoutMs, "getCode");
+  const [usdc, quoteSigner, gavelRecipient, gavelFeeAmount, domainSeparator,
+    tokenName, tokenVersion, tokenDomainSeparator] = await Promise.all([
+    readContract(client, splitter, SPLITTER_READS, "usdc", rpcTimeoutMs),
+    readContract(client, splitter, SPLITTER_READS, "quoteSigner", rpcTimeoutMs),
+    readContract(client, splitter, SPLITTER_READS, "gavelRecipient", rpcTimeoutMs),
+    readContract(client, splitter, SPLITTER_READS, "GAVEL_FEE_AMOUNT", rpcTimeoutMs),
+    readContract(client, splitter, SPLITTER_READS, "DOMAIN_SEPARATOR", rpcTimeoutMs),
+    readContract(client, token, TOKEN_READS, "name", rpcTimeoutMs),
+    readContract(client, token, TOKEN_READS, "version", rpcTimeoutMs),
+    readContract(client, token, TOKEN_READS, "DOMAIN_SEPARATOR", rpcTimeoutMs),
+  ]);
+  return { deployedBytecode, usdc, quoteSigner, gavelRecipient, gavelFeeAmount: String(gavelFeeAmount),
+    domainSeparator, tokenName, tokenVersion, tokenDomainSeparator };
+}
+
+function assertOnchainDeployment(attestation, deployment, config) {
+  try {
+    if (!attestation || typeof attestation !== "object" || Array.isArray(attestation)
+        || typeof attestation.deployedBytecode !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(attestation.deployedBytecode)
+        || keccak256(attestation.deployedBytecode).toLowerCase() !== deployment.contractCodeHash.toLowerCase()
+        || !sameAddress(attestation.usdc, deployment.token)
+        || !sameAddress(attestation.quoteSigner, deployment.signer)
+        || !sameAddress(attestation.gavelRecipient, deployment.gavelRecipient)
+        || String(attestation.gavelFeeAmount) !== "250000"
+        || typeof attestation.tokenName !== "string" || attestation.tokenName.length === 0
+        || typeof attestation.tokenVersion !== "string" || attestation.tokenVersion.length === 0) throw new Error("mismatch");
+    const splitterDomain = TypedDataEncoder.hashDomain({
+      name: "GavelGateSplitter", version: "1", chainId: config.chainId, verifyingContract: config.splitter,
+    });
+    const tokenDomain = TypedDataEncoder.hashDomain({
+      name: attestation.tokenName, version: attestation.tokenVersion,
+      chainId: config.chainId, verifyingContract: config.token,
+    });
+    if (!BYTES32.test(attestation.domainSeparator) || attestation.domainSeparator.toLowerCase() !== splitterDomain.toLowerCase()
+        || !BYTES32.test(attestation.tokenDomainSeparator)
+        || attestation.tokenDomainSeparator.toLowerCase() !== tokenDomain.toLowerCase()
+        || (config.environment === "production"
+          && (attestation.tokenName !== "USD Coin" || attestation.tokenVersion !== "2"))) throw new Error("mismatch");
+  } catch {
+    throw new Error("onchain deployment attestation does not match the authoritative deployment");
+  }
+}
+
 function settlementRuntimeConfigFromEnv(env = process.env) {
   const configured = SETTLEMENT_CONFIG_KEYS.some((key) => env[key] !== undefined && env[key] !== "");
   if (!configured) return null;
@@ -34,8 +206,38 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
     throw new TypeError("GAVEL_GATE_SPLITTER is required when settlement is configured");
   }
   if (!ADDRESS.test(env.GAVEL_GATE_SPLITTER)) throw new TypeError("GAVEL_GATE_SPLITTER must be an Ethereum address");
+  const environment = env.GAVEL_GATE_ENVIRONMENT;
+  const token = env.GAVEL_GATE_BASE_USDC;
+  if (typeof environment !== "string" || !environment) {
+    throw new TypeError("GAVEL_GATE_ENVIRONMENT is required when settlement is configured");
+  }
+  if (!new Set(["production", "test"]).has(environment)) {
+    throw new TypeError("GAVEL_GATE_ENVIRONMENT must be exactly production or test");
+  }
+  if (typeof token !== "string" || !ADDRESS.test(token)) {
+    throw new TypeError("GAVEL_GATE_BASE_USDC must be an Ethereum address");
+  }
+  if (environment === "production" && token.toLowerCase() !== PRODUCTION_BASE_USDC) {
+    throw new TypeError("production settlement environment requires canonical Base native USDC");
+  }
+  if (environment === "production" && Object.hasOwn(env, "GAVEL_GATE_TEST_TOKEN_LABEL")) {
+    throw new TypeError("production settlement environment requires the test token label to be unset");
+  }
+  if (environment === "test" && (typeof env.GAVEL_GATE_TEST_TOKEN_LABEL !== "string"
+      || env.GAVEL_GATE_TEST_TOKEN_LABEL.trim() === "")) {
+    throw new TypeError("test token label GAVEL_GATE_TEST_TOKEN_LABEL is required");
+  }
+  for (const name of ["GAVEL_GATE_QUOTE_SIGNER_ADDRESS", "GAVEL_GATE_OWNER_RECIPIENT"]) {
+    if (!validAddress(env[name])) throw new TypeError(`${name} must be an Ethereum address`);
+  }
   const chainId = String(env.GAVEL_GATE_BASE_CHAIN_ID ?? "8453");
   if (!DECIMAL.test(chainId)) throw new TypeError("GAVEL_GATE_BASE_CHAIN_ID must be a positive decimal integer");
+  if (environment === "production" && chainId !== "8453") {
+    throw new TypeError("production settlement environment requires Base mainnet chain 8453");
+  }
+  if (environment === "test" && chainId !== "84532") {
+    throw new TypeError("test settlement environment requires Base Sepolia chain 84532");
+  }
   const overlap = positive(env.GAVEL_GATE_REORG_OVERLAP_BLOCKS, "GAVEL_GATE_REORG_OVERLAP_BLOCKS", 64);
   const maxBlockRange = positive(env.GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE,
     "GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE", 5_000);
@@ -47,12 +249,23 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   if (notificationLeaseMs > 3_600_000) throw new TypeError("GAVEL_GATE_NOTIFICATION_LEASE_MS must not exceed 3600000");
   const confirmationDepth = positive(env.GAVEL_GATE_CONFIRMATION_DEPTH, "GAVEL_GATE_CONFIRMATION_DEPTH", 1);
   if (confirmationDepth !== 1) throw new TypeError("GAVEL_GATE_CONFIRMATION_DEPTH must be exactly 1 for the MVP");
+  const monitorConfirmations = positive(env.GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS,
+    "GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS", 64);
+  if (monitorConfirmations !== 64) {
+    throw new TypeError("GAVEL_GATE_REORG_MONITOR_CONFIRMATIONS must be exactly 64 for the MVP");
+  }
   const rpcTimeoutMs = positive(env.GAVEL_GATE_BASE_RPC_TIMEOUT_MS, "GAVEL_GATE_BASE_RPC_TIMEOUT_MS", 10_000);
   if (rpcTimeoutMs > 60_000) throw new TypeError("GAVEL_GATE_BASE_RPC_TIMEOUT_MS must not exceed 60000");
   return Object.freeze({
+    environment,
     chainId,
+    token: token.toLowerCase(),
+    ...(environment === "test" ? { testTokenLabel: env.GAVEL_GATE_TEST_TOKEN_LABEL } : {}),
     splitter: env.GAVEL_GATE_SPLITTER.toLowerCase(),
+    quoteSigner: env.GAVEL_GATE_QUOTE_SIGNER_ADDRESS.toLowerCase(),
+    gavelRecipient: env.GAVEL_GATE_OWNER_RECIPIENT.toLowerCase(),
     confirmationDepth,
+    monitorConfirmations,
     overlap,
     maxBlockRange,
     pollIntervalMs: positive(env.GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS, "GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS", 5_000),
@@ -61,12 +274,22 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   });
 }
 
-function createGateServerRuntime(options = {}) {
-  const config = settlementRuntimeConfigFromEnv(options.env ?? process.env);
+async function createGateServerRuntime(options = {}) {
+  const env = options.env ?? process.env;
+  const config = settlementRuntimeConfigFromEnv(env);
+  const notifierConfig = notifierRuntimeConfigFromEnv(env);
+  if (notifierConfig.mode === "agentmail" && !config) {
+    throw new TypeError("AgentMail notifier mode requires configured settlement runtime");
+  }
+  if (notifierConfig.mode === "disabled" && options.notificationProvider !== undefined) {
+    throw new TypeError("disabled notifier mode cannot include a notification provider");
+  }
+  if (notifierConfig.mode === "agentmail" && options.notificationProvider !== undefined) {
+    throw new TypeError("AgentMail notifier mode cannot include an injected notification provider");
+  }
   const factories = {
     createBaseSettlementAdapter,
     createSettlementService,
-    createNotificationWorker,
     createGateHttpServer,
     ...options.factories,
   };
@@ -77,10 +300,16 @@ function createGateServerRuntime(options = {}) {
   };
   const onError = options.onError ?? (() => {});
   if (typeof onError !== "function") throw new TypeError("onError must be a function");
+  const observability = options.observability;
+  if (observability !== undefined && typeof observability?.observeWorkerResult !== "function") {
+    throw new TypeError("observability.observeWorkerResult must be a function");
+  }
 
   let adapter = null;
   let settlementService = null;
   let notificationWorker = null;
+  let notificationProvider = options.notificationProvider;
+  let profileService = options.profileService;
   const jobs = [];
 
   if (config) {
@@ -89,9 +318,29 @@ function createGateServerRuntime(options = {}) {
     if (!options.baseClient || typeof options.baseClient !== "object") throw new TypeError("baseClient is required for configured settlement");
     if (typeof options.lifecycleReader !== "function") throw new TypeError("lifecycleReader is required for configured settlement");
     if (typeof options.operatorAlert !== "function") throw new TypeError("operatorAlert is required for configured settlement");
-    if (options.notificationProvider !== undefined && typeof options.notificationProvider !== "function") {
+    if (typeof options.store.getDeployment !== "function") throw new TypeError("store.getDeployment is required for configured settlement");
+    if (typeof options.baseClient.getChainId !== "function") throw new TypeError("baseClient.getChainId is required for configured settlement");
+    if (notificationProvider !== undefined && typeof notificationProvider !== "function") {
       throw new TypeError("notificationProvider must be a function");
     }
+    const deployment = await boundedRpc(
+      () => options.store.getDeployment({ chainId: config.chainId, splitter: config.splitter }),
+      config.rpcTimeoutMs, "deployment registry read");
+    if (!authoritativeDeploymentMatches(deployment, config)) {
+      throw new Error("authoritative deployment identity does not match settlement configuration");
+    }
+    if (!submissionIdentityMatches(options.submissionService, deployment)) {
+      throw new Error("submission service does not match the authoritative deployment identity");
+    }
+    const rpcChain = BigInt(await boundedRpc(() => options.baseClient.getChainId(), config.rpcTimeoutMs, "getChainId")).toString();
+    if (rpcChain !== config.chainId) {
+      throw new Error(`RPC chain ${rpcChain} does not match configured chain ${config.chainId}`);
+    }
+    const attestation = await readOnchainDeployment({
+      client: options.baseClient, chainId: config.chainId, splitter: config.splitter, token: config.token,
+      rpcTimeoutMs: config.rpcTimeoutMs,
+    });
+    assertOnchainDeployment(attestation, deployment, config);
     adapter = factories.createBaseSettlementAdapter({
       client: options.baseClient,
       chainId: config.chainId,
@@ -106,33 +355,79 @@ function createGateServerRuntime(options = {}) {
       adapter,
       lifecycleReader: options.lifecycleReader,
       operatorAlert: options.operatorAlert,
+      monitorConfirmations: config.monitorConfirmations,
     });
-    jobs.push(() => options.store.markExpired(), settlementService.scanOnce,
-      settlementService.reconcileSubmitted, settlementService.monitorOnce);
-    if (options.notificationProvider) {
-      notificationWorker = factories.createNotificationWorker({
-        store: options.store, provider: options.notificationProvider, leaseMs: config.notificationLeaseMs,
+    const observedJob = (name, job) => async () => {
+      const result = await job();
+      try { observability?.observeWorkerResult(name, result); } catch {}
+      return result;
+    };
+    jobs.push(observedJob("expire", () => options.store.markExpired()),
+      observedJob("scan", settlementService.scanOnce),
+      observedJob("reconcile", settlementService.reconcileSubmitted),
+      observedJob("monitor", settlementService.monitorOnce));
+    if (notifierConfig.mode === "agentmail") {
+      const { encryptDestination, resolveDestination: decryptDestination } = createDeliverySettingsCipher({
+        encodedKey: notifierConfig.encryptionKey,
       });
-      jobs.push(notificationWorker.runOnce);
+      if (typeof encryptDestination !== "function" || typeof decryptDestination !== "function"
+          || typeof profileService?.withDestinationEncryption !== "function") {
+        throw new TypeError("profile service destination encryption binding is required in AgentMail mode");
+      }
+      const probeProfileId = "gavel-gate-notifier-startup-probe";
+      const probeDestination = "notifier-probe@example.invalid";
+      const probeEnvelope = await encryptDestination(probeProfileId, probeDestination);
+      if (await decryptDestination(probeProfileId, probeEnvelope) !== probeDestination) {
+        throw new TypeError("delivery settings cipher startup round trip failed");
+      }
+      profileService = profileService.withDestinationEncryption(encryptDestination);
+      const send = createAgentMailSender({
+        apiUrl: notifierConfig.apiUrl,
+        apiKey: notifierConfig.apiKey,
+        fromInbox: notifierConfig.fromInbox,
+      });
+      const sink = options.notifierLogger;
+      const logger = Object.freeze({
+        error(message) {
+          const redacted = /^source=email_notifier code=[A-Z0-9_]{1,64}$/.test(String(message))
+            ? String(message) : "source=email_notifier code=REDACTED";
+          try { sink?.error?.(redacted); } catch {}
+        },
+      });
+      notificationProvider = createEmailNotifier({
+        send,
+        resolveDestination: (destinationRef, profileId) => decryptDestination(profileId, destinationRef),
+        logger,
+      });
+    }
+    if (notificationProvider) {
+      notificationWorker = createNotificationWorker({
+        store: options.store, provider: notificationProvider, leaseMs: config.notificationLeaseMs,
+        operatorAlert: options.operatorAlert,
+      });
+      jobs.push(observedJob("notification", notificationWorker.runOnce));
     }
   }
 
   const httpOptions = {
     authService: options.authService,
-    profileService: options.profileService,
-    ...(options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
+    profileService,
+    ...(!config || options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
     ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
+    ...(observability ? { observability } : {}),
   };
   const server = factories.createGateHttpServer(httpOptions);
   const timers = [];
-  const running = new Set();
+  const running = new Map();
+  let stopping = false;
 
   async function invoke(job) {
-    if (running.has(job)) return undefined;
-    running.add(job);
-    try { return await job(); }
-    finally { running.delete(job); }
+    if (stopping || running.has(job)) return undefined;
+    const execution = Promise.resolve().then(job);
+    running.set(job, execution);
+    try { return await execution; }
+    finally { if (running.get(job) === execution) running.delete(job); }
   }
 
   function start() {
@@ -144,8 +439,12 @@ function createGateServerRuntime(options = {}) {
     }
   }
 
-  function stop() {
+  async function stop() {
+    stopping = true;
     while (timers.length) scheduler.clearInterval(timers.shift());
+    const results = await Promise.allSettled([...running.values()]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   return Object.freeze({
@@ -154,11 +453,12 @@ function createGateServerRuntime(options = {}) {
     adapter,
     settlementService,
     notificationWorker,
-    notificationProvider: options.notificationProvider,
+    notificationProvider,
     runOnce: () => Promise.all(jobs.map(invoke)),
     start,
     stop,
   });
 }
 
-module.exports = { createGateServerRuntime, settlementRuntimeConfigFromEnv };
+module.exports = { createGateServerRuntime, notifierRuntimeConfigFromEnv, readOnchainDeployment,
+  settlementRuntimeConfigFromEnv };

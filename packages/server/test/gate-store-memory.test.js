@@ -37,7 +37,8 @@ async function setupStore(options = {}) {
   ]);
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+    config: { environment: "production" }, rpcAccess: {}, issuanceActive: true,
   });
   return store;
 }
@@ -262,17 +263,44 @@ test("profiles, policies, deployments, and issuance enforce canonical protocol i
     const deployment = {
       id: "old", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token,
       gavelRecipient: ADDR.payer2,
-      contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: false,
+      contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+      config: { environment: "production" }, rpcAccess: {}, issuanceActive: false,
     };
     await store.configureDeployment(deployment);
     const historical = await store.configureDeployment({
       ...deployment, id: "older", splitter: ADDR.payer1, deploymentBlock: "1", nextBlock: "1",
     });
     historical.config.mutated = true;
-    assert.deepEqual((await store.configureDeployment({ ...deployment, nextBlock: "2", config: { overlap: 64 } })).config, { overlap: 64 });
+    assert.deepEqual((await store.configureDeployment({ ...deployment, nextBlock: "2",
+      config: { environment: "production", overlap: 64 } })).config, { environment: "production", overlap: 64 });
     await assert.rejects(store.configureDeployment({ ...deployment, splitter: ADDR.payer2 }), /immutable deployment identity/);
+    await assert.rejects(store.configureDeployment({ ...deployment,
+      config: { environment: "production", testTokenLabel: "" } }), /deployment environment/);
     await store.configureDeployment({ ...deployment, id: "active", splitter: ADDR.wallet2, issuanceActive: true });
     await assert.rejects(store.configureDeployment({ ...deployment, id: "active-2", splitter: ADDR.wallet1, issuanceActive: true }), /one active/);
+  });
+
+  await t.test("closes deployment environment identity for active and inactive history", async () => {
+    const store = new MemoryGateStore();
+    const base = {
+      id: "deployment", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token,
+      gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+      rpcAccess: {}, issuanceActive: false,
+    };
+    for (const [name, patch] of [
+      ["missing environment", { config: {} }],
+      ["unknown chain", { chainId: "1", config: { environment: "production" } }],
+      ["cross environment", { config: { environment: "test", testTokenLabel: "test-token" } }],
+      ["production token", { token: ADDR.wallet2, config: { environment: "production" } }],
+      ["production label", { config: { environment: "production", testTokenLabel: "test-token" } }],
+      ["production empty label", { config: { environment: "production", testTokenLabel: "" } }],
+      ["production null label", { config: { environment: "production", testTokenLabel: null } }],
+    ]) {
+      await assert.rejects(store.configureDeployment({ ...base, ...patch }), /deployment environment/i, name);
+    }
+    const testDeployment = await store.configureDeployment({ ...base, id: "test", chainId: "84532",
+      token: ADDR.wallet2, config: { environment: "test", testTokenLabel: "base-sepolia-test-token" } });
+    assert.equal(testDeployment.config.environment, "test");
   });
 
   await t.test("requires exact quote constants, bindings, lifecycle values, wallet voter, and bytes32 IDs", async (validationT) => {
@@ -361,6 +389,10 @@ test("settlement resolves public quoteId, verifies every event binding and scann
 test("PR6 memory store persists owner-bound settlement hints and exposes only private settlement material", async () => {
   let now = new Date("2026-01-01T00:01:00.000Z");
   const store = await setupStore({ clock: () => now });
+  const envelope = "gg1.primary.AAAAAAAAAAAAAAAA.ciphertext.AAAAAAAAAAAAAAAAAAAAAA";
+  await store.withProfileTransaction(ADDR.wallet1, async (transaction) => {
+    await transaction.setDeliverySetting("profile-1", envelope);
+  });
   const quoteId = hash("2");
   const issued = await store.issue(issuance("pr6-hint", { quoteId, submissionHash: hash("3") }));
   assert.equal(await store.recordSettlementHint({ publicId: issued.publicId, payer: ADDR.payer2,
@@ -373,11 +405,12 @@ test("PR6 memory store persists owner-bound settlement hints and exposes only pr
   }]);
   const privateQuote = await store.findSettlementQuote(quoteId);
   assert.deepEqual(Object.keys(privateQuote).sort(), ["attentionAmount", "baseChainId", "dao", "destinationRef",
-    "expiresAt", "feeAmount", "gavelRecipient", "issuanceLifecycle", "payer", "proposalId", "quoteId",
+    "expiresAt", "feeAmount", "gavelRecipient", "issuanceLifecycle", "payer", "profileId", "proposalId", "quoteId",
     "quoteVersion", "splitter", "submissionHash", "token", "trustedSummary", "voter"].sort());
   assert.deepEqual(privateQuote.trustedSummary,
     { subject: "Paid pitch ready", text: "Open your private Gate inbox." });
-  assert.equal(privateQuote.destinationRef, "profile:profile-1");
+  assert.equal(privateQuote.profileId, "profile-1");
+  assert.equal(privateQuote.destinationRef, envelope);
   now = new Date("2026-01-01T00:02:00.000Z");
   assert.equal(await store.resolveSettlementHint({ publicId: issued.publicId, txHash: hash("8"), state: "payment_required" }), true);
   assert.deepEqual(await store.listPendingSettlementHints({ limit: 10 }), []);
@@ -389,6 +422,16 @@ test("PR6 memory store persists owner-bound settlement hints and exposes only pr
   assert.equal(expired.updatedAt.toISOString(), issued.quote.expiresAt.toISOString());
   assert.equal((await store.getSubmission(issued.publicId)).state, "expired");
   assert.equal(await store.countLiabilities("profile-1"), 1000000n);
+});
+
+test("settlement lookup carries profile identity and has no plaintext destination fallback", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("no-delivery", { quoteId, submissionHash: hash("3") }));
+  const quote = await store.findSettlementQuote(quoteId);
+  assert.equal(quote.profileId, "profile-1");
+  assert.equal(quote.destinationRef, null);
+  assert.equal(JSON.stringify(quote).includes("profile:profile-1"), false);
 });
 
 test("PR6 memory store recovers durable latest exact observations and owns overlap config", async () => {
@@ -410,14 +453,68 @@ test("PR6 memory store recovers durable latest exact observations and owns overl
     [{ quoteId, settlement }]);
 });
 
+test("memory scanner reports anomaly and pre-acceptance reorg transitions only once", async () => {
+  const store = await setupStore();
+  const quoteId = hash("2");
+  await store.issue(issuance("observability-transitions", { quoteId }));
+  const at = new Date("2026-01-01T00:00:00.000Z");
+  const settlement = settlementCommand("observability-transitions", quoteId).settlement;
+  settlement.receiptBlock = "0"; settlement.receiptBlockHash = hash("9"); settlement.receiptBlockTimestamp = at;
+  const first = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("9"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("9"), parentHash: hash("8"), blockTimestamp: at }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: at, exactMatch: true, details: { settlement } },
+    { kind: "anomaly", quoteId: null, txHash: hash("7"), logIndex: 1, blockNumber: "0",
+      blockHash: hash("9"), blockTimestamp: at, exactMatch: false, details: { code: "UNKNOWN_QUOTE" } }] });
+  assert.equal(first.unknownQuotes, 1);
+  const second = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "2", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("6"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("6"), parentHash: hash("5"), blockTimestamp: at }],
+    observations: [{ kind: "anomaly", quoteId: null, txHash: hash("7"), logIndex: 1, blockNumber: "0",
+      blockHash: hash("6"), blockTimestamp: at, exactMatch: false, details: { code: "UNKNOWN_QUOTE" } }] });
+  assert.equal(Object.hasOwn(second, "unknownQuotes"), false);
+  assert.equal(second.preAcceptanceReorged, 1);
+  const third = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "3", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("4"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("4"), parentHash: hash("3"), blockTimestamp: at }], observations: [] });
+  assert.equal(Object.hasOwn(third, "preAcceptanceReorged"), false);
+  await store.recordScannerRange({ deploymentId: "deployment-1", generation: "4", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("2"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("2"), parentHash: hash("1"), blockTimestamp: at }],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("2"), blockTimestamp: at, exactMatch: true,
+      details: { settlement: { ...settlement, receiptBlockHash: hash("2") } } }] });
+  const repeated = await store.recordScannerRange({ deploymentId: "deployment-1", generation: "5", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("0"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("0"), parentHash: hash("f"), blockTimestamp: at }], observations: [] });
+  assert.equal(Object.hasOwn(repeated, "preAcceptanceReorged"), false,
+    "a reappearing exact log must not make the same pre-acceptance reorg count twice");
+});
+
 test("Memory deployment ignores a caller-provided later cursor and starts exactly at deployment block", async () => {
   const store = new MemoryGateStore();
   await store.configureDeployment({ id: "cursor-pin", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
     token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "10", nextBlock: "1000",
-    config: { overlap: 64 }, rpcAccess: {}, issuanceActive: true });
+    config: { environment: "production", overlap: 64 }, rpcAccess: {}, issuanceActive: true });
   assert.deepEqual(await store.getScannerState({ chainId: "8453", splitter: ADDR.splitter }), {
     deploymentId: "cursor-pin", deploymentBlock: "10", nextRangeFrom: "10", generation: "0", overlap: 64,
   });
+});
+
+test("Memory deployment lookup returns the exact persisted registry tuple by chain and splitter", async () => {
+  const store = await setupStore();
+  const row = await store.getDeployment({ chainId: "8453", splitter: ADDR.splitter.toUpperCase().replace("0X", "0x") });
+  assert.deepEqual({
+    id: row.id, chainId: row.chainId, splitter: row.splitter, signer: row.signer, token: row.token,
+    gavelRecipient: row.gavelRecipient, contractCodeHash: row.contractCodeHash, config: row.config,
+  }, {
+    id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer, token: ADDR.token.toLowerCase(),
+    gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), config: { environment: "production", overlap: 64 },
+  });
+  row.config.environment = "test";
+  assert.equal((await store.getDeployment({ chainId: "8453", splitter: ADDR.splitter })).config.environment, "production");
+  assert.equal(await store.getDeployment({ chainId: "8453", splitter: ADDR.wallet2 }), null);
 });
 
 test("PR6 memory scanner atomically releases expiry-pending reservations after complete no-match coverage", async () => {
@@ -497,7 +594,9 @@ test("PR6 memory worker claims only due monitors, advances schedule durably, and
     nextCheckBlock: null, completed: true, reorged: false }), true);
   assert.deepEqual(await store.claimSettlementMonitors({ chainId: "8453", splitter: ADDR.splitter, headBlock: "999", limit: 5 }), []);
   const jobs = await store.claimNotificationAttempts({ limit: 5, now });
-  assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0, destinationRef: "vault:ciphertext",
+  assert.deepEqual(jobs, [{ id: "notification-pr6-worker", claimToken: "1", retryCount: 0,
+    firstAttemptAt: now, dedupeDeadline: new Date(now.valueOf() + 24 * 60 * 60 * 1000), profileId: "profile-1",
+    destinationRef: "vault:ciphertext",
     summary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } }]);
   assert.deepEqual(await store.claimNotificationAttempts({ limit: 5, now }), []);
   const retryAt = new Date("2026-01-01T00:07:00.000Z");
@@ -512,6 +611,26 @@ test("PR6 memory worker claims only due monitors, advances schedule durably, and
   assert.equal((await store.counts()).notifications, 1);
 });
 
+test("memory notification reconciliation is terminal and preserves the first-attempt dedupe deadline", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("8");
+  await store.issue(issuance("manual-reconciliation", { quoteId, submissionHash: hash("9") }));
+  await store.settle(settlementCommand("manual-reconciliation", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("9") } },
+  }));
+  const first = (await store.claimNotificationAttempts({ now }))[0];
+  assert.equal(first.firstAttemptAt.toISOString(), "2026-01-01T00:06:00.000Z");
+  assert.equal(first.dedupeDeadline.toISOString(), "2026-01-02T00:06:00.000Z");
+  assert.equal(await store.reconcileNotification({ id: first.id, claimToken: first.claimToken,
+    errorCode: "PROVIDER_IDEMPOTENCY_CONFLICT" }), true);
+  now = new Date("2026-01-01T00:07:00.000Z");
+  assert.deepEqual(await store.claimNotificationAttempts({ now }), []);
+  assert.equal(await store.completeNotification({ id: first.id, claimToken: first.claimToken,
+    providerOpaqueId: "must-not-send" }), false);
+  await assert.rejects(store.updateNotification(first.id, { status: "pending" }), /manual reconciliation.*terminal/i);
+});
+
 test("notification completions require the current unexpired claim and retries return to pending", async () => {
   let now = new Date("2026-01-01T00:06:00.000Z");
   const store = await setupStore({ clock: () => now });
@@ -520,9 +639,9 @@ test("notification completions require the current unexpired claim and retries r
   await store.settle(settlementCommand("claim-owner", quoteId, {
     settlement: { event: { quoteId, submissionHash: hash("7") } },
   }));
-  const first = (await store.claimNotificationAttempts({ now }))[0];
+  const first = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   now = new Date("2026-01-01T00:06:31.000Z");
-  const second = (await store.claimNotificationAttempts({ now }))[0];
+  const second = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   assert.notEqual(second.claimToken, first.claimToken);
   assert.equal(await store.completeNotification({ id: first.id, claimToken: first.claimToken, providerOpaqueId: "stale" }), false);
   assert.equal(await store.failNotification({ id: first.id, claimToken: first.claimToken, errorCode: "STALE",
@@ -530,8 +649,24 @@ test("notification completions require the current unexpired claim and retries r
   assert.equal(await store.failNotification({ id: second.id, claimToken: second.claimToken, errorCode: "TEMP",
     nextAttemptAt: new Date("2026-01-01T00:07:00.000Z") }), true);
   now = new Date("2026-01-01T00:07:00.000Z");
-  const retry = (await store.claimNotificationAttempts({ now }))[0];
+  const retry = (await store.claimNotificationAttempts({ now, leaseMs: 30_000 }))[0];
   assert.equal(await store.completeNotification({ id: retry.id, claimToken: retry.claimToken, providerOpaqueId: "sent" }), true);
+});
+
+test("memory notification claims honor the requested lease duration", async () => {
+  let now = new Date("2026-01-01T00:06:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("a");
+  await store.issue(issuance("notification-lease", { quoteId, submissionHash: hash("b") }));
+  await store.settle(settlementCommand("notification-lease", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("b") } },
+  }));
+  const first = (await store.claimNotificationAttempts({ now, leaseMs: 120_000 }))[0];
+  now = new Date("2026-01-01T00:07:00.000Z");
+  assert.deepEqual(await store.claimNotificationAttempts({ now, leaseMs: 120_000 }), []);
+  now = new Date("2026-01-01T00:08:01.000Z");
+  const reclaimed = (await store.claimNotificationAttempts({ now, leaseMs: 120_000 }))[0];
+  assert.notEqual(reclaimed.claimToken, first.claimToken);
 });
 
 test("expiry updates public submission state and release requires cursor-authorized complete canonical coverage", async () => {
@@ -541,7 +676,8 @@ test("expiry updates public submission state and release requires cursor-authori
   const issued = await store.issue(issuance("expiry", { quoteId: publicQuoteId, expiresAt: new Date("2026-01-01T00:10:00.000Z") }));
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "2", config: { overlap: 64 }, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "2",
+    config: { environment: "production", overlap: 64 }, rpcAccess: {}, issuanceActive: true,
   });
   now = new Date("2026-01-01T00:10:01.000Z");
   assert.equal(await store.markExpired(now), 1);
@@ -661,8 +797,11 @@ test("settlement accepts only the frozen QuoteSettled event and enqueues pending
   const failedJob = settlementCommand("failed-job", quoteId, {
     settlement: { event: { quoteId, submissionHash: hash("6") } }, notification: { status: "failed" },
   });
-  await assert.rejects(store.settle(failedJob), /initially be pending/);
-  assert.equal((await store.counts()).inboxItems, 0);
+  assert.equal((await store.settle(failedJob)).settled, true);
+  assert.deepEqual(await store.counts(),
+    { snapshots: 1, submissions: 1, quotes: 1, reservations: 1, inboxItems: 1, notifications: 0, monitors: 1 });
+  assert.equal(await store.settle(failedJob), false,
+    "replaying a settlement whose optional notification was omitted must be idempotent");
 });
 
 test("settlement lifecycle fields use one vocabulary and exact availability semantics", async () => {
@@ -796,7 +935,8 @@ test("memory policies enforce the shared pending-to-settled relationship and iss
   }
   await store.configureDeployment({
     id: "deployment-1", chainId: "8453", splitter: ADDR.splitter, signer: ADDR.signer,
-    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0", config: {}, rpcAccess: {}, issuanceActive: true,
+    token: ADDR.token, gavelRecipient: ADDR.payer2, contractCodeHash: hash("e"), deploymentBlock: "0", nextBlock: "0",
+    config: { environment: "production" }, rpcAccess: {}, issuanceActive: true,
   });
   await store.issue(issuance("persisted-cap-1", { payer: addr(701), quoteId: hex32(701), submissionHash: hex32(801) }));
   await store.issue(issuance("persisted-cap-2", { payer: addr(702), quoteId: hex32(702), submissionHash: hex32(802) }));
