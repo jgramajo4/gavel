@@ -87,10 +87,10 @@ test("Postgres store uses a parameterized profile advisory lock and rolls back f
     async query(sql, values) {
       calls.push({ sql: String(sql), values });
       if (/INSERT INTO gate\.proposal_snapshots/.test(sql)) throw new Error("injected insert failure");
-      if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ wallet: `0x${"a".repeat(40)}`, wallet_kind: "eoa",
-        availability: "accepting_now", profile_version: "1", base_payout_code_hash: null }], rowCount: 1 };
-      if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000",
-        accept_pre_vote: false, accept_voting: true, pending_reservation_capacity: 12, settled_capacity: 25 }], rowCount: 1 };
+      if (/gate\.lock_issuance_profile_policy/.test(sql)) return { rows: [{ wallet: `0x${"a".repeat(40)}`, walletKind: "eoa",
+        availability: "accepting_now", profileVersion: "1", basePayoutCodeHash: null, enabled: true, chainId: "1",
+        attentionAmount: "1000000", acceptPreVote: false, acceptVoting: true,
+        pendingReservationCapacity: 12, settledCapacity: 25 }], rowCount: 1 };
       if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [{ issuance_active: true, chain_id: "8453",
         splitter: `0x${"a".repeat(40)}`, token: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
         contract_code_hash: `0x${"1".repeat(64)}`, config: { environment: "production" } }], rowCount: 1 };
