@@ -19,7 +19,7 @@ const hash = (digit) => `0x${digit.repeat(64)}`;
 const SIGNER_KEY = `0x${"7".repeat(64)}`;
 const OWNER_TOKEN = "owner-session";
 const OTHER_TOKEN = "other-session";
-const FORBIDDEN = /notification|destination|capacity|signature|session|nonce|ciphertext|provider|ip address|quoteSigner|retry/i;
+const FORBIDDEN = /notification|destination|capacity|quoteSignature|session|nonce|ciphertext|provider|ip address|quoteSigner|retry/i;
 
 function gateSigner() {
   return createQuoteSigner({ signer: SIGNER_KEY, chainId: 8453, splitter: ADDR.splitter });
@@ -59,7 +59,9 @@ function issuance(suffix, { profileId = "profile-1", voter = ADDR.wallet1, payer
       sourceBlock: "100", sourceBlockHash: hash("d"), refreshedAt: new Date("2026-01-01T00:00:00.000Z"),
       canonicalFacts: { dao: "nouns", proposalId: "7", nativeState: "ACTIVE" },
       decodedFacts: { decoderVersion: "1", actions: [] },
-      canonicalActions: [{ target: ADDR.token, valueWei: "0", calldata: "0xdead" }],
+      canonicalActions: [{
+        actionIndex: 0, calldata: "0xdead", signature: "", target: ADDR.token, valueWei: "0",
+      }],
     },
     submission: {
       id: `submission-${suffix}`, submissionHash, profileId, payer, signedSender: payer,

@@ -337,6 +337,17 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION gate.consume_auth_nonce(text,bigint) FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.lock_profile_auth_nonce(p_nonce_hash text)
+RETURNS SETOF gate.auth_nonces LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT n.* FROM gate.auth_nonces n
+ WHERE n.nonce_hash=p_nonce_hash
+   AND ((n.proof_type='GateEnrollment' AND n.signed_purpose='enrollment' AND n.internal_operation='mutate_profile')
+     OR (n.proof_type='BasePayoutControl' AND n.signed_purpose='base_payout_control'
+       AND n.internal_operation='verify_base_payout_control'))
+ FOR UPDATE
+$$;
+REVOKE ALL ON FUNCTION gate.lock_profile_auth_nonce(text) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION gate.insert_auth_session(
  p_token_hash text,p_wallet text,p_role gate.auth_role,p_chain_id bigint,p_audience text,p_issued_at bigint,p_expiry bigint
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
@@ -385,8 +396,24 @@ CREATE TABLE IF NOT EXISTS gate.proposal_snapshots (
 );
 ALTER TABLE gate.proposal_snapshots ADD COLUMN IF NOT EXISTS target_id text;
 ALTER TABLE gate.proposal_snapshots ADD COLUMN IF NOT EXISTS kind text;
-UPDATE gate.proposal_snapshots SET target_id='proposal:'||proposal_id::text WHERE target_id IS NULL;
-UPDATE gate.proposal_snapshots SET kind='proposal' WHERE kind IS NULL;
+DO $$
+DECLARE immutable_trigger_exists boolean;
+BEGIN
+ SELECT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+   JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='gate' AND c.relname='proposal_snapshots'
+     AND t.tgname='proposal_snapshots_immutable' AND NOT t.tgisinternal)
+ INTO immutable_trigger_exists;
+ IF immutable_trigger_exists THEN
+  ALTER TABLE gate.proposal_snapshots DISABLE TRIGGER proposal_snapshots_immutable;
+ END IF;
+ UPDATE gate.proposal_snapshots
+ SET target_id=COALESCE(target_id,'proposal:'||proposal_id::text),kind=COALESCE(kind,'proposal')
+ WHERE target_id IS NULL OR kind IS NULL;
+ IF immutable_trigger_exists THEN
+  ALTER TABLE gate.proposal_snapshots ENABLE TRIGGER proposal_snapshots_immutable;
+ END IF;
+END $$;
 ALTER TABLE gate.proposal_snapshots ALTER COLUMN target_id SET NOT NULL;
 ALTER TABLE gate.proposal_snapshots ALTER COLUMN kind SET NOT NULL;
 ALTER TABLE gate.proposal_snapshots ALTER COLUMN proposal_id DROP NOT NULL;
@@ -1332,6 +1359,7 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.lock_profile_auth_nonce(text) TO gavel_gate;
   REVOKE ALL ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) FROM gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.set_delivery_setting(text,text,text) TO gavel_gate;

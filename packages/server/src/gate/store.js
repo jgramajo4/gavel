@@ -173,8 +173,10 @@ class PostgresGateStore {
   }
 
   async #getNonceByHash(queryable, nonceHash, lock = false) {
-    const row = (await queryable.query(`SELECT ${AUTH_NONCE_COLUMNS} FROM gate.auth_nonces
-      WHERE nonce_hash=$1${lock ? " FOR UPDATE" : ""}`, [bytes32(nonceHash, "nonceHash")])).rows[0];
+    const source = lock ? "gate.lock_profile_auth_nonce($1)" : "gate.auth_nonces";
+    const where = lock ? "" : " WHERE nonce_hash=$1";
+    const row = (await queryable.query(`SELECT ${AUTH_NONCE_COLUMNS} FROM ${source}${where}`,
+      [bytes32(nonceHash, "nonceHash")])).rows[0];
     return row ? clone(row) : null;
   }
 
@@ -267,7 +269,7 @@ class PostgresGateStore {
       return callback(Object.freeze({
         getNonceByHash: (nonceHash) => this.#getNonceByHash(client, nonceHash, true),
         consumeNonce: auth.consumeNonce,
-        getProfileByWallet: (value) => this.#getProfileByWallet(client, value, true),
+        getProfileByWallet: (value) => this.#getProfileByWallet(client, value),
         mutateProfile: (input) => {
           invariant(address(input?.profile?.wallet, "profile wallet") === canonicalWallet,
             "profile transaction wallet mismatch");
