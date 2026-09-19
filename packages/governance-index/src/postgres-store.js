@@ -15,6 +15,7 @@ const { PROVISIONED_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissi
 const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
 const { canonicalGateActions } = require("./gate-action");
+const { canonicalCandidateTarget } = require("./candidate-target");
 
 // A WARM proposal (succeeded, queued) can still change, but not on the cadence a
 // live vote does. Re-reading it once a quarter hour is enough and keeps a steady
@@ -145,6 +146,21 @@ class PostgresTransaction {
     }
   }
 
+  async upsertTarget(row) {
+    row = canonicalCandidateTarget(row);
+    await this.client.query(`
+      INSERT INTO governance_targets(dao_id,target_id,kind,proposer,slug,title,description,native_state,eligibility,mapping_version,content_hash,actions,latest_version,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+      ON CONFLICT(dao_id,target_id) DO UPDATE SET
+        proposer=excluded.proposer,slug=excluded.slug,title=excluded.title,description=excluded.description,
+        native_state=excluded.native_state,eligibility=excluded.eligibility,
+        mapping_version=excluded.mapping_version,content_hash=excluded.content_hash,actions=excluded.actions,
+        latest_version=excluded.latest_version,updated_at=now()
+    `, [row.dao, row.targetId, row.kind, row.proposer, row.slug, row.title, row.description,
+      row.nativeState, row.eligibility, row.mappingVersion, String(row.contentHash).replace(/^0x/, ""),
+      JSON.stringify(row.actions), JSON.stringify(row.latestVersion)]);
+  }
+
   async insertVote(row) {
     const safeRow = sanitizeProvenance(row);
     const result = await this.client.query(`
@@ -183,6 +199,32 @@ class PostgresTransaction {
   async ingest(record) {
     const raw = rawRow(record);
     let result;
+    if (raw.recordType === "proposal_candidate" && raw.sourceRecordKey) {
+      await this.client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `${raw.daoId}:${raw.sourceId}:${raw.sourceRecordKey}`,
+      ]);
+      const existing = (await this.client.query(`
+        SELECT block_number AS "blockNumber",observed_head AS "observedHead",block_hash AS "blockHash",
+          record_type AS "recordType",proposal_id::text AS "proposalId",content_hash AS "contentHash",payload
+        FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+      `, [raw.daoId, raw.sourceId, raw.sourceRecordKey])).rows[0];
+      if (existing) {
+        if (String(existing.blockNumber) === String(raw.blockNumber)
+            && (existing.blockHash || null) === (raw.blockHash || null)
+            && !isDeepStrictEqual(immutableEventMaterial(existing), immutableEventMaterial(raw))) {
+          throw new Error(`canonical candidate drift for ${eventKey(raw)}`);
+        }
+        const refreshed = await this.client.query(`
+          UPDATE raw_governance_records SET block_number=$4,block_hash=$5,observed_head=$6,
+            content_hash=$7,payload=$8,transaction_hash=$9,log_index=$10,ingested_at=now()
+          WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3
+            AND block_number<=$4 AND observed_head<=$6
+        `, [raw.daoId, raw.sourceId, raw.sourceRecordKey, raw.blockNumber, raw.blockHash, raw.observedHead,
+          raw.contentHash, raw.payload, raw.transactionHash, raw.logIndex]);
+        if (refreshed.rowCount === 0) return false;
+        result = { rowCount: 0 };
+      }
+    }
     if (raw.recordType === "proposal" && raw.sourceRecordKey) {
       // Serialize the first insert as well as refreshes for this canonical key.
       // The lock is transaction-scoped, so normalized state can only be written
@@ -228,6 +270,7 @@ class PostgresTransaction {
     // was already indexed, so a vote dropped by an earlier partial write is
     // repaired by re-running the sync instead of being lost permanently.
     if (record.proposal) await this.upsertProposal(record.proposal);
+    if (record.target) await this.upsertTarget(record.target);
     if (record.vote) await this.insertVote(record.vote);
     if (record.delegation) await this.insertDelegation(record.delegation);
     return result.rowCount > 0;
@@ -360,6 +403,24 @@ class PostgresTransaction {
       `, [daoId, row.proposalId]);
     }
   }
+
+  async reconcileCandidates({ daoId, sourceId, records }) {
+    const incoming = new Set(records.map((record) => {
+      canonicalCandidateTarget(record.target);
+      return eventKey(rawRow(record));
+    }));
+    const selected = await this.client.query(`
+      SELECT dao_id AS "daoId",source_id AS "sourceId",source_record_key AS "sourceRecordKey",
+        chain_id AS "chainId",contract_address AS "contractAddress",transaction_hash AS "transactionHash",
+        log_index AS "logIndex",block_number AS "blockNumber",record_type AS "recordType"
+      FROM raw_governance_records
+      WHERE dao_id=$1 AND source_id=$2 AND record_type='proposal_candidate' AND source_record_key IS NOT NULL
+    `, [daoId, sourceId]);
+    for (const row of selected.rows) if (!incoming.has(eventKey(row))) {
+      await this.client.query("DELETE FROM raw_governance_records WHERE dao_id=$1 AND source_id=$2 AND source_record_key=$3", [daoId, sourceId, row.sourceRecordKey]);
+      await this.client.query("DELETE FROM governance_targets WHERE dao_id=$1 AND target_id=$2", [daoId, row.sourceRecordKey]);
+    }
+  }
 }
 
 class PostgresGovernanceStore {
@@ -389,7 +450,8 @@ class PostgresGovernanceStore {
     const dir = path.join(__dirname, "..", "migrations");
     await this.pool.query(await fs.readFile(path.join(dir, "001_initial.sql"), "utf8"));
     await this.pool.query(await fs.readFile(path.join(dir, "003_proposal_lifecycle.sql"), "utf8"));
-    const versions = ["001_initial", "003_proposal_lifecycle"];
+    await this.pool.query(await fs.readFile(path.join(dir, "004_nouns_candidates.sql"), "utf8"));
+    const versions = ["001_initial", "003_proposal_lifecycle", "004_nouns_candidates"];
 
     // Role creation is idempotent and privilege-aware: on a fresh volume the
     // entrypoint script has already made the roles, on a reused volume this is
@@ -614,6 +676,30 @@ class PostgresGovernanceStore {
       contentHash: typeof row.contentHash === "string" && row.contentHash.startsWith("0x") ? row.contentHash : `0x${row.contentHash}`,
       actions: row.actions,
     };
+  }
+
+  async getGateTarget(daoId, targetId) {
+    if (String(targetId).startsWith("proposal:")) {
+      const proposal = await this.getGateProposal(daoId, String(targetId).slice(9));
+      return proposal ? { targetId, kind: "proposal", ...proposal } : null;
+    }
+    const row = (await this.pool.query(`
+      SELECT t.dao_id AS dao,t.target_id AS "targetId",t.kind,t.proposer,t.slug,t.title,t.description,
+        t.native_state AS "nativeState",
+        t.eligibility,t.mapping_version AS "mappingVersion",'0x' || t.content_hash AS "contentHash",
+        t.actions,t.latest_version AS "latestVersion",provenance.ingested_at AS "refreshedAt",
+        provenance.block_number::text AS "sourceBlock",provenance.block_hash AS "sourceBlockHash"
+      FROM governance_targets t
+      JOIN LATERAL (
+        SELECT r.block_number,r.block_hash,r.ingested_at FROM raw_governance_records r
+        WHERE r.dao_id=t.dao_id AND r.source_id='nouns-subgraph' AND r.source_record_key=t.target_id
+          AND r.record_type='proposal_candidate' AND r.content_hash=t.content_hash AND r.block_hash IS NOT NULL
+        ORDER BY r.block_number DESC,r.id DESC LIMIT 1
+      ) provenance ON true
+      WHERE t.dao_id=$1 AND t.target_id=$2
+    `, [daoId, targetId])).rows[0];
+    if (!row) return null;
+    return { ...row, refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt };
   }
 
   async getProposal(daoId, id) {

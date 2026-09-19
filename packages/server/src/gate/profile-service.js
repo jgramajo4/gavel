@@ -67,8 +67,11 @@ function publicPolicy(policy) {
   if (!policy || policy.dao !== "nouns" || policy.enabled !== true) return null;
   return {
     dao: "nouns",
-    supportedStages: ["VOTING"],
-    acceptedStages: policy.acceptVoting === true ? ["VOTING"] : [],
+    supportedStages: ["PRE_VOTE", "VOTING"],
+    acceptedStages: [
+      ...(policy.acceptPreVote === true ? ["PRE_VOTE"] : []),
+      ...(policy.acceptVoting === true ? ["VOTING"] : []),
+    ],
     attentionAmount: String(policy.attentionAmount),
     gavelFeeAmount: "250000",
     tags: Array.isArray(policy.tags) ? policy.tags.filter((tag) => typeof tag === "string") : [],
@@ -76,7 +79,8 @@ function publicPolicy(policy) {
 }
 function publicProfile(profile, policy, power) {
   const accepting = profile.availability === "accepting_now"
-    && policy?.dao === "nouns" && policy.enabled === true && policy.acceptVoting === true
+    && policy?.dao === "nouns" && policy.enabled === true
+    && (policy.acceptPreVote === true || policy.acceptVoting === true)
     && profile.acceptingSubmissions === true;
   const result = {
     wallet: address(profile.wallet, "profile wallet"),
@@ -109,7 +113,8 @@ function createProfileService({ repository, authService, indexClient, baseChainI
       suppliedPolicy || repository.getPolicy(profile.id, "nouns"),
       indexClient.getVotingPower(profile.wallet),
     ]);
-    const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true && policy.acceptVoting === true;
+    const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true
+      && (policy.acceptPreVote === true || policy.acceptVoting === true);
     let acceptingSubmissions = false;
     if (profile.availability === "accepting_now" && hasVotingPolicy
         && typeof repository.isProfileAccepting === "function") {
@@ -150,7 +155,8 @@ function createProfileService({ repository, authService, indexClient, baseChainI
               : false,
           ]);
           assertDecimal(power.amount, "governance power");
-          const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true && policy.acceptVoting === true;
+          const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true
+      && (policy.acceptPreVote === true || policy.acceptVoting === true);
           if (!hasVotingPolicy || acceptingSubmissions !== true
               || (minVotingPower !== undefined && BigInt(power.amount) < BigInt(minVotingPower))) return null;
           return {
@@ -191,7 +197,8 @@ function createProfileService({ repository, authService, indexClient, baseChainI
         throw new ProfileRequestError("profile wallet mismatch", 403, "FORBIDDEN");
       }
       if (message.purpose !== "enrollment" || message.dao !== "nouns" || String(message.daoChainId) !== "1"
-          || message.acceptPreVote !== false || message.acceptVoting !== true || String(message.version) !== "1"
+          || typeof message.acceptPreVote !== "boolean" || typeof message.acceptVoting !== "boolean"
+          || (!message.acceptPreVote && !message.acceptVoting) || String(message.version) !== "1"
           || !AVAILABILITY.has(message.availability)) throw new ProfileRequestError("GateEnrollment policy is invalid");
       assertDecimal(message.attentionAmount, "attentionAmount", 1_000_000n);
       if (deliveryDestination !== undefined) {
@@ -239,7 +246,8 @@ function createProfileService({ repository, authService, indexClient, baseChainI
           basePayoutVerifiedAt = new Date(clock()).toISOString();
         }
         const policy = {
-          dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: message.acceptVoting,
+          dao: "nouns", chainId: "1", enabled: true,
+          acceptPreVote: message.acceptPreVote, acceptVoting: message.acceptVoting,
           attentionAmount: message.attentionAmount,
           tags: Array.isArray(gateEnrollmentProof.publicTags) ? structuredClone(gateEnrollmentProof.publicTags) : [],
         };

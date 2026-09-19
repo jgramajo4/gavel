@@ -413,6 +413,19 @@ test("15. known lifecycle is read exactly once and changed iff it differs from i
     unavailable: h.state.settlement.inbox.currentLifecycleUnavailable }, { current: "CLOSED", changed: true, unavailable: false });
 });
 
+test("15a. candidate PRE_VOTE settlement records current or closed lifecycle without becoming unavailable", async () => {
+  const targetId = `candidate:${PAYER}:0x${"9".repeat(64)}`;
+  for (const [lifecycle, changed] of [["PRE_VOTE", false], ["CLOSED", true]]) {
+    const h = fakeHarness({ quote: { issuanceLifecycle: "PRE_VOTE", proposalId: undefined, targetId }, lifecycle });
+    assert.equal((await h.service.scanOnce()).accepted, 1);
+    assert.deepEqual(h.calls.find(([name]) => name === "settle")[1].inbox, {
+      id: h.calls.find(([name]) => name === "settle")[1].inbox.id,
+      issuanceLifecycle: "PRE_VOTE", currentLifecycle: lifecycle,
+      lifecycleChanged: changed, currentLifecycleUnavailable: false,
+    });
+  }
+});
+
 test("16. unavailable, timeout, stale, and UNKNOWN lifecycle never veto acceptance or retry", async () => {
   for (const options of [
     { lifecycleError: new Error("offline") },

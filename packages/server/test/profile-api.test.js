@@ -491,7 +491,7 @@ test("profile update verifies and consumes enrollment inside the shared profile 
   assert.deepEqual(result, {
     wallet: WALLET, ens: "noun.eth", availability: "accepting_now", acceptingSubmissions: true,
     message: "Reviewing public goods",
-    policies: [{ dao: "nouns", supportedStages: ["VOTING"], acceptedStages: ["VOTING"],
+    policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: ["public-goods"] }],
     governancePower: { dao: "nouns", amount: "0", asOf: "2026-09-14T00:00:00.000Z" },
   });
@@ -626,7 +626,7 @@ test("profile update returns a safe committed projection when post-commit index 
   assert.deepEqual(result, {
     wallet: WALLET, ens: "noun.eth", availability: "paused", acceptingSubmissions: false,
     message: "Not currently accepting new submissions",
-    policies: [{ dao: "nouns", supportedStages: ["VOTING"], acceptedStages: ["VOTING"],
+    policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: [] }],
   });
 });
@@ -964,7 +964,7 @@ test("public serializer cannot leak nested private objects through display field
     availability: "accepting_now",
     acceptingSubmissions: true,
     policies: [{
-      dao: "nouns", supportedStages: ["VOTING"], acceptedStages: ["VOTING"],
+      dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: ["public-goods"],
     }],
     governancePower: { dao: "nouns", amount: "1", asOf: "2026-09-14T00:00:00.000Z" },

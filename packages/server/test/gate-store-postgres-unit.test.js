@@ -93,6 +93,33 @@ test("Postgres store rejects non-canonical protocol primitives before SQL", asyn
   }
 });
 
+test("Postgres Candidate issuance rejects proposal target and AGAINST material before SQL", async () => {
+  const command = issuanceCommand();
+  command.context.stage = "PRE_VOTE";
+  command.snapshot.kind = "candidate";
+  command.snapshot.targetId = `candidate:${A}:${H("9")}`;
+  delete command.snapshot.proposalId;
+  command.snapshot.eligibility = "PRE_VOTE";
+  command.snapshot.mappingVersion = "nouns-candidate-lifecycle/1";
+  command.submission.material = { targetId: "proposal:999", stage: "PRE_VOTE", position: "AGAINST" };
+
+  await assert.rejects(noConnectStore().issue(command), /Candidate submission material/i);
+});
+
+test("Postgres issuance rejects sparse or non-canonical action collections before SQL", async () => {
+  const invalidActions = [
+    new Array(1),
+    [{ actionIndex: 1, target: A, valueWei: "0", signature: "", calldata: "0x" }],
+    [{ actionIndex: 0, target: A, valueWei: "00", signature: "", calldata: "0x" }],
+    [{ actionIndex: 0, target: A, valueWei: "0", signature: "", calldata: "0x", extra: true }],
+  ];
+  for (const canonicalActions of invalidActions) {
+    const command = issuanceCommand();
+    command.snapshot.canonicalActions = canonicalActions;
+    await assert.rejects(noConnectStore().issue(command), /canonicalActions/i);
+  }
+});
+
 test("Postgres issuance compares counts with the persisted policy capacities selected under lock", async () => {
   const calls = [];
   const client = { async query(sql) {
@@ -879,10 +906,10 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /enabled boolean NOT NULL/i);
   assert.match(sql, /current_lifecycle_unavailable boolean NOT NULL/i);
   assert.match(sql, /CREATE TYPE gate\.lifecycle AS ENUM \('PRE_VOTE','VOTING','CLOSED','UNKNOWN'\)/i);
-  assert.match(sql, /dao <> 'nouns' OR \(chain_id = 1 AND accept_pre_vote = false AND \(enabled = false OR accept_voting = true\)\)/i);
-  assert.match(sql, /mapping_version text NOT NULL CHECK\(mapping_version='nouns-lifecycle\/1'\)/i);
+  assert.match(sql, /dao <> 'nouns' OR \(chain_id = 1 AND \(enabled = false OR accept_pre_vote = true OR accept_voting = true\)\)/i);
+  assert.match(sql, /mapping_version text NOT NULL CHECK\(mapping_version IN\('nouns-lifecycle\/1','nouns-candidate-lifecycle\/1'\)\)/i);
   assert.match(sql, /ALTER COLUMN mapping_version TYPE text[\s\S]*nouns-lifecycle\/1/i);
-  assert.match(sql, /ADD CONSTRAINT proposal_snapshots_mapping_version_check\s+CHECK \(mapping_version='nouns-lifecycle\/1'\)/i);
+  assert.match(sql, /ADD CONSTRAINT proposal_snapshots_mapping_version_check\s+CHECK \(mapping_version IN\('nouns-lifecycle\/1','nouns-candidate-lifecycle\/1'\)\)/i);
   assert.match(sql, /status IN\('QUOTED','SETTLEMENT_PENDING','SETTLED','EXPIRED'\)/i);
   assert.match(sql, /retry_count integer NOT NULL DEFAULT 0/i);
   assert.match(sql, /private_unavailability_reason/i);

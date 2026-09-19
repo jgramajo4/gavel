@@ -7,7 +7,7 @@ const { QuoteExpiredError } = require("./store-errors");
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const PUBLIC_ID = /^[A-Za-z0-9_-]{22}$/;
-const KNOWN_LIFECYCLES = new Set(["VOTING", "CLOSED"]);
+const KNOWN_LIFECYCLES = new Set(["PRE_VOTE", "VOTING", "CLOSED"]);
 
 class SettlementRequestError extends Error {
   constructor(message, statusCode = 400, code = "INVALID_SETTLEMENT", state = statusCode === 400 ? "malformed" : undefined,
@@ -112,7 +112,9 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
 
   async function lifecycleFor(quote) {
     try {
-      const current = await bounded(() => lifecycleReader({ dao: quote.dao, proposalId: quote.proposalId }), lifecycleTimeoutMs);
+      const current = await bounded(() => lifecycleReader({
+        dao: quote.dao, proposalId: quote.proposalId, targetId: quote.targetId,
+      }), lifecycleTimeoutMs);
       if (!KNOWN_LIFECYCLES.has(current)) throw new Error("unknown lifecycle");
       return { issuanceLifecycle: quote.issuanceLifecycle, currentLifecycle: current,
         lifecycleChanged: current !== quote.issuanceLifecycle, currentLifecycleUnavailable: false };

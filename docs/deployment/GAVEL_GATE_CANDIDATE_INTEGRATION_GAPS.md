@@ -61,7 +61,7 @@ The source is the Nouns DAO’s on-chain `NounsDAODataProxy`, not a web page:
 - proxy: `0xf790A5f59678dd733fb3De93493A91f472ca1365`
 - indexed from Ethereum block `17812145`
 - events: `ProposalCandidateCreated`, `ProposalCandidateUpdated`, and `ProposalCandidateCanceled`
-- the official Nouns subgraph derives `ProposalCandidate`, versions, signatures, cancellation, and matching proposal IDs from those events
+- Gavel reconstructs Candidate identity, versions, cancellation, actions, and promotion directly from canonical Ethereum logs; the subgraph is not trusted for Candidate eligibility or content
 
 Primary sources pinned to Nouns monorepo commit `3779f34e4442cc62f6602bf17460ad334e0208a7`:
 
@@ -71,7 +71,7 @@ Primary sources pinned to Nouns monorepo commit `3779f34e4442cc62f6602bf17460ad3
 - [official subgraph schema](https://github.com/nounsDAO/nouns-monorepo/blob/3779f34e4442cc62f6602bf17460ad334e0208a7/packages/nouns-subgraph/schema.graphql)
 - [mainnet source configuration](https://github.com/nounsDAO/nouns-monorepo/blob/3779f34e4442cc62f6602bf17460ad334e0208a7/packages/nouns-subgraph/config/mainnet.json)
 
-The current Gavel Nouns source already queries the official-event-derived subgraph at a pinned finalized snapshot and verifies `_meta.block.number/hash`. Candidate ingestion should reuse that mechanism and persist the exact snapshot block/hash plus index ingestion time.
+The Gavel Nouns source reads `NounsDAODataProxy` and Governor logs through a mainnet-verified RPC at one finalized block, recomputes each encoded Candidate hash, and persists that exact snapshot block/hash plus index ingestion time. The official subgraph remains a useful reference implementation, not the Candidate trust boundary.
 
 ## D. Candidate identity and lifecycle contract
 

@@ -149,13 +149,14 @@ function createAuthService(options = {}) {
       if (input.role !== undefined) throw new TypeError("role is not valid for GateEnrollment");
       if (input.dao !== dao.dao || String(input.daoChainId) !== String(dao.chainId)) throw new TypeError("unsupported DAO domain");
       if (!new Set(["accepting_now", "paused", "closed"]).has(input.availability)) throw new TypeError("unsupported availability");
-      if (input.acceptPreVote !== false || typeof input.acceptVoting !== "boolean") throw new TypeError("unsupported Nouns stages");
+      if (typeof input.acceptPreVote !== "boolean" || typeof input.acceptVoting !== "boolean"
+          || (!input.acceptPreVote && !input.acceptVoting)) throw new TypeError("at least one Nouns stage (PRE_VOTE or VOTING) is required");
       if (!isCanonicalUintString(input.attentionAmount)
           || BigInt(input.attentionAmount) < 1_000_000n) throw new TypeError("invalid attention amount");
       selected = dao;
       purpose = GATE_ENROLLMENT_PURPOSE;
       messageFields = { wallet, purpose, availability: input.availability, dao: dao.dao,
-        daoChainId: String(dao.chainId), acceptPreVote: false, acceptVoting: input.acceptVoting,
+        daoChainId: String(dao.chainId), acceptPreVote: input.acceptPreVote, acceptVoting: input.acceptVoting,
         attentionAmount: String(input.attentionAmount) };
     } else {
       if (input.role !== undefined) throw new TypeError("role is not valid for BasePayoutControl");
@@ -321,7 +322,8 @@ function createAuthService(options = {}) {
     if (proofType === "GateEnrollment") {
       if (message.purpose !== GATE_ENROLLMENT_PURPOSE || message.daoChainId !== String(dao.chainId)
           || !new Set(["accepting_now", "paused", "closed"]).has(message.availability)
-          || message.acceptPreVote !== false || typeof message.acceptVoting !== "boolean"
+          || typeof message.acceptPreVote !== "boolean" || typeof message.acceptVoting !== "boolean"
+          || (!message.acceptPreVote && !message.acceptVoting)
           || !isCanonicalUintString(message.attentionAmount) || BigInt(message.attentionAmount) < 1_000_000n) {
         throw new AuthRequestError("GateEnrollment binding mismatch");
       }

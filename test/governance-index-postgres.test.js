@@ -9,6 +9,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { candidateTargetId } = require("@gavel/gate");
 
 const { PostgresGovernanceStore, PostgresTransaction } = require("../packages/governance-index/src/postgres-store");
 const { ensureRoles } = require("../packages/governance-index/src/roles");
@@ -113,12 +114,13 @@ test("migration applies against a real PostgreSQL server", { skip }, async () =>
       "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
     )).rows.map((row) => row.tablename);
     assert.deepEqual(tables, [
-      "daos", "delegation_events", "governance_sources", "proposal_actions",
+      "daos", "delegation_events", "governance_sources", "governance_targets", "proposal_actions",
       "proposals", "raw_governance_records", "schema_migrations", "sync_checkpoints", "vote_events",
     ]);
     const applied = (await store.pool.query("SELECT version FROM schema_migrations ORDER BY version")).rows.map((row) => row.version);
     assert.ok(applied.includes("001_initial"));
     assert.ok(applied.includes("003_proposal_lifecycle"));
+    assert.ok(applied.includes("004_nouns_candidates"));
   } finally { await store.close(); }
 });
 
@@ -273,6 +275,63 @@ test("concurrent first proposal ingestion cannot roll normalized state behind ra
     staleClient.release();
     await store.close();
   }
+});
+
+test("candidate refresh persists exact target identity, lifecycle, content, and provenance", { skip }, async () => {
+  const store = await freshStore();
+  const proposer = "0x1111111111111111111111111111111111111111";
+  const targetId = candidateTargetId(proposer, "slug");
+  const contentHash = "bb".repeat(32);
+  const makeRecord = (blockNumber, eligibility) => ({
+    raw: {
+      daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: targetId, externalId: "display-id",
+      chainId: 1, contractAddress: ADDRESS,
+      transactionHash: `0x${String(blockNumber).padStart(64, "1")}`, logIndex: 0, blockNumber,
+      blockHash: `0x${String(blockNumber).padStart(64, "0")}`, recordType: "proposal_candidate",
+      proposalId: null, contentHash, payload: { id: "display-id" }, sourceKind: "nouns-subgraph",
+      sourceEndpoint: "https://index.example", observedHead: blockNumber,
+    },
+    target: {
+      dao: "nouns", targetId, kind: "candidate", proposer, slug: "slug", title: "Candidate title",
+      description: "# Candidate title", nativeState: eligibility === "CLOSED" ? "CANCELED" : "ACTIVE",
+      eligibility, mappingVersion: "nouns-candidate-lifecycle/1", contentHash: `0x${contentHash}`,
+      actions: [{ actionIndex: 0, target: ADDRESS, valueWei: "0", signature: "", calldata: "0x" }],
+      latestVersion: { id: `v${blockNumber}`, createdBlock: blockNumber, createdTimestamp: "1700000000", updateMessage: "" },
+    },
+  });
+  try {
+    await store.transaction(async (tx) => {
+      await tx.upsertDao({ id: "nouns", name: "Nouns", chainId: 1, contractAddress: GOVERNOR, currentGovernor: GOVERNOR, fromBlock: 1 });
+      await tx.upsertSource({ daoId: "nouns", id: "nouns-subgraph", kind: "nouns-subgraph", endpoint: "https://index.example", fromBlock: 1 });
+      assert.equal(await tx.ingest(makeRecord("200", "PRE_VOTE")), true);
+    });
+    await assert.rejects(store.transaction(async (tx) => {
+      const rewritten = makeRecord("200", "PRE_VOTE");
+      rewritten.raw.contentHash = "cc".repeat(32);
+      rewritten.raw.payload = { id: "tampered" };
+      rewritten.target.contentHash = `0x${"cc".repeat(32)}`;
+      rewritten.target.title = "Tampered title";
+      await tx.ingest(rewritten);
+    }), /canonical candidate drift/);
+    await store.transaction(async (tx) => {
+      assert.equal(await tx.ingest(makeRecord("201", "CLOSED")), false);
+      assert.equal(await tx.ingest(makeRecord("199", "PRE_VOTE")), false);
+    });
+    const target = await store.getGateTarget("nouns", targetId);
+    assert.deepEqual(target, {
+      dao: "nouns", targetId, kind: "candidate", proposer, slug: "slug", title: "Candidate title",
+      description: "# Candidate title", nativeState: "CANCELED", eligibility: "CLOSED",
+      mappingVersion: "nouns-candidate-lifecycle/1", contentHash: `0x${contentHash}`,
+      actions: [{ actionIndex: 0, target: ADDRESS, valueWei: "0", signature: "", calldata: "0x" }],
+      latestVersion: { id: "v201", createdBlock: "201", createdTimestamp: "1700000000", updateMessage: "" },
+      refreshedAt: target.refreshedAt, sourceBlock: "201", sourceBlockHash: `0x${"201".padStart(64, "0")}`,
+    });
+    assert.deepEqual((await store.pool.query(`SELECT transaction_hash AS tx,log_index AS idx
+      FROM raw_governance_records WHERE dao_id='nouns' AND source_record_key=$1`, [targetId])).rows[0],
+      { tx: `0x${"201".padStart(64, "1")}`, idx: 0 });
+    await store.transaction((tx) => tx.reconcileCandidates({ daoId: "nouns", sourceId: "nouns-subgraph", records: [] }));
+    assert.equal(await store.getGateTarget("nouns", targetId), null);
+  } finally { await store.close(); }
 });
 
 test("a failed batch leaves the checkpoint un-advanced", { skip }, async () => {

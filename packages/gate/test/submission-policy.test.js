@@ -88,7 +88,7 @@ test('every parse, size, Markdown, and evidence violation is coarsely malformed'
 
 test('the request never carries its own payer, voter, or signer identity', () => {
   assert.deepEqual([...SUBMISSION_REQUEST_FIELDS].sort(),
-    ['dao', 'disclosures', 'evidenceUrls', 'pitch', 'position', 'proposalId', 'stage']);
+    ['dao', 'disclosures', 'evidenceUrls', 'pitch', 'position', 'proposalId', 'stage', 'targetId']);
   for (const field of ['payer', 'voter', 'signedSender', 'submissionHash', 'quoteId']) {
     assert.equal(reject(request({ [field]: PAYER })).state, 'malformed', field);
   }
@@ -98,7 +98,7 @@ test('an unsupported or unaccepted stage is a coarse policy rejection, never mal
   assert.equal(assertStageAccepted('VOTING', { acceptVoting: true, acceptPreVote: false }), 'VOTING');
 
   for (const value of [
-    ['PRE_VOTE', { acceptVoting: true, acceptPreVote: true }],
+    ['PRE_VOTE', { acceptVoting: true, acceptPreVote: false }],
     ['CLOSED', { acceptVoting: true, acceptPreVote: false }],
     ['VOTING', { acceptVoting: false, acceptPreVote: false }],
   ]) {

@@ -6,6 +6,7 @@ const NORMALIZED_LIFECYCLES = Object.freeze(["PRE_VOTE", "VOTING", "CLOSED"]);
 const PRIVATE_UNKNOWN_LIFECYCLE = "UNKNOWN";
 const INBOX_LIFECYCLES = Object.freeze([...NORMALIZED_LIFECYCLES, PRIVATE_UNKNOWN_LIFECYCLE]);
 const NOUNS_ISSUANCE_STAGE = "VOTING";
+const NOUNS_ISSUANCE_STAGES = Object.freeze(["PRE_VOTE", "VOTING"]);
 const NOUNS_DAO_CHAIN_ID = "1";
 const PRODUCTION_BASE_CHAIN_ID = "8453";
 const QUOTE_LIFETIME_MS = 10 * 60 * 1000;
@@ -51,11 +52,46 @@ function nounsLifecycle(nativeState) {
   return nativeState === "ACTIVE" ? NOUNS_ISSUANCE_STAGE : "CLOSED";
 }
 
-function requireNounsIssuanceLifecycle(nativeState, normalizedLifecycle) {
+function requireNounsIssuanceLifecycle(nativeState, normalizedLifecycle, kind = "proposal") {
+  if (kind === "candidate") {
+    if (nativeState !== "ACTIVE" || normalizedLifecycle !== "PRE_VOTE") {
+      throw new Error("Nouns candidate quote issuance requires canonical PRE_VOTE eligibility");
+    }
+    return "PRE_VOTE";
+  }
   if (nounsLifecycle(nativeState) !== NOUNS_ISSUANCE_STAGE || normalizedLifecycle !== NOUNS_ISSUANCE_STAGE) {
     throw new Error("Nouns quote issuance requires canonical ACTIVE to VOTING lifecycle mapping");
   }
   return NOUNS_ISSUANCE_STAGE;
+}
+
+function requireCanonicalIssuanceMaterial(snapshot, context, submission) {
+  if (snapshot?.kind !== "candidate") return;
+  const material = submission?.material;
+  if (material?.targetId !== snapshot.targetId || material.stage !== "PRE_VOTE"
+      || context?.stage !== "PRE_VOTE" || material.position !== "SPONSOR") {
+    throw new TypeError("Candidate submission material must match the canonical PRE_VOTE sponsorship target");
+  }
+}
+
+function requireCanonicalActions(actions) {
+  if (!Array.isArray(actions)) throw new TypeError("canonicalActions must be an array");
+  const address = /^0x[0-9a-fA-F]{40}$/;
+  const uint = /^(0|[1-9][0-9]*)$/;
+  const bytes = /^0x(?:[0-9a-fA-F]{2})*$/;
+  const keys = ["actionIndex", "calldata", "signature", "target", "valueWei"];
+  Array.from(actions, (action, index) => {
+    if (!action || typeof action !== "object" || Array.isArray(action)
+        || Object.keys(action).sort().join("\0") !== keys.join("\0")
+        || !Number.isSafeInteger(action.actionIndex) || action.actionIndex !== index
+        || action.actionIndex > 2_147_483_647
+        || typeof action.target !== "string" || !address.test(action.target)
+        || typeof action.valueWei !== "string" || !uint.test(action.valueWei)
+        || typeof action.signature !== "string"
+        || typeof action.calldata !== "string" || !bytes.test(action.calldata)) {
+      throw new TypeError("canonicalActions must be dense, contiguous, and canonical");
+    }
+  });
 }
 
 function quoteExpiry(issuedAt) {
@@ -131,6 +167,7 @@ module.exports = {
   NOTIFICATION_STATES,
   PRIVATE_UNKNOWN_LIFECYCLE,
   NOUNS_ISSUANCE_STAGE,
+  NOUNS_ISSUANCE_STAGES,
   NOUNS_DAO_CHAIN_ID,
   PERSISTED_SUBMISSION_STATES,
   PRODUCTION_BASE_CHAIN_ID,
@@ -146,5 +183,7 @@ module.exports = {
   publicState,
   publicSubmissionProjection,
   quoteExpiry,
+  requireCanonicalActions,
+  requireCanonicalIssuanceMaterial,
   requireNounsIssuanceLifecycle,
 };

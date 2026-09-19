@@ -156,8 +156,8 @@ function createSubmissionService({
   if (typeof store.getOwnedResume !== "function") {
     throw new TypeError("store.getOwnedResume is required for owner-bound resume");
   }
-  if (!indexClient || typeof indexClient.getProposalSnapshot !== "function") {
-    throw new TypeError("indexClient.getProposalSnapshot is required");
+  if (!indexClient || (typeof indexClient.getProposalSnapshot !== "function" && typeof indexClient.getTargetSnapshot !== "function")) {
+    throw new TypeError("indexClient target snapshot reader is required");
   }
   if (!quoteSigner || typeof quoteSigner.signQuote !== "function" || typeof quoteSigner.address !== "string") {
     throw new TypeError("quoteSigner.signQuote and quoteSigner.address are required");
@@ -223,7 +223,11 @@ function createSubmissionService({
     }
     return {
       canonicalFacts: {
-        dao: snapshot.dao, proposalId: snapshot.proposalId, nativeState: snapshot.nativeState,
+        dao: snapshot.dao,
+        ...(snapshot.targetId === undefined ? {} : { targetId: snapshot.targetId }),
+        ...(snapshot.proposalId === undefined ? {} : { proposalId: snapshot.proposalId }),
+        ...(snapshot.kind === "candidate" ? { kind: "candidate", proposer: snapshot.proposer, slug: snapshot.slug,
+          context: "candidate sponsorship" } : {}), nativeState: snapshot.nativeState,
         eligibility: snapshot.eligibility, mappingVersion: snapshot.mappingVersion,
         sourceBlock: snapshot.sourceBlock, sourceBlockHash: snapshot.sourceBlockHash,
         contentHash: snapshot.contentHash, refreshedAt: snapshot.refreshedAt,
@@ -299,11 +303,15 @@ function createSubmissionService({
     // 6. Fresh canonical snapshot, lifecycle eligibility, and proposal identity.
     let snapshot;
     try {
-      snapshot = await indexClient.getProposalSnapshot(submission.proposalId);
+      snapshot = submission.targetId
+        ? await indexClient.getTargetSnapshot(submission.targetId)
+        : await indexClient.getProposalSnapshot(submission.proposalId);
     } catch {
       throw unavailable();
     }
-    if (!snapshot || snapshot.dao !== submission.dao || String(snapshot.proposalId) !== submission.proposalId) {
+    const expectedTargetId = submission.targetId ?? `proposal:${submission.proposalId}`;
+    const actualTargetId = snapshot?.targetId ?? (snapshot?.proposalId === undefined ? null : `proposal:${snapshot.proposalId}`);
+    if (!snapshot || snapshot.dao !== submission.dao || actualTargetId !== expectedTargetId) {
       throw unavailable();
     }
     if (snapshot.eligibility !== submission.stage) throw notAccepting();
@@ -326,7 +334,9 @@ function createSubmissionService({
           deploymentCodeHash: configured.codeHash,
         },
         snapshot: {
-          id: snapshotId, dao: snapshot.dao, proposalId: snapshot.proposalId, contentHash: snapshot.contentHash,
+          id: snapshotId, dao: snapshot.dao, targetId: expectedTargetId,
+          ...(snapshot.proposalId === undefined ? {} : { proposalId: snapshot.proposalId }),
+          kind: snapshot.kind ?? "proposal", contentHash: snapshot.contentHash,
           nativeState: snapshot.nativeState, eligibility: snapshot.eligibility, mappingVersion: snapshot.mappingVersion,
           sourceBlock: snapshot.sourceBlock, sourceBlockHash: snapshot.sourceBlockHash,
           refreshedAt: new Date(snapshot.refreshedAt), canonicalFacts, decodedFacts,

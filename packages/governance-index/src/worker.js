@@ -116,8 +116,27 @@ class GovernanceSyncWorker {
       }
     });
     let fetchedProposals = [];
+    let fetchedCandidates = [];
     try {
       fetchedProposals = enumeratesProposals ? await source.fetchProposals(start, finalHead, finalHead, proposalContext) : [];
+      const enumeratesCandidates = typeof source.fetchCandidates === "function";
+      fetchedCandidates = enumeratesCandidates ? await source.fetchCandidates(finalHead) : [];
+      if (enumeratesProposals && enumeratesCandidates) {
+        for (const [kind, rows] of [["proposal", fetchedProposals], ["candidate", fetchedCandidates]]) {
+          const metadata = rows?.snapshot;
+          if (!metadata || !Number.isSafeInteger(Number(metadata.blockNumber))
+              || typeof metadata.blockHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(metadata.blockHash)) {
+            throw new Error(`canonical ${kind} snapshot metadata is required`);
+          }
+        }
+      }
+      const snapshots = [fetchedProposals.snapshot, fetchedCandidates.snapshot].filter(Boolean);
+      if (snapshots.some((snapshot) => Number(snapshot.blockNumber) !== finalHead)) throw new Error("canonical Nouns snapshot height changed across target reads");
+      const snapshotHashes = new Set([
+        ...snapshots.map((snapshot) => snapshot.blockHash),
+        ...[...fetchedProposals, ...fetchedCandidates].map((row) => row?.raw?.blockHash),
+      ].filter(Boolean));
+      if (snapshotHashes.size > 1) throw new Error("canonical Nouns snapshot hash changed across target reads");
     } catch (error) {
       const safeError = redactErrorMessage(error);
       this.logger.error({ event: "proposal_sync_failed", dao: daoId, source: source.id, error: safeError });
@@ -137,7 +156,7 @@ class GovernanceSyncWorker {
         await this.store.transaction(async (tx) => {
           if (tx.reconcileRange) await tx.reconcileRange({ daoId, sourceId: source.id, fromBlock: from, toBlock: to, records: canonicalRecords });
           for (const row of canonicalRecords) if (await tx.ingest(row)) records += 1;
-          await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: to + 1, finalizedHead: finalHead, updatedAt: new Date().toISOString(), lastError: null });
+          if (!enumeratesProposals) await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: to + 1, finalizedHead: finalHead, updatedAt: new Date().toISOString(), lastError: null });
         });
         batches += 1; this.logger.info({ event: "sync_batch", dao: daoId, source: source.id, fromBlock: from, toBlock: to, head: finalHead, fetched: logs.length, ingested: records, durationMs: 0 });
       } catch (error) {
@@ -149,21 +168,31 @@ class GovernanceSyncWorker {
     }
     // Replay canonical event placement first. Proposal enumeration is then the
     // authoritative finalized-head refresh for mutable state and tallies.
-    if (enumeratesProposals) await this.store.transaction(async (tx) => {
-      for (const proposal of materializedProposals) {
-        const derived = this._deriveProposal(proposal.proposal || proposal, finalHead);
-        await tx.upsertProposal(derived);
-        this._logLifecycleChange(daoId, previousLifecycle.get(String(derived.proposalId)), derived, full ? "full_enumeration" : "incremental_refresh");
+    if (enumeratesProposals) {
+      try {
+        await this.store.transaction(async (tx) => {
+          for (const proposal of materializedProposals) {
+            const derived = this._deriveProposal(proposal.proposal || proposal, finalHead);
+            await tx.upsertProposal(derived);
+            this._logLifecycleChange(daoId, previousLifecycle.get(String(derived.proposalId)), derived, full ? "full_enumeration" : "incremental_refresh");
+          }
+          const derivedRecords = proposalRecords.map((record) => ({ ...record, proposal: this._deriveProposal(record.proposal, finalHead) }));
+          // Only a full enumeration is authoritative about which proposals exist.
+          if (full && tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: derivedRecords });
+          for (const row of derivedRecords) {
+            if (await tx.ingest(row)) records += 1;
+            this._logLifecycleChange(daoId, previousLifecycle.get(String(row.proposal?.proposalId)), row.proposal, full ? "full_enumeration" : "incremental_refresh");
+          }
+          if (tx.reconcileCandidates) await tx.reconcileCandidates({ daoId, sourceId: source.id, records: fetchedCandidates });
+          for (const row of fetchedCandidates) if (await tx.ingest(row)) records += 1;
+          await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: Math.max(finalHead + 1, Number(checkpoint?.nextBlock || 0)), finalizedHead: finalHead, updatedAt: new Date().toISOString(), ...(full ? { lastFullScanAt: new Date().toISOString() } : {}), lastError: null });
+        });
+      } catch (error) {
+        const safeError = redactErrorMessage(error);
+        try { await this.store.transaction(async (tx) => tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: checkpoint?.nextBlock || start, finalizedHead: checkpoint?.finalizedHead || finalHead, updatedAt: new Date().toISOString(), lastError: safeError })); } catch (checkpointError) { this.logger.error({ event: "checkpoint_error_failed", dao: daoId, error: redactErrorMessage(checkpointError) }); }
+        throw error;
       }
-      const derivedRecords = proposalRecords.map((record) => ({ ...record, proposal: this._deriveProposal(record.proposal, finalHead) }));
-      // Only a full enumeration is authoritative about which proposals exist.
-      if (full && tx.reconcileProposals) await tx.reconcileProposals({ daoId, sourceId: source.id, records: derivedRecords });
-      for (const row of derivedRecords) {
-        if (await tx.ingest(row)) records += 1;
-        this._logLifecycleChange(daoId, previousLifecycle.get(String(row.proposal?.proposalId)), row.proposal, full ? "full_enumeration" : "incremental_refresh");
-      }
-      if (full) await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: Math.max(finalHead + 1, Number(checkpoint?.nextBlock || 0)), finalizedHead: finalHead, updatedAt: new Date().toISOString(), lastFullScanAt: new Date().toISOString(), lastError: null });
-    });
+    }
     return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records, fullProposalScan: full, proposalsRefreshed: proposalRecords.length + materializedProposals.length, proposalsTerminalizedLocally: proposalContext.terminalized.length };
   }
   async syncAll(options = {}) { const results = []; for (const daoId of Object.keys(this.sources)) results.push(await this.syncDao(daoId, options)); return results; }

@@ -1,5 +1,5 @@
 const crypto = require("node:crypto");
-const { NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
+const { NOUNS_CANDIDATE_MAPPING_VERSION, NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
 const {
   DEFAULT_NOTIFICATION_RETRY_LIMIT,
   INBOX_LIFECYCLES,
@@ -12,6 +12,8 @@ const {
   normalizeCapacityPolicy,
   publicState,
   publicSubmissionProjection,
+  requireCanonicalActions,
+  requireCanonicalIssuanceMaterial,
   requireNounsIssuanceLifecycle,
 } = require("./semantic-contract");
 const {
@@ -210,9 +212,9 @@ class MemoryGateStore {
       if (BigInt(attentionAmount) < 1_000_000n) throw new TypeError("attentionAmount must be at least 1000000");
       if (typeof policy.enabled !== "boolean") throw new TypeError("policy enabled must be boolean");
       if (typeof policy.acceptPreVote !== "boolean" || typeof policy.acceptVoting !== "boolean") throw new TypeError("policy lifecycle flags must be boolean");
-      if (dao !== "nouns" || chainId.raw !== NOUNS_DAO_CHAIN_ID || policy.acceptPreVote !== false
-          || policy.acceptVoting !== true) {
-        throw new TypeError("MVP policy must be Nouns chain 1 with PRE_VOTE disabled and VOTING enabled");
+      if (dao !== "nouns" || chainId.raw !== NOUNS_DAO_CHAIN_ID
+          || (!policy.acceptPreVote && !policy.acceptVoting)) {
+        throw new TypeError("MVP policy must be Nouns chain 1 with at least one accepted PRE_VOTE or VOTING stage");
       }
       if (!Array.isArray(policy.tags ?? [])) throw new TypeError("policy tags must be an array");
       normalizedPolicy = {
@@ -754,12 +756,17 @@ class MemoryGateStore {
     if (context.payerIsEoa !== true || (context.payerWalletKind != null && context.payerWalletKind !== "eoa")) {
       throw new Error("MVP requires an EOA payer");
     }
-    if (context.stage !== NOUNS_ISSUANCE_STAGE) throw new Error("Nouns quote issuance supports VOTING only");
+    if (!["PRE_VOTE", NOUNS_ISSUANCE_STAGE].includes(context.stage)) throw new Error("unsupported Nouns quote stage");
     const contextCodeHash = context.basePayoutCodeHash == null ? null : bytes32(context.basePayoutCodeHash, "context basePayoutCodeHash");
     const deploymentCodeHash = bytes32(context.deploymentCodeHash, "deploymentCodeHash");
     const normalizedDao = daoSlug(snapshot.dao);
     if (normalizedDao !== "nouns") throw new Error("MVP quote issuance supports Nouns only");
-    const proposalId = uint78(snapshot.proposalId, "proposalId");
+    const isCandidate = snapshot.kind === "candidate";
+    const proposalId = isCandidate ? null : uint78(snapshot.proposalId, "proposalId");
+    const targetId = isCandidate ? snapshot.targetId : `proposal:${proposalId}`;
+    if (isCandidate && (typeof targetId !== "string" || !/^candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64}$/.test(targetId))) {
+      throw new TypeError("invalid candidate targetId");
+    }
     const contentHash = bytes32(snapshot.contentHash, "snapshot.contentHash");
     const sourceBlockHash = bytes32(snapshot.sourceBlockHash, "snapshot.sourceBlockHash");
     const submissionHash = bytes32(submission.submissionHash, "submissionHash");
@@ -784,11 +791,13 @@ class MemoryGateStore {
       throw new Error("total amount must equal attention amount plus fee amount");
     }
     if (quote.quoteVersion !== 1) throw new Error("quote version must equal 1");
-    requireNounsIssuanceLifecycle(snapshot.nativeState, snapshot.eligibility);
-    if (snapshot.mappingVersion !== NOUNS_LIFECYCLE_MAPPING_VERSION) {
-      throw new Error(`mapping version must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
+    requireNounsIssuanceLifecycle(snapshot.nativeState, snapshot.eligibility, isCandidate ? "candidate" : "proposal");
+    const expectedMappingVersion = isCandidate ? NOUNS_CANDIDATE_MAPPING_VERSION : NOUNS_LIFECYCLE_MAPPING_VERSION;
+    if (snapshot.mappingVersion !== expectedMappingVersion) {
+      throw new Error(`mapping version must equal ${expectedMappingVersion}`);
     }
-    if (!Array.isArray(snapshot.canonicalActions)) throw new TypeError("canonicalActions must be an array");
+    requireCanonicalIssuanceMaterial(snapshot, context, submission);
+    requireCanonicalActions(snapshot.canonicalActions);
     if (submission.status !== undefined && submission.status !== "QUOTED") throw new TypeError("invalid initial submission state");
     if (quote.state !== undefined && (!QUOTE_STATES.has(quote.state) || quote.state !== "quoted")) throw new TypeError("invalid initial quote state");
     if (reservation.state !== undefined && (!RESERVATION_STATES.has(reservation.state) || reservation.state !== "active")) throw new TypeError("invalid initial reservation state");
@@ -816,7 +825,8 @@ class MemoryGateStore {
         throw new Error("issuance unavailable");
       }
       const policy = this.#policies.get(`${submission.profileId}:${normalizedDao}`);
-      if (!policy?.enabled || policy.chainId !== NOUNS_DAO_CHAIN_ID || !policy.acceptVoting || policy.acceptPreVote) throw new Error("issuance unavailable");
+      const stageAccepted = context.stage === "PRE_VOTE" ? policy?.acceptPreVote : policy?.acceptVoting;
+      if (!policy?.enabled || policy.chainId !== NOUNS_DAO_CHAIN_ID || !stageAccepted) throw new Error("issuance unavailable");
       if (attentionAmount !== policy.attentionAmount) throw new Error("issuance context changed");
       const deployment = this.#deployments.get(quote.deploymentId);
       if (!deployment?.issuanceActive) throw new Error("issuance unavailable");
@@ -836,7 +846,8 @@ class MemoryGateStore {
         const priorQuote = this.#quoteEntry(row.quoteId)?.[1];
         const priorSubmission = priorQuote && this.#submissions.get(priorQuote.submissionId);
         const priorSnapshot = priorSubmission && this.#snapshots.get(priorSubmission.issuanceSnapshotId);
-        return priorQuote?.payer === payer && priorQuote.voter === voter && priorSnapshot?.proposalId === proposalId;
+        const priorTargetId = priorSnapshot?.targetId ?? (priorSnapshot?.proposalId == null ? null : `proposal:${priorSnapshot.proposalId}`);
+        return priorQuote?.payer === payer && priorQuote.voter === voter && priorTargetId === targetId;
       }).length;
       const pendingCount = [...this.#reservations.values()].filter((row) => row.profileId === submission.profileId
         && ["active", "expiry_pending_reconciliation"].includes(row.state)).length;
@@ -860,7 +871,8 @@ class MemoryGateStore {
       const signed = await signIssuedQuote(signer, quoteMessage);
       const publicId = this.#allocatePublicIdUnsafe();
       const now = issuanceNow;
-      const normalizedSnapshot = { ...clone(snapshot), dao: normalizedDao, proposalId, contentHash, sourceBlockHash };
+      const normalizedSnapshot = { ...clone(snapshot), dao: normalizedDao, targetId, contentHash, sourceBlockHash,
+        ...(proposalId === null ? {} : { proposalId }) };
       const normalizedSubmission = {
         ...clone(submission), submissionHash, publicId, issuanceSnapshotId: snapshot.id, status: "QUOTED",
         payer, signedSender, publicStateChangedAt: now,
@@ -987,10 +999,14 @@ class MemoryGateStore {
       attentionAmount: quote.attentionAmount, feeAmount: quote.feeAmount, gavelRecipient: deployment.gavelRecipient,
       token: quote.token, submissionHash: submission.submissionHash, quoteVersion: quote.quoteVersion,
       baseChainId: quote.baseChainId, splitter: quote.splitter, expiresAt: quote.expiresAt,
-      issuanceLifecycle: snapshot.eligibility, dao: snapshot.dao, proposalId: snapshot.proposalId,
+      issuanceLifecycle: snapshot.eligibility, dao: snapshot.dao,
+      ...(snapshot.kind === "candidate" ? { targetId: snapshot.targetId, kind: "candidate" } : {}),
+      ...(snapshot.proposalId == null ? {} : { proposalId: snapshot.proposalId }),
       profileId: submission.profileId,
       destinationRef: this.#deliverySettings.get(submission.profileId) ?? null,
-      trustedSummary: { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
+      trustedSummary: snapshot.kind === "candidate"
+        ? { subject: "Candidate sponsorship pitch ready", text: "Open your private Gate inbox to review the candidate sponsorship request." }
+        : { subject: "Paid pitch ready", text: "Open your private Gate inbox." } });
   }
 
   async markSettlementPending(publicId, pending = true) {
@@ -1096,6 +1112,10 @@ class MemoryGateStore {
     const issuanceSnapshot = this.#snapshots.get(submission.issuanceSnapshotId);
     if (inbox.issuanceLifecycle !== issuanceSnapshot?.eligibility) {
       throw new Error("inbox issuance lifecycle does not match the frozen issuance snapshot");
+    }
+    if (inbox.currentLifecycle !== "CLOSED" && inbox.currentLifecycle !== "UNKNOWN"
+        && inbox.currentLifecycle !== inbox.issuanceLifecycle) {
+      throw new Error("current lifecycle must remain in the issuance lane or close");
     }
     if (inbox.currentLifecycleUnavailable) {
       if (inbox.currentLifecycle !== "UNKNOWN" || inbox.lifecycleChanged) {

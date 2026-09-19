@@ -42,7 +42,8 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
             'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
-            'sha256:gate-001-v3-runtime-readiness','sha256:gate-001-v3-atomic-auth-session') AND installed_tables <> 20)
+            'sha256:gate-001-v3-runtime-readiness','sha256:gate-001-v3-atomic-auth-session',
+            'sha256:gate-001-v4-nouns-candidates') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
@@ -50,14 +51,14 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session') AND NOT EXISTS(
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session') AND (
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -84,7 +85,7 @@ BEGIN
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
             'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session')
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -197,9 +198,9 @@ BEGIN
 END $$;
 UPDATE gate.dao_policies
 SET enabled=false
-WHERE dao='nouns' AND accept_voting=false AND enabled=true;
+WHERE dao='nouns' AND accept_pre_vote=false AND accept_voting=false AND enabled=true;
 ALTER TABLE gate.dao_policies ADD CONSTRAINT dao_policies_nouns_policy_check CHECK (
-  dao <> 'nouns' OR (chain_id = 1 AND accept_pre_vote = false AND (enabled = false OR accept_voting = true))
+  dao <> 'nouns' OR (chain_id = 1 AND (enabled = false OR accept_pre_vote = true OR accept_voting = true))
 );
 DROP TRIGGER IF EXISTS dao_policies_bump_profile_version ON gate.dao_policies;
 
@@ -368,16 +369,39 @@ END $$;
 REVOKE ALL ON FUNCTION gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint) FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS gate.proposal_snapshots (
- id text PRIMARY KEY, dao text NOT NULL CHECK(dao ~ '^[a-z][a-z0-9-]{0,62}$'), proposal_id numeric(78,0) NOT NULL CHECK(proposal_id>=0),
+ id text PRIMARY KEY, dao text NOT NULL CHECK(dao ~ '^[a-z][a-z0-9-]{0,62}$'),
+ target_id text NOT NULL, kind text NOT NULL DEFAULT 'proposal' CHECK(kind IN('proposal','candidate')),
+ proposal_id numeric(78,0) CHECK(proposal_id>=0),
  content_hash text NOT NULL CHECK(content_hash ~ '^0x[0-9a-f]{64}$'), native_state text NOT NULL CHECK(native_state ~ '^[A-Z][A-Z_]*$'),
  normalized_eligibility text NOT NULL CHECK(normalized_eligibility IN('PRE_VOTE','VOTING','CLOSED')),
- mapping_version text NOT NULL CHECK(mapping_version='nouns-lifecycle/1'), source_block bigint NOT NULL CHECK(source_block>=0),
+ mapping_version text NOT NULL CHECK(mapping_version IN('nouns-lifecycle/1','nouns-candidate-lifecycle/1')), source_block bigint NOT NULL CHECK(source_block>=0),
  source_block_hash text NOT NULL CHECK(source_block_hash ~ '^0x[0-9a-f]{64}$'), refreshed_at timestamptz NOT NULL,
  canonical_facts jsonb NOT NULL CHECK(jsonb_typeof(canonical_facts)='object'), decoded_facts jsonb NOT NULL CHECK(jsonb_typeof(decoded_facts)='object'),
  canonical_actions jsonb NOT NULL CHECK(jsonb_typeof(canonical_actions)='array'),
- CHECK(dao<>'nouns' OR ((native_state='ACTIVE' AND normalized_eligibility='VOTING') OR (native_state<>'ACTIVE' AND normalized_eligibility='CLOSED'))),
- UNIQUE(dao,proposal_id,content_hash,source_block,source_block_hash)
+ CHECK((kind='proposal' AND target_id='proposal:'||proposal_id::text AND proposal_id IS NOT NULL)
+    OR (kind='candidate' AND proposal_id IS NULL AND target_id ~ '^candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64}$')),
+ CHECK(dao<>'nouns' OR ((native_state='ACTIVE' AND normalized_eligibility IN('PRE_VOTE','VOTING')) OR (native_state<>'ACTIVE' AND normalized_eligibility='CLOSED'))),
+ UNIQUE(dao,target_id,content_hash,source_block,source_block_hash)
 );
+ALTER TABLE gate.proposal_snapshots ADD COLUMN IF NOT EXISTS target_id text;
+ALTER TABLE gate.proposal_snapshots ADD COLUMN IF NOT EXISTS kind text;
+UPDATE gate.proposal_snapshots SET target_id='proposal:'||proposal_id::text WHERE target_id IS NULL;
+UPDATE gate.proposal_snapshots SET kind='proposal' WHERE kind IS NULL;
+ALTER TABLE gate.proposal_snapshots ALTER COLUMN target_id SET NOT NULL;
+ALTER TABLE gate.proposal_snapshots ALTER COLUMN kind SET NOT NULL;
+ALTER TABLE gate.proposal_snapshots ALTER COLUMN proposal_id DROP NOT NULL;
+ALTER TABLE gate.proposal_snapshots ALTER COLUMN kind SET DEFAULT 'proposal';
+CREATE OR REPLACE FUNCTION gate.bind_snapshot_target() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.kind IS NULL THEN NEW.kind := 'proposal'; END IF;
+ IF NEW.target_id IS NULL AND NEW.kind='proposal' AND NEW.proposal_id IS NOT NULL THEN
+  NEW.target_id := 'proposal:'||NEW.proposal_id::text;
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS proposal_snapshots_bind_target ON gate.proposal_snapshots;
+CREATE TRIGGER proposal_snapshots_bind_target BEFORE INSERT ON gate.proposal_snapshots
+ FOR EACH ROW EXECUTE FUNCTION gate.bind_snapshot_target();
 DO $$
 DECLARE mapping_version_type text;
 BEGIN
@@ -387,14 +411,34 @@ BEGIN
   ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_mapping_version_check;
   ALTER TABLE gate.proposal_snapshots ALTER COLUMN mapping_version TYPE text
     USING CASE WHEN mapping_version=1 THEN 'nouns-lifecycle/1' ELSE mapping_version::text END;
-  ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_mapping_version_check
-    CHECK (mapping_version='nouns-lifecycle/1');
  ELSIF mapping_version_type IS DISTINCT FROM 'text' THEN
   RAISE EXCEPTION 'unsupported gate.proposal_snapshots.mapping_version type: %',mapping_version_type;
  END IF;
-END $$;
+ END $$;
+ -- Replace only the exact historical/generated constraints owned by this migration.
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_mapping_version_check;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_check;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_check1;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_target_identity_check;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_nouns_lifecycle_check;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_target_provenance_key;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_dao_proposal_id_content_hash_source_bloc_key;
+ ALTER TABLE gate.proposal_snapshots DROP CONSTRAINT IF EXISTS proposal_snapshots_dao_target_id_content_hash_source_block__key;
+ ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_mapping_version_check
+ CHECK (mapping_version IN('nouns-lifecycle/1','nouns-candidate-lifecycle/1'));
+ ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_target_identity_check CHECK (
+ (kind='proposal' AND target_id='proposal:'||proposal_id::text AND proposal_id IS NOT NULL)
+ OR (kind='candidate' AND proposal_id IS NULL AND target_id ~ '^candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64}$')
+ );
+ ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_nouns_lifecycle_check CHECK (
+ dao<>'nouns' OR ((kind='proposal' AND native_state='ACTIVE' AND normalized_eligibility='VOTING')
+   OR (kind='candidate' AND native_state='ACTIVE' AND normalized_eligibility='PRE_VOTE')
+   OR (native_state<>'ACTIVE' AND normalized_eligibility='CLOSED'))
+ );
+ ALTER TABLE gate.proposal_snapshots ADD CONSTRAINT proposal_snapshots_target_provenance_key
+ UNIQUE(dao,target_id,content_hash,source_block,source_block_hash);
 
-CREATE TABLE IF NOT EXISTS gate.splitter_deployments (
+ CREATE TABLE IF NOT EXISTS gate.splitter_deployments (
  id text PRIMARY KEY, chain_id bigint NOT NULL CHECK(chain_id>0), splitter text NOT NULL CHECK(splitter ~ '^0x[0-9a-f]{40}$'),
  signer text NOT NULL CHECK(signer ~ '^0x[0-9a-f]{40}$'), token text NOT NULL CHECK(token ~ '^0x[0-9a-f]{40}$'),
  gavel_recipient text NOT NULL CHECK(gavel_recipient ~ '^0x[0-9a-f]{40}$'),
@@ -508,10 +552,17 @@ CREATE TABLE IF NOT EXISTS gate.inbox_items (
  issuance_lifecycle gate.lifecycle NOT NULL, current_lifecycle gate.lifecycle NOT NULL, lifecycle_changed boolean NOT NULL DEFAULT false,
  current_lifecycle_unavailable boolean NOT NULL DEFAULT false, private_unavailability_reason text,
  inbox_created_at timestamptz NOT NULL DEFAULT clock_timestamp(), read_at timestamptz, archived_at timestamptz,
- CHECK(issuance_lifecycle='VOTING' AND current_lifecycle IN('VOTING','CLOSED','UNKNOWN')),
+ CHECK(issuance_lifecycle IN('PRE_VOTE','VOTING') AND current_lifecycle IN('PRE_VOTE','VOTING','CLOSED','UNKNOWN')
+   AND (current_lifecycle IN('CLOSED','UNKNOWN') OR current_lifecycle=issuance_lifecycle)),
  CHECK((current_lifecycle_unavailable AND current_lifecycle='UNKNOWN' AND NOT lifecycle_changed)
    OR (NOT current_lifecycle_unavailable AND current_lifecycle<>'UNKNOWN' AND lifecycle_changed=(current_lifecycle<>issuance_lifecycle))),
  CHECK((NOT current_lifecycle_unavailable AND private_unavailability_reason IS NULL) OR current_lifecycle_unavailable)
+);
+ALTER TABLE gate.inbox_items DROP CONSTRAINT IF EXISTS inbox_items_check;
+ALTER TABLE gate.inbox_items DROP CONSTRAINT IF EXISTS inbox_items_lifecycle_check;
+ALTER TABLE gate.inbox_items ADD CONSTRAINT inbox_items_lifecycle_check CHECK (
+ issuance_lifecycle IN('PRE_VOTE','VOTING') AND current_lifecycle IN('PRE_VOTE','VOTING','CLOSED','UNKNOWN')
+ AND (current_lifecycle IN('CLOSED','UNKNOWN') OR current_lifecycle=issuance_lifecycle)
 );
 CREATE INDEX IF NOT EXISTS inbox_profile_idx ON gate.inbox_items(profile_id,inbox_created_at DESC);
 CREATE TABLE IF NOT EXISTS gate.notification_attempts (
@@ -1186,7 +1237,7 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
     NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-      'sha256:gate-001-v3-atomic-auth-session') THEN
+      'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1360,7 +1411,7 @@ DO $$ BEGIN
 END $$;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v3-atomic-auth-session',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v4-nouns-candidates',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest
@@ -1373,13 +1424,14 @@ INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest
    'sha256:gate-001-v3-agentmail-idempotency',
    'sha256:gate-001-v3-bound-delivery-settings',
    'sha256:gate-001-v3-runtime-readiness',
-   'sha256:gate-001-v3-atomic-auth-session'
+   'sha256:gate-001-v3-atomic-auth-session',
+   'sha256:gate-001-v4-nouns-candidates'
  );
 DO $$ BEGIN
  IF NOT EXISTS (
    SELECT 1 FROM public.schema_migrations
    WHERE version='gate/001_gate-v3'
-     AND migration_checksum='sha256:gate-001-v3-atomic-auth-session'
+     AND migration_checksum='sha256:gate-001-v4-nouns-candidates'
      AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
  ) THEN
   RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';

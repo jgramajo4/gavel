@@ -1,12 +1,14 @@
 const crypto = require("node:crypto");
 const { Pool } = require("pg");
 const { keccak256 } = require("ethers");
-const { NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
+const { NOUNS_CANDIDATE_MAPPING_VERSION, NOUNS_LIFECYCLE_MAPPING_VERSION } = require("@gavel/gate");
 const {
   DEFAULT_NOTIFICATION_RETRY_LIMIT,
   normalizeCapacityPolicy,
   publicState,
   publicSubmissionProjection,
+  requireCanonicalActions,
+  requireCanonicalIssuanceMaterial,
 } = require("./semantic-contract");
 const {
   assertSignerDeploymentBinding,
@@ -21,7 +23,7 @@ const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const DAO = /^[a-z][a-z0-9-]{0,62}$/;
 const UINT78 = /^\d{1,78}$/;
 const LIFECYCLES = new Set(["PRE_VOTE", "VOTING", "CLOSED", "UNKNOWN"]);
-const CURRENT_LIFECYCLES = new Set(["VOTING", "CLOSED", "UNKNOWN"]);
+const CURRENT_LIFECYCLES = new Set(["PRE_VOTE", "VOTING", "CLOSED", "UNKNOWN"]);
 const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
@@ -234,8 +236,8 @@ class PostgresGateStore {
       };
       if (!Array.isArray(normalizedPolicy.tags)) throw new TypeError("tags must be an array");
       invariant(normalizedPolicy.dao !== "nouns" || (normalizedPolicy.chainId === "1"
-        && normalizedPolicy.acceptPreVote === false && normalizedPolicy.acceptVoting === true),
-      "Nouns policy must use Ethereum chain 1 with PRE_VOTE disabled and VOTING enabled");
+        && (normalizedPolicy.acceptPreVote || normalizedPolicy.acceptVoting)),
+      "Nouns policy must use Ethereum chain 1 with at least one accepted PRE_VOTE or VOTING stage");
     }
     const execute = async (client) => {
       if (!transactionClient) await this.#profileLock(client, profile.id);
@@ -495,6 +497,12 @@ class PostgresGateStore {
     invariant(snapshot && submission && quote && reservation, "complete issuance material is required");
     invariant(context?.authPassed === true && context?.parsePassed === true, "authenticated and parsed issuance context is required");
     assertStoreOwnedQuoteMaterial(quote, reservation);
+    const candidate = snapshot.kind === "candidate";
+    const proposalId = candidate ? null : uint78(snapshot.proposalId, "proposalId");
+    const targetId = candidate ? snapshot.targetId : `proposal:${proposalId}`;
+    invariant(typeof targetId === "string" && (candidate
+      ? /^candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64}$/.test(targetId)
+      : /^proposal:(0|[1-9][0-9]*)$/.test(targetId)), "invalid target identity");
     const normalized = {
       context: {
         expectedProfileVersion: positiveBigint(context.expectedProfileVersion, "expectedProfileVersion"),
@@ -503,7 +511,8 @@ class PostgresGateStore {
         payerIsEoa: context.payerIsEoa === true,
         stage: lifecycle(context.stage, "stage"), deploymentCodeHash: bytes32(context.deploymentCodeHash, "deploymentCodeHash"),
       },
-      snapshot: { ...snapshot, dao: daoSlug(snapshot.dao), proposalId: uint78(snapshot.proposalId, "proposalId"),
+      snapshot: { ...snapshot, dao: daoSlug(snapshot.dao), targetId, kind: candidate ? "candidate" : "proposal",
+        ...(candidate ? {} : { proposalId }),
         contentHash: bytes32(snapshot.contentHash, "contentHash"), sourceBlock: uint78(snapshot.sourceBlock, "sourceBlock"),
         sourceBlockHash: bytes32(snapshot.sourceBlockHash, "sourceBlockHash"), mappingVersion: snapshot.mappingVersion,
         canonicalActions: snapshot.canonicalActions },
@@ -520,7 +529,8 @@ class PostgresGateStore {
     invariant(normalized.submission.payer === normalized.submission.signedSender, "payer must equal signed_sender");
     invariant(normalized.submission.payer === normalized.context.authenticatedSender, "payer must equal authenticated signed sender");
     invariant(normalized.context.payerIsEoa, "payer must be an EOA");
-    invariant(Array.isArray(normalized.snapshot.canonicalActions), "canonicalActions must be an array");
+    requireCanonicalIssuanceMaterial(normalized.snapshot, normalized.context, normalized.submission);
+    requireCanonicalActions(normalized.snapshot.canonicalActions);
     if (!signer || typeof signer.signQuote !== "function") {
       throw new TypeError("an injected quote signer is required for issuance");
     }
@@ -532,11 +542,14 @@ class PostgresGateStore {
     invariant(normalized.quote.feeAmount === "250000", "feeAmount must equal 250000");
     invariant(normalized.quote.quoteVersion === 1, "quoteVersion must equal 1");
     invariant(SETTLEMENT_CHAINS.has(normalized.quote.baseChainId), "quote settlement chain must be Base 8453 or Base Sepolia 84532");
-    invariant(normalized.snapshot.mappingVersion === NOUNS_LIFECYCLE_MAPPING_VERSION,
-      `mappingVersion must equal ${NOUNS_LIFECYCLE_MAPPING_VERSION}`);
-    invariant(normalized.snapshot.dao !== "nouns" || (normalized.context.stage === "VOTING"
-      && normalized.snapshot.nativeState === "ACTIVE" && normalized.snapshot.eligibility === "VOTING"),
-    "Nouns issuance requires canonical ACTIVE to VOTING lifecycle mapping");
+    const candidate = normalized.snapshot.kind === "candidate";
+    const expectedMappingVersion = candidate ? NOUNS_CANDIDATE_MAPPING_VERSION : NOUNS_LIFECYCLE_MAPPING_VERSION;
+    invariant(normalized.snapshot.mappingVersion === expectedMappingVersion,
+      `mappingVersion must equal ${expectedMappingVersion}`);
+    invariant(normalized.snapshot.dao !== "nouns" || (normalized.snapshot.nativeState === "ACTIVE"
+      && normalized.context.stage === (candidate ? "PRE_VOTE" : "VOTING")
+      && normalized.snapshot.eligibility === normalized.context.stage),
+    "Nouns issuance requires canonical ACTIVE to PRE_VOTE/VOTING lifecycle mapping");
     invariant(normalized.reservation.profileId === normalized.submission.profileId, "reservation profile must equal submission profile");
     invariant(normalized.reservation.amount === normalized.quote.attentionAmount, "reservation amount must equal attention amount");
     return normalized;
@@ -571,7 +584,8 @@ class PostgresGateStore {
       const policy = (await client.query("SELECT * FROM gate.dao_policies WHERE profile_id=$1 AND dao=$2 FOR UPDATE", [submission.profileId, snapshot.dao])).rows[0];
       invariant(policy?.enabled === true && String(policy.chain_id) === "1", "issuance unavailable");
       invariant(String(policy.attention_amount) === quote.attentionAmount, "issuance context changed");
-      invariant(context.stage === "VOTING" && policy.accept_voting, "issuance unavailable: Nouns permits only VOTING");
+      invariant(context.stage === "PRE_VOTE" ? policy.accept_pre_vote : context.stage === "VOTING" && policy.accept_voting,
+        "issuance unavailable for selected Nouns stage");
       const deployment = (await client.query("SELECT * FROM gate.splitter_deployments WHERE id=$1 FOR SHARE", [quote.deploymentId])).rows[0];
       invariant(deployment?.issuance_active === true && String(deployment.chain_id) === quote.baseChainId && deployment.splitter === quote.splitter
         && deployment.token === quote.token && deployment.contract_code_hash === context.deploymentCodeHash, "issuance context changed");
@@ -600,10 +614,10 @@ class PostgresGateStore {
         (SELECT count(*)::int FROM gate.capacity_reservations r2 JOIN gate.quotes q2 ON q2.id=r2.quote_id
           JOIN gate.submissions s2 ON s2.id=q2.submission_id JOIN gate.proposal_snapshots ps ON ps.id=s2.issuance_snapshot_id
           WHERE s2.profile_id=$1 AND r2.state='consumed' AND r2.consumed_at>clock_timestamp()-interval '24 hours'
-            AND s2.payer=$2 AND q2.voter=$3 AND ps.proposal_id=$4 AND ps.dao=$5) AS pair_proposal,
+            AND s2.payer=$2 AND q2.voter=$3 AND ps.target_id=$4 AND ps.dao=$5) AS pair_proposal,
         (SELECT count(*)::int FROM gate.quotes q2 JOIN gate.submissions s2 ON s2.id=q2.submission_id
           WHERE s2.profile_id=$1 AND q2.state='quoted' AND q2.expires_at>clock_timestamp() AND s2.payer=$2 AND q2.voter=$3) AS active_pair`,
-      [submission.profileId, submission.payer, quote.voter, snapshot.proposalId, snapshot.dao])).rows[0];
+      [submission.profileId, submission.payer, quote.voter, snapshot.targetId, snapshot.dao])).rows[0];
       // These two are separate frozen rejection codes, not capacity: the HTTP
       // layer maps them to coarse ACTIVE_QUOTE_EXISTS / SENDER_PROPOSAL_LIMIT.
       invariant(Number(limits.active_pair) === 0, "ACTIVE_QUOTE_EXISTS");
@@ -614,9 +628,10 @@ class PostgresGateStore {
       await client.query("SAVEPOINT gate_issue_material");
       try {
         await client.query(`INSERT INTO gate.proposal_snapshots
-          (id,dao,proposal_id,content_hash,native_state,normalized_eligibility,mapping_version,source_block,source_block_hash,refreshed_at,canonical_facts,decoded_facts,canonical_actions)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb)`,
-        [snapshot.id, snapshot.dao, snapshot.proposalId, snapshot.contentHash, snapshot.nativeState, snapshot.eligibility, snapshot.mappingVersion,
+          (id,dao,target_id,kind,proposal_id,content_hash,native_state,normalized_eligibility,mapping_version,source_block,source_block_hash,refreshed_at,canonical_facts,decoded_facts,canonical_actions)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb)`,
+        [snapshot.id, snapshot.dao, snapshot.targetId, snapshot.kind, snapshot.proposalId ?? null,
+          snapshot.contentHash, snapshot.nativeState, snapshot.eligibility, snapshot.mappingVersion,
           snapshot.sourceBlock, snapshot.sourceBlockHash, snapshot.refreshedAt, JSON.stringify(snapshot.canonicalFacts),
           JSON.stringify(snapshot.decodedFacts), JSON.stringify(snapshot.canonicalActions)]);
         let publicId;
@@ -772,15 +787,24 @@ class PostgresGateStore {
     const row = (await this.pool.query(`SELECT q.quote_id AS "quoteId",q.payer,q.voter,q.attention_amount::text AS "attentionAmount",
       q.fee_amount::text AS "feeAmount",d.gavel_recipient AS "gavelRecipient",q.token,s.submission_hash AS "submissionHash",
       q.quote_version AS "quoteVersion",q.base_chain_id::text AS "baseChainId",q.splitter,q.expires_at AS "expiresAt",
-      ps.normalized_eligibility AS "issuanceLifecycle",ps.dao,ps.proposal_id::text AS "proposalId",
+      ps.normalized_eligibility AS "issuanceLifecycle",ps.dao,
+      CASE WHEN ps.kind='candidate' THEN ps.target_id END AS "targetId",
+      CASE WHEN ps.kind='candidate' THEN ps.kind END AS kind,
+      ps.proposal_id::text AS "proposalId",
       s.profile_id AS "profileId",ds.ciphertext AS "destinationRef",
-      jsonb_build_object('subject','Paid pitch ready','text','Open your private Gate inbox.') AS "trustedSummary"
+      CASE WHEN ps.kind='candidate'
+        THEN jsonb_build_object('subject','Candidate sponsorship pitch ready','text','Open your private Gate inbox to review the candidate sponsorship request.')
+        ELSE jsonb_build_object('subject','Paid pitch ready','text','Open your private Gate inbox.') END AS "trustedSummary"
       FROM gate.quotes q JOIN gate.submissions s ON s.id=q.submission_id
       JOIN gate.proposal_snapshots ps ON ps.id=s.issuance_snapshot_id
       JOIN gate.splitter_deployments d ON d.id=q.deployment_id
       LEFT JOIN gate.delivery_settings ds ON ds.profile_id=s.profile_id WHERE q.quote_id=$1`,
     [bytes32(quoteId, "quoteId")])).rows[0];
-    return row ? clone(row) : null;
+    if (!row) return null;
+    if (row.targetId == null) delete row.targetId;
+    if (row.kind == null) delete row.kind;
+    if (row.proposalId == null) delete row.proposalId;
+    return clone(row);
   }
 
   async recordSettlementHint({ publicId, payer, txHash, chainId, splitter } = {}) {
@@ -921,8 +945,13 @@ class PostgresGateStore {
       throw new TypeError("inbox lifecycle flags must be boolean");
     }
     lifecycle(inbox.issuanceLifecycle, "issuanceLifecycle"); lifecycle(inbox.currentLifecycle, "currentLifecycle");
-    invariant(inbox.issuanceLifecycle === "VOTING", "inbox issuance lifecycle must be VOTING");
-    invariant(CURRENT_LIFECYCLES.has(inbox.currentLifecycle), "current lifecycle must be VOTING, CLOSED, or UNKNOWN");
+    invariant(inbox.issuanceLifecycle === "PRE_VOTE" || inbox.issuanceLifecycle === "VOTING",
+      "inbox issuance lifecycle must be PRE_VOTE or VOTING");
+    invariant(CURRENT_LIFECYCLES.has(inbox.currentLifecycle),
+      "current lifecycle must be PRE_VOTE, VOTING, CLOSED, or UNKNOWN");
+    invariant(inbox.currentLifecycle === "CLOSED" || inbox.currentLifecycle === "UNKNOWN"
+      || inbox.currentLifecycle === inbox.issuanceLifecycle,
+    "current lifecycle must remain in the issuance lane or close");
     if (inbox.currentLifecycleUnavailable) {
       invariant(inbox.currentLifecycle === "UNKNOWN" && inbox.lifecycleChanged === false,
         "unavailable lifecycle requires UNKNOWN without a change claim");

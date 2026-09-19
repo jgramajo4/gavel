@@ -92,6 +92,43 @@ test("issuance requires authenticated parsed EOA context and rejects stale profi
   assert.equal((await store.counts()).submissions, 0);
 });
 
+test("Candidate issuance binds submission material to its canonical sponsorship snapshot", async () => {
+  const store = await setupStore();
+  await store.mutateProfile({
+    profile: { id: "profile-1", wallet: ADDR.wallet1, availability: "accepting_now" },
+    policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: true, acceptVoting: true,
+      attentionAmount: "1000000", tags: [] },
+  });
+  const command = issuance("candidate-spoof", { quoteId: hash("1") });
+  command.context.expectedProfileVersion = "2";
+  command.context.stage = "PRE_VOTE";
+  command.snapshot.kind = "candidate";
+  command.snapshot.targetId = `candidate:${ADDR.wallet1}:${hash("9")}`;
+  delete command.snapshot.proposalId;
+  command.snapshot.eligibility = "PRE_VOTE";
+  command.snapshot.mappingVersion = "nouns-candidate-lifecycle/1";
+  command.submission.material = { targetId: "proposal:999", stage: "PRE_VOTE", position: "AGAINST" };
+
+  await assert.rejects(store.issue(command), /Candidate submission material/i);
+  assert.equal((await store.counts()).submissions, 0);
+});
+
+test("issuance rejects sparse or non-canonical action collections", async () => {
+  const invalidActions = [
+    new Array(1),
+    [{ actionIndex: 1, target: ADDR.wallet1, valueWei: "0", signature: "", calldata: "0x" }],
+    [{ actionIndex: 0, target: ADDR.wallet1, valueWei: "00", signature: "", calldata: "0x" }],
+    [{ actionIndex: 0, target: ADDR.wallet1, valueWei: "0", signature: "", calldata: "0x", extra: true }],
+  ];
+  for (const [index, canonicalActions] of invalidActions.entries()) {
+    const store = await setupStore();
+    const command = issuance(`bad-actions-${index}`, { quoteId: hex32(index + 10), submissionHash: hex32(index + 20) });
+    command.snapshot.canonicalActions = canonicalActions;
+    await assert.rejects(store.issue(command), /canonicalActions/i);
+    assert.equal((await store.counts()).submissions, 0);
+  }
+});
+
 test("contract voters require persisted Base payout evidence before accepting or issuance", async () => {
   const store = new MemoryGateStore({ clock: () => new Date("2026-01-01T00:00:00.000Z") });
   await assert.rejects(store.mutateProfile({
