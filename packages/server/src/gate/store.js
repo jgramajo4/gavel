@@ -286,11 +286,11 @@ class PostgresGateStore {
     });
   }
 
-  async #getProfileByWallet(queryable, wallet, lock = false) {
+  async #getProfileByWallet(queryable, wallet) {
     const row = (await queryable.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,
       profile_version AS "profileVersion",enrolled_at AS "enrolledAt",updated_at AS "updatedAt",
       base_payout_verified_at AS "basePayoutVerifiedAt",base_payout_code_hash AS "basePayoutCodeHash",display_cache AS display
-      FROM gate.profiles WHERE wallet=$1${lock ? " FOR UPDATE" : ""}`, [address(wallet, "wallet")])).rows[0];
+      FROM gate.profiles WHERE wallet=$1`, [address(wallet, "wallet")])).rows[0];
     return row ? clone(row) : null;
   }
 
@@ -450,28 +450,14 @@ class PostgresGateStore {
     };
     return this.#transaction(async (client) => {
       await client.query("SELECT id FROM gate.settlement_cursors WHERE deployment_id=$1 FOR UPDATE", [range.deploymentId]);
-      const priorAnomalies = new Set((await client.query(`SELECT tx_hash,"log_index",details->>'code' AS code
-        FROM gate.settlement_scan_observations WHERE deployment_id=$1 AND kind='anomaly'
-          AND block_number BETWEEN $2 AND $3`, [range.deploymentId, fromBlock, throughBlock])).rows
-        .map((item) => `${item.tx_hash}:${item.log_index}:${item.code}`));
-      const priorExact = new Set((await client.query(`SELECT o.quote_id,o.tx_hash,o.log_index
-        FROM gate.settlement_scan_observations o JOIN gate.quotes q ON q.quote_id=o.quote_id
-        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match AND q.state<>'settled'
-          AND o.block_number BETWEEN $2 AND $3 AND o.scan_generation=(SELECT max(b.scan_generation)
-            FROM gate.settlement_scan_blocks b WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)`,
-      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
-      const previouslyReorgedExact = new Set((await client.query(`SELECT DISTINCT o.quote_id,o.tx_hash,o.log_index
-        FROM gate.settlement_scan_observations o
-        WHERE o.deployment_id=$1 AND o.kind='exact_log' AND o.exact_match
-          AND o.block_number BETWEEN $2 AND $3 AND EXISTS (
-            SELECT 1 FROM gate.settlement_scan_blocks b
-            WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number
-              AND b.scan_generation>o.scan_generation AND NOT EXISTS (
-                SELECT 1 FROM gate.settlement_scan_observations later
-                WHERE later.deployment_id=o.deployment_id AND later.scan_generation=b.scan_generation
-                  AND later.block_number=o.block_number AND later.kind='exact_log' AND later.exact_match
-                  AND later.quote_id=o.quote_id AND later.tx_hash=o.tx_hash AND later.log_index=o.log_index))`,
-      [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => `${item.quote_id}:${item.tx_hash}:${item.log_index}`));
+      const prereads = (await client.query("SELECT * FROM gate.scanner_range_prereads($1,$2,$3)",
+        [range.deploymentId, fromBlock, throughBlock])).rows;
+      const priorAnomalies = new Set(prereads.filter((item) => item.readKind === "anomaly")
+        .map((item) => `${item.txHash}:${item.logIndex}:${item.code}`));
+      const priorExact = new Set(prereads.filter((item) => item.readKind === "current_exact")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
+      const previouslyReorgedExact = new Set(prereads.filter((item) => item.readKind === "reorged_exact")
+        .map((item) => `${item.quoteId}:${item.txHash}:${item.logIndex}`));
       const alreadyReorged = new Set((await client.query(`SELECT id FROM gate.quotes WHERE deployment_id=$1
         AND state='settled' AND settlement_reorged_at IS NOT NULL AND receipt_block BETWEEN $2 AND $3`,
       [range.deploymentId, fromBlock, throughBlock])).rows.map((item) => item.id));
@@ -773,15 +759,8 @@ class PostgresGateStore {
 
   async listUnsettledSettlementObservations({ chainId, splitter, limit = 50 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("limit must be from 1 to 1000");
-    return clone((await this.pool.query(`SELECT o.quote_id AS "quoteId",o.details->'settlement' AS settlement
-      FROM gate.settlement_scan_observations o
-      JOIN gate.splitter_deployments d ON d.id=o.deployment_id
-      JOIN gate.quotes q ON q.quote_id=o.quote_id
-      WHERE d.chain_id=$1 AND d.splitter=$2 AND o.exact_match AND q.state<>'settled'
-        AND jsonb_typeof(o.details->'settlement')='object'
-        AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
-          WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)
-      ORDER BY o.block_number,o.log_index LIMIT $3`,
+    return clone((await this.pool.query(`SELECT "quoteId",settlement
+      FROM gate.unsettled_settlement_observations($1,$2,$3)`,
     [positiveBigint(chainId, "chainId"), address(splitter, "splitter"), limit])).rows);
   }
 
@@ -1177,8 +1156,8 @@ function createPublicGateReader(queryable) {
   if (!queryable || typeof queryable.query !== "function") throw new TypeError("queryable.query is required");
   return Object.freeze({
     async getProfile(id) {
-      const row = (await queryable.query(`SELECT id,wallet,wallet_kind AS "walletKind",availability,ens,message,
-        enrolled_at AS "enrolledAt",updated_at AS "updatedAt" FROM gate_public.profiles WHERE id=$1`, [id])).rows[0];
+      const row = (await queryable.query(`SELECT id,wallet,"walletKind",availability,ens,message,"enrolledAt","updatedAt"
+        FROM gate.public_profile($1)`, [id])).rows[0];
       if (!row) return null;
       row.display = {
         ...(typeof row.ens === "string" ? { ens: row.ens } : {}),
@@ -1188,9 +1167,8 @@ function createPublicGateReader(queryable) {
       return row;
     },
     async getPolicy(profileId, dao) {
-      return (await queryable.query(`SELECT profile_id AS "profileId",dao,chain_id::text AS "chainId",enabled,
-        accept_pre_vote AS "acceptPreVote",accept_voting AS "acceptVoting",attention_amount::text AS "attentionAmount",public_tags AS tags
-        FROM gate_public.dao_policies WHERE profile_id=$1 AND dao=$2`, [profileId, daoSlug(dao)])).rows[0] || null;
+      return (await queryable.query(`SELECT "profileId",dao,"chainId",enabled,"acceptPreVote","acceptVoting","attentionAmount",tags
+        FROM gate.public_dao_policy($1,$2)`, [profileId, daoSlug(dao)])).rows[0] || null;
     },
     async getSubmission(publicId) {
       const row = (await queryable.query(`SELECT public_id AS "publicId",state,

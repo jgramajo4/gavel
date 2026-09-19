@@ -753,7 +753,7 @@ test("PR6 Postgres store exposes durable settlement and worker queue methods", a
   const migrationSql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   assert.match(migrationSql, /claim_notification_attempts[\s\S]*SKIP LOCKED/);
   assert.match(migrationSql, /GRANT EXECUTE ON FUNCTION gate\.claim_notification_attempts/);
-  assert.doesNotMatch(migrationSql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
+  assert.doesNotMatch(migrationSql, /\bGRANT\s[^;]*UPDATE[^;]*gate\.notification_attempts/i);
 });
 
 test("settlement monitor SQL claims only due rows and advances with a fenced durable schedule", async () => {
@@ -824,7 +824,7 @@ test("notification SQL persists a 24-hour dedupe deadline and terminally fences 
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.claim_notification_attempts\(integer,timestamptz,integer\)/i);
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.complete_notification_attempt\(text,text\)/i);
   assert.match(sql, /DROP FUNCTION IF EXISTS gate\.fail_notification_attempt\(text,text,timestamptz\)/i);
-  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
+  assert.doesNotMatch(sql, /\bGRANT\s[^;]*UPDATE[^;]*gate\.notification_attempts/i);
 });
 
 test("scanner range leaves pending hints alone and only releases already expiry-pending reservations", () => {
@@ -875,7 +875,7 @@ test("Gate migration replaces legacy settlement completeness checks with one sta
   ]) assert.match(upgrade, new RegExp(`\\b${column}\\b`), column);
 });
 
-test("public reader uses dedicated projections and the narrow receipt function", async () => {
+test("public reader uses only narrow definer projection functions", async () => {
   const seen = [];
   const rows = [
     { id: "p" }, { profileId: "p", dao: "nouns" },
@@ -894,16 +894,17 @@ test("public reader uses dedicated projections and the narrow receipt function",
     assert.deepEqual(Object.keys(await reader.getSubmission(state)), ["publicId", "state", "updatedAt"]);
   }
   assert.deepEqual(Object.keys(await reader.getSubmission("accepted")), ["publicId", "state", "acceptedAt"]);
-  assert.match(seen[0], /FROM gate_public\.profiles/i);
-  assert.match(seen[1], /FROM gate_public\.dao_policies/i);
+  assert.match(seen[0], /FROM gate\.public_profile\(\$1\)/i);
+  assert.match(seen[1], /FROM gate\.public_dao_policy\(\$1,\$2\)/i);
   assert.match(seen[2], /FROM gate\.public_submission_receipt\(\$1\)/i);
-  assert.doesNotMatch(seen[2], /gate_public\.submission_receipts/i);
-  assert.doesNotMatch(seen.join("\n"), /gate\.(?:profiles|dao_policies|submissions|inbox_items)|\bJOIN\b/i);
+  assert.doesNotMatch(seen.join("\n"), /FROM gate_public\.|gate\.(?:profiles|dao_policies|submissions|inbox_items)|\bJOIN\b/i);
 });
 
 test("Gate migration encodes strict invariants, immutable evidence, marker, and no DELETE grant", () => {
   const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const storeSource = fs.readFileSync(path.join(__dirname, "../src/gate/store.js"), "utf8");
+  const profileReader = storeSource.match(/async #getProfileByWallet[\s\S]*?\n  }/i)?.[0] || "";
+  assert.doesNotMatch(profileReader, /lock\s*=|FOR UPDATE/i);
   assert.match(sql, /schema_migrations[\s\S]*gate\/001_gate/i);
   assert.match(sql, /enabled boolean NOT NULL/i);
   assert.match(sql, /current_lifecycle_unavailable boolean NOT NULL/i);
@@ -967,4 +968,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /CREATE CONSTRAINT TRIGGER[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
   assert.match(sql, /migration_checksum|catalog_manifest/i);
   assert.match(sql, /ON CONFLICT\s*\(version\)\s*DO UPDATE SET[\s\S]*migration_checksum\s*=\s*EXCLUDED\.migration_checksum[\s\S]*catalog_manifest\s*=\s*EXCLUDED\.catalog_manifest/i);
+  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v4-runtime-privilege-audit'/i);
+  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-nouns-candidates[\s\S]*sha256:gate-001-v4-runtime-privilege-audit[\s\S]*\)/i);
+  assert.match(sql, /migration_checksum='sha256:gate-001-v4-runtime-privilege-audit'/i);
 });
