@@ -59,3 +59,59 @@ Lobbyists pay the attention price plus Gavel's fixed fee through the Gate
 splitter. The voter receives 100% of the attention price. Gavel receives only
 the disclosed fixed fee. Inbox creation on the Gate backend is the paid-service
 completion condition; notification is private and best-effort.
+
+### Gate advocate client
+
+[`SKILL.md`](SKILL.md) is the installable Bankr skill for the advocate/payer
+side of Gate: a Bankr user pays to put a Nouns Proposal Candidate in front of an
+enrolled Gate voter. Its client code is [`src/`](src/) and its API reference is
+[`references/gate-advocate-client.md`](references/gate-advocate-client.md).
+
+Bankr is the advocate/payer client and nothing more. The advocate/payer and the
+voter/recipient are different actors; Bankr authenticates the payer wallet on
+Gate's existing `base_sender` WalletSession path and never opens a
+`dao_profile` or `dao_inbox` session, so it can never read a voter's private
+inbox.
+
+Gate keeps every decision: quote issuance, eligibility, capacity, lifecycle,
+settlement verification, and inbox creation. The flow is
+
+```
+target -> voter -> pitch -> quote -> confirmation -> payment -> verification
+```
+
+and each step is a call into Gate's own surfaces:
+
+- a real Nouns Proposal Candidate resolves through canonical index data and maps
+  to `PRE_VOTE` / `SPONSOR` — never to `VOTING`, and never with language that
+  implies an on-chain vote is open. An active proposal maps to `VOTING`;
+- voters come from Gate's public directory, not a parallel Bankr list;
+- pitch, disclosures, and evidence URLs are untrusted data. Evidence URLs are
+  carried verbatim and are never fetched, unfurled, summarized, or followed;
+- every payment value comes from the server-issued quote. Conversational text
+  never overrides a quote payment field, and a `409 duplicate` resumes the
+  original quote rather than creating a second one;
+- Bankr signs and does not broadcast. It produces one EIP-3009 authorization,
+  which the client verifies recovers to the quote's payer, and a separate funded
+  relayer broadcasts the exact prepared `settle` transaction. The splitter does
+  not require `msg.sender == payer`, so the gas payer and the USDC payer are
+  different accounts. There is no ERC-20 approve flow and no private key is read;
+- the broadcast transaction hash goes to Gate as a settlement HINT. Neither a
+  mined transaction nor a successful relayer receipt is acceptance: only Gate
+  returning the authoritative `accepted` means the request reached the voter's
+  private Gate inbox.
+
+Base Sepolia only. `GAVEL_GATE_CHAIN_IDS` defaults to `84532` and the client
+refuses a quote for any other chain before anything is signed. Splitter, token,
+and chain are read from the Gate quote and are never hard-coded here.
+
+Configure `GAVEL_GATE_URL` (Gate API origin) and, optionally,
+`GAVEL_INDEX_API_URL`. Refer to these by name; never echo a value. The
+voter-facing web app is deployed separately at `gate.0773h.com` and is not owned
+by this integration. AgentMail is disabled for this demo.
+
+Run the focused suite with:
+
+```bash
+npm run test:bankr-gate
+```
