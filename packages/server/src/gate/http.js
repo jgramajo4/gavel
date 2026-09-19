@@ -78,7 +78,8 @@ function bearerToken(request) {
 }
 
 function createGateHttpServer({ authService, profileService, submissionService, settlementService, inboxService,
-  observability, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter() } = {}) {
+  observability, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter(),
+  corsOrigins = [] } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
   if (!profileService || typeof profileService.updateProfile !== "function"
@@ -102,6 +103,17 @@ function createGateHttpServer({ authService, profileService, submissionService, 
   if (observability !== undefined && typeof observability?.counter !== "function") {
     throw new TypeError("observability.counter must be a function");
   }
+  if (!Array.isArray(corsOrigins)) throw new TypeError("corsOrigins must be an array of exact HTTPS origins");
+  for (const value of corsOrigins) {
+    if (typeof value !== "string" || value.length > 256) throw new TypeError("corsOrigins must contain exact HTTPS origins");
+    let parsed;
+    try { parsed = new URL(value); } catch { throw new TypeError("corsOrigins must contain exact HTTPS origins"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/"
+        || parsed.search || parsed.hash || parsed.origin !== value) {
+      throw new TypeError("corsOrigins must contain exact HTTPS origins without path, query, credentials, or fragment");
+    }
+  }
+  const allowedOrigins = new Set(corsOrigins);
   const count = (name, labels) => { try { observability?.counter(name, 1, labels); } catch {} };
 
   return http.createServer(async (request, response) => {
@@ -112,6 +124,24 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       }
       const url = new URL(request.url, "http://gate.invalid");
       const path = url.pathname;
+
+      // CORS: exact-origin allowlist only. No wildcard. Preflight is answered
+      // before any routing, auth, or rate-limit path; disallowed origins get
+      // no CORS headers at all, so the browser alone refuses the response.
+      const requestOrigin = request.headers.origin;
+      const allowedOrigin = typeof requestOrigin === "string" && allowedOrigins.has(requestOrigin) ? requestOrigin : null;
+      if (allowedOrigin !== null) {
+        response.setHeader("access-control-allow-origin", allowedOrigin);
+        response.setHeader("vary", "Origin");
+        if (request.method === "OPTIONS") {
+          response.writeHead(204, {
+            "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+            "access-control-allow-headers": "Authorization, Content-Type, Accept",
+            "access-control-max-age": "600",
+          });
+          return response.end();
+        }
+      }
 
       if (request.method === "GET" && path === "/health") {
         return sendJson(response, 200, { ok: true, status: "ready" });
