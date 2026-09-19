@@ -577,30 +577,30 @@ class PostgresGateStore {
         FROM gate.submissions WHERE submission_hash=$1`, [submission.submissionHash])).rows[0];
       const lockedDuplicateResume = this.#resumeOwnedDuplicate(lockedDuplicate, submission);
       if (lockedDuplicateResume) return lockedDuplicateResume;
-      const profile = (await client.query("SELECT * FROM gate.profiles WHERE id=$1 FOR UPDATE", [submission.profileId])).rows[0];
-      invariant(profile, "issuance unavailable");
-      invariant(profile.wallet === quote.voter, "issuance unavailable");
-      invariant(profile.availability === "accepting_now", "issuance unavailable");
-      invariant(String(profile.profile_version) === context.expectedProfileVersion, "issuance context changed");
-      invariant(profile.wallet_kind === context.walletKind, "issuance context changed");
-      const policy = (await client.query("SELECT * FROM gate.dao_policies WHERE profile_id=$1 AND dao=$2 FOR UPDATE", [submission.profileId, snapshot.dao])).rows[0];
-      invariant(policy?.enabled === true && String(policy.chain_id) === "1", "issuance unavailable");
-      invariant(String(policy.attention_amount) === quote.attentionAmount, "issuance context changed");
-      invariant(context.stage === "PRE_VOTE" ? policy.accept_pre_vote : context.stage === "VOTING" && policy.accept_voting,
+      const locked = (await client.query("SELECT * FROM gate.lock_issuance_profile_policy($1,$2)",
+        [submission.profileId, snapshot.dao])).rows[0];
+      invariant(locked, "issuance unavailable");
+      invariant(locked.wallet === quote.voter, "issuance unavailable");
+      invariant(locked.availability === "accepting_now", "issuance unavailable");
+      invariant(String(locked.profileVersion) === context.expectedProfileVersion, "issuance context changed");
+      invariant(locked.walletKind === context.walletKind, "issuance context changed");
+      invariant(locked.enabled === true && String(locked.chainId) === "1", "issuance unavailable");
+      invariant(String(locked.attentionAmount) === quote.attentionAmount, "issuance context changed");
+      invariant(context.stage === "PRE_VOTE" ? locked.acceptPreVote : context.stage === "VOTING" && locked.acceptVoting,
         "issuance unavailable for selected Nouns stage");
       const deployment = (await client.query("SELECT * FROM gate.splitter_deployments WHERE id=$1 FOR SHARE", [quote.deploymentId])).rows[0];
       invariant(deployment?.issuance_active === true && String(deployment.chain_id) === quote.baseChainId && deployment.splitter === quote.splitter
         && deployment.token === quote.token && deployment.contract_code_hash === context.deploymentCodeHash, "issuance context changed");
       invariant(explicitDeploymentEnvironment(deployment), "deployment environment is not valid for its chain and token");
-      if (profile.wallet_kind === "contract") {
+      if (locked.walletKind === "contract") {
         invariant(typeof this.baseCodeReader === "function", "Base code reader unavailable");
         let timer;
         const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Base code read timed out")), this.rpcTimeoutMs); });
         let code;
-        try { code = await Promise.race([this.baseCodeReader({ wallet: profile.wallet, chainId: quote.baseChainId }), timeout]); }
+        try { code = await Promise.race([this.baseCodeReader({ wallet: locked.wallet, chainId: quote.baseChainId }), timeout]); }
         finally { clearTimeout(timer); }
         invariant(typeof code === "string" && /^0x[0-9a-fA-F]+$/.test(code) && code !== "0x", "current Base payout code unavailable");
-        invariant(profile.base_payout_code_hash && keccak256(code).toLowerCase() === profile.base_payout_code_hash, "current Base payout code changed");
+        invariant(locked.basePayoutCodeHash && keccak256(code).toLowerCase() === locked.basePayoutCodeHash, "current Base payout code changed");
       }
       const lifetime = (await client.query(`SELECT issued_at AS now,issued_at+interval '600 seconds' AS "expiresAt"
         FROM (SELECT date_trunc('second',clock_timestamp()) AS issued_at) trusted_clock`)).rows[0];
@@ -624,8 +624,8 @@ class PostgresGateStore {
       // layer maps them to coarse ACTIVE_QUOTE_EXISTS / SENDER_PROPOSAL_LIMIT.
       invariant(Number(limits.active_pair) === 0, "ACTIVE_QUOTE_EXISTS");
       invariant(Number(limits.pair_proposal) < 2, "SENDER_PROPOSAL_LIMIT");
-      invariant(Number(limits.pending_count) < Number(policy.pending_reservation_capacity)
-        && Number(limits.settled_count) < Number(policy.settled_capacity), "issuance capacity unavailable");
+      invariant(Number(limits.pending_count) < Number(locked.pendingReservationCapacity)
+        && Number(limits.settled_count) < Number(locked.settledCapacity), "issuance capacity unavailable");
 
       await client.query("SAVEPOINT gate_issue_material");
       try {

@@ -288,6 +288,60 @@ test("least-privilege role enrolls atomically without direct nonce or profile UP
   }
 });
 
+test("least-privilege quote issuance locks through a narrow function and serializes capacity", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_gate') THEN CREATE ROLE gavel_gate NOLOGIN; END IF;
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_api') THEN CREATE ROLE gavel_api NOLOGIN; END IF;
+    END $$`);
+    await pool.query(migration);
+
+    const ownerStore = new PostgresGateStore({ pool });
+    await ownerStore.mutateProfile({
+      profile: { id: "profile-1", wallet: WALLET, walletKind: "eoa", availability: "accepting_now" },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
+        attentionAmount: "1000000", pendingReservationCapacity: 1, settledCapacity: 2, tags: [] },
+    });
+    await ownerStore.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER,
+      signer: new Wallet(SIGNER_KEY).address, token: TOKEN, gavelRecipient: GAVEL_RECIPIENT,
+      deploymentBlock: "0", nextBlock: "0", contractCodeHash: CODE_HASH,
+      config: { environment: "production" }, rpcAccess: "ciphertext", issuanceActive: true });
+
+    assert.equal(await denied(pool, "gavel_gate", "UPDATE gate.profiles SET availability='paused' WHERE id='profile-1'"), true);
+    assert.equal(await denied(pool, "gavel_gate", "UPDATE gate.dao_policies SET enabled=false WHERE profile_id='profile-1'"), true);
+    assert.equal(await denied(pool, "gavel_gate", "SELECT id FROM gate.profiles WHERE id='profile-1' FOR UPDATE"), true);
+    assert.equal(await denied(pool, "gavel_gate", "SELECT id FROM gate.dao_policies WHERE profile_id='profile-1' FOR UPDATE"), true);
+
+    const roleStore = new PostgresGateStore({ pool: effectiveRolePool(pool, "gavel_gate") });
+    const first = issuance("1");
+    const second = issuance("2");
+    const otherPayer = addr("8");
+    second.context.authenticatedSender = otherPayer;
+    second.submission.payer = otherPayer;
+    second.submission.signedSender = otherPayer;
+    second.quote.payer = otherPayer;
+    const outcomes = await Promise.allSettled([roleStore.issue(first), roleStore.issue(second)]);
+    assert.deepEqual(outcomes.map(({ status }) => status).sort(), ["fulfilled", "rejected"]);
+    assert.match(outcomes.find(({ status }) => status === "rejected").reason.message, /capacity unavailable/);
+    assert.equal((await pool.query("SELECT count(*)::int AS count FROM gate.quotes")).rows[0].count, 1);
+    assert.equal((await pool.query("SELECT count(*)::int AS count FROM gate.capacity_reservations")).rows[0].count, 1);
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
 test("Gate migration backfills prior immutable proposal snapshots and restores immutability", {
   skip: canRun ? false : skipReason,
 }, async () => {

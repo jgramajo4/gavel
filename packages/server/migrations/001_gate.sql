@@ -293,6 +293,20 @@ CREATE OR REPLACE FUNCTION gate.mutate_profile(
 $$;
 REVOKE ALL ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.lock_issuance_profile_policy(p_profile_id text,p_dao text)
+RETURNS TABLE(wallet text,"walletKind" text,availability gate.availability,"profileVersion" bigint,
+  "basePayoutCodeHash" text,enabled boolean,"chainId" bigint,"acceptPreVote" boolean,"acceptVoting" boolean,
+  "attentionAmount" numeric,"pendingReservationCapacity" integer,"settledCapacity" integer)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT p.wallet,p.wallet_kind,p.availability,p.profile_version,p.base_payout_code_hash,
+   d.enabled,d.chain_id,d.accept_pre_vote,d.accept_voting,d.attention_amount,
+   d.pending_reservation_capacity,d.settled_capacity
+ FROM gate.profiles p JOIN gate.dao_policies d ON d.profile_id=p.id
+ WHERE p.id=p_profile_id AND d.dao=p_dao
+ FOR UPDATE OF p,d
+$$;
+REVOKE ALL ON FUNCTION gate.lock_issuance_profile_policy(text,text) FROM PUBLIC;
+
 CREATE TABLE IF NOT EXISTS gate.auth_nonces (
  id text PRIMARY KEY, proof_type gate.auth_proof_type NOT NULL, signed_purpose gate.auth_purpose NOT NULL,
  internal_operation text NOT NULL, role gate.auth_role, wallet text NOT NULL CHECK(wallet ~ '^0x[0-9a-f]{40}$'),
@@ -1349,6 +1363,7 @@ DO $$ BEGIN
   GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA gate TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb,boolean) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.lock_issuance_profile_policy(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,boolean,text,boolean,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) TO gavel_gate;
