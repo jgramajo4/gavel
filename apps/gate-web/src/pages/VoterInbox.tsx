@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
 import { isSessionForRole, openWalletSession } from '../wallet-session';
 import { MarkdownPitch } from '../components/MarkdownPitch';
 import { ExternalLink } from '../components/ExternalLink';
 import { FactPanel } from '../components/FactPanel';
-import { formatTimestamp, shortenAddress } from '../format';
+import { WalletIdentity } from '../components/WalletIdentity';
+import { formatDateTime, formatTimestamp } from '../format';
 import type { Eip1193Provider } from '../wallet';
 import type { CanonicalEvidence, CanonicalFact, InboxItem } from '../types';
 
@@ -20,7 +22,9 @@ import type { CanonicalEvidence, CanonicalFact, InboxItem } from '../types';
  *
  * Authentication is the `dao_inbox` WalletSession role and nothing else. An
  * advocate's `base_sender` session and an enrollment's `dao_profile` session
- * are both refused here, by this component and again by the server.
+ * are both refused here, by this component and again by the server. A wallet
+ * connected in the global header is identity, not authorization: this page
+ * still requests a `dao_inbox` challenge and signs it before reading a thing.
  *
  * Advocate-controlled content — the pitch, the disclosures, the evidence URLs —
  * is untrusted. The pitch and disclosures go through the frozen CommonMark
@@ -71,8 +75,8 @@ function ItemKind({ item }: { item: InboxItem }) {
 
 function Meta({ item }: { item: InboxItem }) {
   return (
-    <p className="inbox-meta">
-      {item.canonicalFacts.dao ?? 'nouns'} · Received {formatTimestamp(item.createdAt)}
+    <p className="inbox-meta" title={formatTimestamp(item.createdAt)}>
+      {item.canonicalFacts.dao ?? 'nouns'} · Received {formatDateTime(item.createdAt)}
       {isCandidate(item) ? ' · PRE_VOTE sponsorship request' : ` · Stage ${stageOf(item)}`}
       {item.archived ? ' · Archived' : ''}
     </p>
@@ -192,7 +196,7 @@ function InboxDetail({
           {facts.contentHash ? <Row label="Content hash" value={facts.contentHash} /> : null}
           {facts.sourceBlock ? <Row label="Source block" value={facts.sourceBlock} /> : null}
           {facts.mappingVersion ? <Row label="Lifecycle mapping" value={facts.mappingVersion} /> : null}
-          <Row label="Received" value={formatTimestamp(item.createdAt)} />
+          <Row label="Received" value={formatDateTime(item.createdAt)} />
         </dl>
       </section>
 
@@ -218,6 +222,7 @@ export interface VoterInboxProps {
 
 export function VoterInbox({ api, wallet }: VoterInboxProps) {
   const { session, setSession, clearSession } = useSession();
+  const { noteConnected } = useWalletConnection();
   const inboxSession = isSessionForRole(session, INBOX_ROLE) ? session : null;
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [openItem, setOpenItem] = useState<InboxItem | null>(null);
@@ -281,7 +286,9 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
     setError(null);
     setBusy(true);
     try {
-      const { verified } = await openWalletSession({ api, provider: wallet, role: INBOX_ROLE });
+      const { account, verified } = await openWalletSession({ api, provider: wallet, role: INBOX_ROLE });
+      // Identity for the header; the `dao_inbox` token below is the grant.
+      noteConnected(account);
       setItems(null);
       setOpenItem(null);
       setSession(verified);
@@ -297,7 +304,7 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
     } finally {
       setBusy(false);
     }
-  }, [api, wallet, setSession, explain]);
+  }, [api, wallet, setSession, explain, noteConnected]);
 
   const open = useCallback(
     async (id: string) => {
@@ -348,23 +355,23 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
   if (!inboxSession) {
     return (
       <div className="page page-inbox">
+        <p className="eyebrow">Private</p>
         <h1>Voter inbox</h1>
         <p className="page-intro">
-          Your inbox is private. Sign in with the governance wallet you enrolled to read paid
-          lobbying and sponsorship requests that Gavel verified on chain.
+          Paid pitches that Gate independently accepted appear privately here.
         </p>
         <div className="inbox-signin">
-          <p className="inbox-meta">
-            Signing proves wallet control. It is a typed-data signature, not a transaction: it costs
-            no gas and moves no funds.
+          <p className="inbox-signin-note">
+            Sign in with the governance wallet you enrolled. Signing proves wallet control — a
+            typed-data signature, not a transaction: no gas, no funds moved.
           </p>
           {error ? (
             <p role="alert" className="notice notice-error">
               {error}
             </p>
           ) : null}
-          <button type="button" onClick={authenticate} disabled={busy}>
-            Connect governance wallet
+          <button type="button" className="primary-action" onClick={authenticate} disabled={busy}>
+            {busy ? 'Waiting for your wallet…' : 'Connect governance wallet'}
           </button>
         </div>
         <p className="page-intro">
@@ -377,10 +384,12 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
 
   return (
     <div className="page page-inbox">
+      <p className="eyebrow">Private</p>
       <h1>Voter inbox</h1>
       <p className="page-intro">
-        Signed in as <span className="inbox-wallet">{shortenAddress(inboxSession.session.wallet)}</span>.
-        Every request below was paid for and independently verified by Gavel before it appeared here.
+        Signed in as{' '}
+        <WalletIdentity address={inboxSession.session.wallet} className="inbox-wallet" />. Every
+        request below was paid for and independently verified by Gavel before it appeared here.
       </p>
 
       {error ? (

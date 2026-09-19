@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import type { GateApi } from '../api';
 import type { PublicGateProfile } from '../types';
 import { AvailabilityBadge } from '../components/AvailabilityBadge';
-import { formatTimestamp, formatUsdc } from '../format';
+import { WalletIdentity } from '../components/WalletIdentity';
+import { formatDateTime, formatTimestamp, formatUsdc } from '../format';
 
 /**
  * A durable public page for a Gate in every availability state.
@@ -13,6 +14,12 @@ import { formatTimestamp, formatUsdc } from '../format';
  * settings, capacity, inbox and read state, and any authorization material are
  * private and have no representation here. When a Gate is unavailable the page
  * still exists and says so, without publishing a count or a reset time.
+ *
+ * The Gavel service fee is deliberately NOT shown. This page answers "what does
+ * this voter charge for their attention"; the fee is Gavel's, is paid by the
+ * advocate, and never comes out of the voter's price. It is disclosed where it
+ * is actually owed — the composer and the checkout quote — so the number beside
+ * a voter's name is the number that reaches them.
  */
 export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
@@ -46,6 +53,7 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
 
   return (
     <div className="page page-profile">
+      <p className="eyebrow">Gavel Gate</p>
       <h1>Gate profile</h1>
       {loading ? <p className="notice">Loading…</p> : null}
       {error ? (
@@ -56,8 +64,10 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
       {profile ? (
         <article className="profile">
           <header className="profile-header">
-            {profile.ens ? <p className="profile-ens">{profile.ens}</p> : null}
-            <p className="profile-wallet">{profile.wallet}</p>
+            {/* Name first, shortened address under it. The canonical address is
+                published in full once, below, where a reader who needs to copy
+                it can find it — not twice at the top of the page. */}
+            <WalletIdentity address={profile.wallet} ens={profile.ens} tone="header" />
             <AvailabilityBadge
               availability={profile.availability}
               acceptingSubmissions={profile.acceptingSubmissions}
@@ -73,12 +83,21 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
                 <dt>DAO</dt>
                 <dd>{policy?.dao ?? 'nouns'}</dd>
               </div>
+              <div className="field-row">
+                <dt>Wallet</dt>
+                <dd className="profile-wallet">{profile.wallet}</dd>
+              </div>
               {profile.governancePower ? (
                 <div className="field-row">
                   <dt>Voting power</dt>
-                  <dd>
-                    <span className="power-amount">{profile.governancePower.amount}</span>{' '}
-                    <span className="power-asof">As of {formatTimestamp(profile.governancePower.asOf)}</span>
+                  <dd className="profile-power">
+                    <span className="power-amount">{profile.governancePower.amount}</span>
+                    <span
+                      className="power-asof"
+                      title={formatTimestamp(profile.governancePower.asOf)}
+                    >
+                      As of {formatDateTime(profile.governancePower.asOf)}
+                    </span>
                   </dd>
                 </div>
               ) : null}
@@ -106,10 +125,6 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
                 <div className="field-row">
                   <dt>Attention price</dt>
                   <dd>{formatUsdc(policy.attentionAmount)}</dd>
-                </div>
-                <div className="field-row">
-                  <dt>Gavel service fee</dt>
-                  <dd>{formatUsdc(policy.gavelFeeAmount)} charged separately at checkout</dd>
                 </div>
               </dl>
               {policy.tags.length > 0 ? (

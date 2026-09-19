@@ -1,6 +1,6 @@
 import type { PublicReceiptState } from '../types';
 import type { PaymentPhase } from '../wallet';
-import { formatTimestamp, shortenAddress } from '../format';
+import { formatDateTime, formatTimestamp, shortenAddress } from '../format';
 
 /**
  * The single place that turns wallet phase + public receipt state into words.
@@ -94,7 +94,9 @@ export function SettlementState({ state, phase, txHash, acceptedAt }: Settlement
         </p>
       ) : null}
       {state === 'accepted' && acceptedAt ? (
-        <p className="settlement-tx">Accepted at {formatTimestamp(acceptedAt)}</p>
+        <p className="settlement-tx" title={formatTimestamp(acceptedAt)}>
+          Accepted at {formatDateTime(acceptedAt)}
+        </p>
       ) : null}
     </div>
   );

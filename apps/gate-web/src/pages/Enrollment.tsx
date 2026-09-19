@@ -1,9 +1,11 @@
 import { useCallback, useState } from 'react';
 import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
 import { openWalletSession } from '../wallet-session';
 import { signTypedData, type Eip1193Provider } from '../wallet';
 import { formatUsdc } from '../format';
+import { WalletIdentity } from '../components/WalletIdentity';
 import type { Availability, PublicGateProfile } from '../types';
 
 /**
@@ -18,7 +20,10 @@ import type { Availability, PublicGateProfile } from '../types';
  * account. Safe / ERC-1271 enrollment and the separate Base payout-control
  * proof exist in the server contract but are not offered here, because claiming
  * Safe support before the actual backend path succeeds would be a lie a voter
- * could lose money to.
+ * could lose money to. That restriction, and the fact that the enrolling wallet
+ * is the payout wallet, are stated as helper text at the control they apply to
+ * rather than as paragraphs above the form: a voter should reach the price and
+ * the stage switches immediately, and meet each limitation where it bites.
  *
  * The two stage flags are the voter's opt-in and are signed into the
  * GateEnrollment payload, so this form shows them rather than assuming them.
@@ -39,6 +44,7 @@ function toAtomic(input: string): string | null {
 
 export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) {
   const { setSession } = useSession();
+  const { address, noteConnected } = useWalletConnection();
   const [availability, setAvailability] = useState<Availability>('accepting_now');
   const [acceptPreVote, setAcceptPreVote] = useState(true);
   const [acceptVoting, setAcceptVoting] = useState(true);
@@ -73,6 +79,10 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           provider: wallet,
           role: 'dao_profile',
         });
+        // The header reflects the wallet that just authorized. The connection
+        // is identity only; the `dao_profile` session above is the grant, and
+        // it is still obtained by signing this page's own challenge.
+        noteConnected(account);
         setSession(verified);
 
         // 2. GateEnrollment challenge and proof.
@@ -121,27 +131,31 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         setBusy(false);
       }
     },
-    [api, wallet, price, availability, acceptPreVote, acceptVoting, tags, setSession],
+    [api, wallet, price, availability, acceptPreVote, acceptVoting, tags, setSession, noteConnected],
   );
 
   return (
     <div className="page page-enrollment">
+      <p className="eyebrow">Voter setup</p>
       <h1>Enroll your Gate</h1>
       <p className="page-intro">
-        Your Gate wallet is your payout wallet. The full attention price is paid to the wallet you
-        enroll with, and it cannot be redirected to another address.
-      </p>
-      <p className="page-intro">
-        This experimental deployment enrolls externally owned accounts (EOA) only. Contract wallets,
-        including Safe, are not enabled here.
-      </p>
-      <p className="page-intro">
-        Enrolling opts you in to <strong>paid attention requests</strong>: an advocate pays your
-        attention price to put one message in your private inbox. Payment buys delivery and your
-        attention, never your vote, and you are never obliged to act on anything you read.
+        Set your attention price and choose when advocates can reach you. Payment buys your
+        attention, never your vote.
       </p>
 
       <form className="enrollment" aria-label="Gate enrollment" onSubmit={submit}>
+        <p className="enrollment-wallet">
+          {address ? (
+            <>
+              <span className="enrollment-wallet-label">Enrolling</span>{' '}
+              <WalletIdentity address={address} />
+            </>
+          ) : (
+            <span className="enrollment-wallet-hint">
+              Your wallet is asked to connect and sign when you submit.
+            </span>
+          )}
+        </p>
         <div className="field">
           <label htmlFor="enroll-availability">Availability</label>
           <select
@@ -158,16 +172,15 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           <label htmlFor="enroll-price">Attention price (USDC)</label>
           <input id="enroll-price" inputMode="decimal" value={price} onChange={(event) => setPrice(event.target.value)} />
           <p className="counter">
-            Minimum 1.00 USDC. The full amount is paid to this wallet; Gavel's service fee is charged
-            separately to the advocate and never comes out of your price.
+            Minimum 1.00 USDC, paid in full to the wallet you enroll with — your Gate wallet is your
+            payout wallet and cannot be redirected. Gavel's fee is charged separately to the
+            advocate.
           </p>
         </div>
 
         <fieldset className="field enrollment-stages">
           <legend>Requests you accept</legend>
-          <p className="composer-note">
-            Nouns supports exactly these two stages. At least one must stay on.
-          </p>
+          <p className="composer-note">Nouns has these two stages. Keep at least one on.</p>
           <label className="checkbox-row" htmlFor="enroll-pre-vote">
             <input
               id="enroll-pre-vote"
@@ -218,8 +231,12 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         ) : null}
 
         <button type="submit" disabled={busy}>
-          Enroll Gate
+          {busy ? 'Waiting for your wallet…' : 'Enroll Gate'}
         </button>
+        <p className="counter enrollment-limits">
+          Externally owned accounts (EOA) only. Contract wallets, including Safe, are not enabled in
+          this deployment.
+        </p>
       </form>
     </div>
   );

@@ -9,13 +9,24 @@ import { SubmissionComposer } from './pages/SubmissionComposer';
 import { Checkout } from './pages/Checkout';
 import { VoterInbox } from './pages/VoterInbox';
 import { Enrollment } from './pages/Enrollment';
+import { WalletControl } from './components/WalletControl';
 
 /** Route params are untrusted strings; a malformed wallet never reaches the API. */
 const WALLET = /^0x[0-9a-fA-F]{40}$/;
 
+/** The Gavel mark, identical to the landing page's `favicon.svg` path. */
+function GavelMark() {
+  return (
+    <svg viewBox="0 0 40 40" aria-hidden="true" className="wordmark-mark">
+      <path d="M8 8h24v6H14v12h12v-4h-7v-6h13v16H8z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function NotFound() {
   return (
     <div className="page">
+      <p className="eyebrow">Gavel Gate</p>
       <h1>Not found</h1>
       <p>
         No Gate page matches this address. <Link to="/">Back to the directory</Link>.
@@ -60,13 +71,26 @@ export function App({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) 
       <a className="skip-link" href="#main">
         Skip to main content
       </a>
+      {/* Brand, navigation, and wallet share one row on desktop; the nav drops
+          to its own full-width row on narrow screens so nothing overflows. */}
       <header className="app-header">
-        <p className="brand">Gavel Gate</p>
-        <nav aria-label="Primary">
-          <NavLink to="/">Directory</NavLink>
-          <NavLink to="/inbox">Inbox</NavLink>
-          <NavLink to="/enroll">Enroll</NavLink>
-        </nav>
+        <div className="app-header-inner">
+          <Link className="wordmark" to="/" aria-label="Gavel Gate — directory">
+            <GavelMark />
+            <span className="wordmark-text">
+              gavel<span className="wordmark-dot">.</span>
+            </span>
+            <span className="wordmark-product">Gate</span>
+          </Link>
+          <nav aria-label="Primary">
+            <NavLink to="/" end>
+              Directory
+            </NavLink>
+            <NavLink to="/inbox">Inbox</NavLink>
+            <NavLink to="/enroll">Enroll</NavLink>
+          </nav>
+          <WalletControl />
+        </div>
       </header>
       <main id="main" tabIndex={-1}>
         <Routes>

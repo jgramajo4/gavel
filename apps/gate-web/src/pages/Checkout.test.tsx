@@ -15,6 +15,7 @@ import {
   quotedReceipt,
 } from '../test/fixtures';
 import { encodeSettleCall } from '../wallet';
+import { formatExpiryDateTime } from '../format';
 
 const session = {
   token: 'a'.repeat(43),
@@ -212,7 +213,11 @@ describe('Checkout', () => {
     // No new submission, and no second quote request.
     expect(calls.some((call) => CREATE_SUBMISSION.test(call))).toBe(false);
     expect(onResume).toHaveBeenCalledWith(expect.objectContaining({ quote }));
+    // Human-readable, and still the exact instant the server signed over.
     expect(screen.getByTestId('quote-expiry')).toHaveTextContent(
+      formatExpiryDateTime(quote.message.expiry),
+    );
+    expect(screen.getByTestId('quote-expiry').textContent).not.toContain(
       new Date(Number(quote.message.expiry) * 1000).toISOString(),
     );
   });

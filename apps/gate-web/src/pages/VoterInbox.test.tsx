@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { VoterInbox } from './VoterInbox';
-import { renderApp, stubApi, stubWallet } from '../test/harness';
+import { renderApp, stubApi, stubEnsResolver, stubWallet } from '../test/harness';
 import {
   VOTER,
   candidateInboxItem,
@@ -188,7 +188,14 @@ describe('VoterInbox detail', () => {
     expect(item).toHaveTextContent(/sponsor this candidate/i);
     expect(item).toHaveTextContent(/nouns/i);
     expect(item).toHaveTextContent(/PRE_VOTE/);
-    expect(item).toHaveTextContent(/2026-09-18T00:10:00.000Z/);
+    // A person reads a time, not an ISO-8601 string. The exact instant stays
+    // reachable as the title of the line that summarizes it.
+    expect(item).toHaveTextContent('18 Sep 2026, 00:10 UTC');
+    expect(item.textContent).not.toContain('2026-09-18T00:10:00.000Z');
+    expect(item.querySelector('.inbox-meta')).toHaveAttribute(
+      'title',
+      '2026-09-18T00:10:00.000Z',
+    );
     expect(item).toHaveTextContent(/not an active governance proposal/i);
   });
 
@@ -275,5 +282,51 @@ describe('VoterInbox detail', () => {
     await openCandidate();
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /repl(y|ies)|follow.?up/i })).toBeNull();
+  });
+});
+
+/**
+ * Identity display. The wallet the voter signed in with is shown by name when
+ * one resolves, and as a shortened address otherwise — never as 42 characters
+ * of hex, and never as the thing the server checks.
+ */
+describe('VoterInbox identity', () => {
+  it('shows the signed-in wallet shortened when there is no ENS name', async () => {
+    const { api } = stubApi([{ method: 'GET', match: LIST, status: 200, body: listBody }]);
+    const { container } = renderApp(<VoterInbox api={api} wallet={stubWallet()} />, {
+      session: inboxSession,
+    });
+    expect(await screen.findByText('0x4444…4444')).toBeInTheDocument();
+    expect(container.textContent).not.toContain(VOTER);
+  });
+
+  it('shows a resolved ENS name with the shortened address beneath it', async () => {
+    const { api } = stubApi([{ method: 'GET', match: LIST, status: 200, body: listBody }]);
+    const { container } = renderApp(<VoterInbox api={api} wallet={stubWallet()} />, {
+      session: inboxSession,
+      ens: stubEnsResolver({ [VOTER]: 'voter.eth' }),
+    });
+    expect(await screen.findByText('voter.eth')).toBeInTheDocument();
+    expect(screen.getByText('0x4444…4444')).toBeInTheDocument();
+    expect(container.textContent).not.toContain(VOTER);
+  });
+
+  it('never lets a resolved name stand in for the wallet the server authorized', async () => {
+    const { api, calls } = stubApi([
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: sessionChallenge },
+      { method: 'POST', match: /\/auth\/verify$/, status: 200, body: inboxSession },
+      { method: 'GET', match: LIST, status: 200, body: listBody },
+    ]);
+    const wallet = signedWallet();
+    const user = userEvent.setup();
+    renderApp(<VoterInbox api={api} wallet={wallet} />, {
+      ens: stubEnsResolver({ [VOTER]: 'voter.eth' }),
+    });
+    await user.click(screen.getByRole('button', { name: /connect governance wallet/i }));
+    await screen.findByText('voter.eth');
+    // Every request body and every signed payload still carries the address.
+    const signed = wallet.calls.find((call) => call.method === 'eth_signTypedData_v4');
+    expect(JSON.stringify(signed?.params)).not.toContain('voter.eth');
+    expect(calls.join(' ')).not.toContain('voter.eth');
   });
 });

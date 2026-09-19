@@ -29,18 +29,41 @@ const walletSession = {
 };
 
 describe('Enrollment', () => {
-  it('states that the Gate wallet is the payout wallet', () => {
+  it('puts the payout fact next to the price it governs, not above the form', () => {
     const { api } = stubApi([]);
     renderApp(<Enrollment api={api} wallet={stubWallet()} />);
-    expect(screen.getByText(/gate wallet .*payout wallet/i)).toBeInTheDocument();
-    expect(screen.getByText(/cannot be redirected|no payout override/i)).toBeInTheDocument();
+    const price = screen.getByLabelText(/attention price/i);
+    const helper = screen.getByText(/payout wallet and cannot be redirected/i);
+    // Helper text belongs to the field: it sits inside the same `.field`.
+    expect(price.closest('.field')).toContainElement(helper);
   });
 
   it('does not claim Safe or contract-wallet support', () => {
     const { api } = stubApi([]);
     const { container } = renderApp(<Enrollment api={api} wallet={stubWallet()} />);
     expect(container.textContent).not.toMatch(/safe (is )?supported|supports safe|erc-?1271 supported/i);
-    expect(screen.getByText(/externally owned|EOA/i)).toBeInTheDocument();
+    // The EOA limit survives, as small print at the control that enforces it.
+    const limit = screen.getByText(/externally owned accounts \(EOA\) only/i);
+    expect(limit).toBeInTheDocument();
+    expect(limit).toHaveClass('enrollment-limits');
+  });
+
+  it('reaches the controls almost immediately, with no wall of prose above them', () => {
+    const { api } = stubApi([]);
+    const { container } = renderApp(<Enrollment api={api} wallet={stubWallet()} />);
+    expect(screen.getByRole('heading', { name: /enroll your gate/i, level: 1 })).toBeInTheDocument();
+    const intros = container.querySelectorAll('.page, .page > .page-intro');
+    // Exactly one line of supporting copy sits between the heading and the form.
+    expect(container.querySelectorAll('.page > .page-intro')).toHaveLength(1);
+    expect(intros.length).toBeGreaterThan(0);
+    expect(screen.getByText(/set your attention price and choose when advocates can reach you/i))
+      .toBeInTheDocument();
+    // …and the economics stay in it.
+    expect(screen.getByText(/payment buys your attention, never your vote/i)).toBeInTheDocument();
+    // The implementation detail paragraphs are gone from the top of the page.
+    const form = screen.getByRole('form', { name: /gate enrollment/i });
+    const beforeForm = (container.textContent ?? '').split(form.textContent ?? '')[0];
+    expect(beforeForm).not.toMatch(/externally owned|contract wallets|payout wallet/i);
   });
 
   it('runs challenge, wallet proof, then typed-data enrollment', async () => {
@@ -85,15 +108,64 @@ describe('Enrollment', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/authentication challenge is invalid/i);
   });
 
-  it('presents the paid-attention opt-in, the price, and the stages in plain words', () => {
+  it('presents the economics, the price, and the stages in plain words', () => {
     const { api } = stubApi([]);
     renderApp(<Enrollment api={api} wallet={stubWallet()} />);
-    expect(screen.getByText(/paid attention requests/i)).toBeInTheDocument();
     expect(screen.getByText(/never your vote/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/attention price/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/PRE_VOTE/)).toBeInTheDocument();
     expect(screen.getByLabelText(/VOTING/)).toBeInTheDocument();
     expect(screen.getByLabelText(/availability/i)).toBeInTheDocument();
+  });
+
+  it('enrolls the wallet already connected in the header, and still signs for dao_profile', async () => {
+    const bodies: unknown[] = [];
+    const calls: string[] = [];
+    const impl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      if (url.endsWith('/auth/challenge')) {
+        return { status: 200, ok: true, json: async () => challenge } as Response;
+      }
+      if (url.endsWith('/auth/verify')) {
+        return { status: 200, ok: true, json: async () => walletSession } as Response;
+      }
+      return { status: 200, ok: true, json: async () => acceptingProfile } as Response;
+    }) as typeof fetch;
+    const api = createGateApi('', impl);
+    const wallet = stubWallet({
+      eth_requestAccounts: () => [VOTER],
+      eth_chainId: () => '0x1',
+      eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+    });
+    const user = userEvent.setup();
+    renderApp(<Enrollment api={api} wallet={wallet} />, { walletAddress: VOTER });
+
+    // The form shows who it is about to enroll without a second connect step.
+    expect(screen.getByText(/enrolling/i)).toBeInTheDocument();
+    expect(screen.getByText('0x4444…4444')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/attention price/i), '5.00');
+    await user.click(screen.getByRole('button', { name: /enroll|update gate/i }));
+
+    await waitFor(() => expect(calls.some((call) => call.includes('/me/profile'))).toBe(true));
+    // A globally connected wallet grants nothing. Both signatures still
+    // happen: the dao_profile WalletSession, then the GateEnrollment proof.
+    const requested = calls
+      .filter((call) => call.includes('/auth/challenge'))
+      .length;
+    expect(requested).toBe(2);
+    expect(calls.filter((call) => call.includes('/auth/verify'))).toHaveLength(1);
+    expect(
+      wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4'),
+    ).toHaveLength(2);
+    // Exactly one WalletSession challenge, for exactly one role.
+    const roles = bodies
+      .map((body) => (body as { proofType?: string; role?: string }))
+      .filter((body) => body?.proofType === 'WalletSession' && body.role !== undefined)
+      .map((body) => body.role);
+    expect(roles).toEqual(['dao_profile']);
   });
 
   it('signs the stages the voter actually chose', async () => {

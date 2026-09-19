@@ -20,7 +20,11 @@ describe('SettlementState', () => {
 
   it('shows accepted only when the public API reports accepted', () => {
     render(<SettlementState state="accepted" phase="broadcast" acceptedAt="2026-09-16T10:05:00.000Z" />);
-    expect(screen.getByRole('status')).toHaveTextContent(/accepted/i);
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent(/accepted/i);
+    // The acceptance time reads as a time, with the exact instant on the title.
+    expect(status).toHaveTextContent('Accepted at 16 Sep 2026, 10:05 UTC');
+    expect(status.textContent).not.toContain('2026-09-16T10:05:00.000Z');
   });
 
   it('does not show accepted when the wallet rejected the transaction', () => {
