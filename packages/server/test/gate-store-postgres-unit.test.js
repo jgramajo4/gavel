@@ -875,7 +875,7 @@ test("Gate migration replaces legacy settlement completeness checks with one sta
   ]) assert.match(upgrade, new RegExp(`\\b${column}\\b`), column);
 });
 
-test("public reader queries only dedicated views and returns state-specific receipt timestamps", async () => {
+test("public reader uses dedicated projections and the narrow receipt function", async () => {
   const seen = [];
   const rows = [
     { id: "p" }, { profileId: "p", dao: "nouns" },
@@ -896,7 +896,8 @@ test("public reader queries only dedicated views and returns state-specific rece
   assert.deepEqual(Object.keys(await reader.getSubmission("accepted")), ["publicId", "state", "acceptedAt"]);
   assert.match(seen[0], /FROM gate_public\.profiles/i);
   assert.match(seen[1], /FROM gate_public\.dao_policies/i);
-  assert.match(seen[2], /FROM gate_public\.submission_receipts/i);
+  assert.match(seen[2], /FROM gate\.public_submission_receipt\(\$1\)/i);
+  assert.doesNotMatch(seen[2], /gate_public\.submission_receipts/i);
   assert.doesNotMatch(seen.join("\n"), /gate\.(?:profiles|dao_policies|submissions|inbox_items)|\bJOIN\b/i);
 });
 

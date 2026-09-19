@@ -8,6 +8,8 @@ const { createQuoteTypedData, verifyQuoteSignature } = require("@gavel/gate");
 const { createAuthService } = require("../src/gate/auth");
 const { createProfileService } = require("../src/gate/profile-service");
 const { createQuoteSigner } = require("../src/gate/quote-signer");
+const { createSubmissionService } = require("../src/gate/submission-service");
+const { createGateHttpServer } = require("../src/gate/http");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
 
 const databaseUrl = process.env.GAVEL_GATE_TEST_DATABASE_URL;
@@ -93,6 +95,12 @@ function effectiveRolePool(pool, role) {
       try { return await client.query(sql, values); } finally { client.release(); }
     },
   };
+}
+
+async function withServer(server, callback) {
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try { return await callback(`http://127.0.0.1:${server.address().port}`); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
 }
 
 function walletSessionProof(challenge, signature, message = challenge.message) {
@@ -1037,6 +1045,98 @@ test("candidate PRE_VOTE quote persists exact target identity in real PostgreSQL
     assert.deepEqual((await pool.query(`SELECT issuance_lifecycle AS issuance,current_lifecycle AS current,
       lifecycle_changed AS changed FROM gate.inbox_items WHERE id='candidate-inbox'`)).rows[0],
     { issuance: "PRE_VOTE", current: "CLOSED", changed: true });
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
+test("candidate HTTP issuance reads only the narrow public receipt function as gavel_gate", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 6 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_gate') THEN CREATE ROLE gavel_gate NOLOGIN; END IF;
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_api') THEN CREATE ROLE gavel_api NOLOGIN; END IF;
+    END $$`);
+    await pool.query(migration);
+
+    const ownerStore = new PostgresGateStore({ pool });
+    await ownerStore.mutateProfile({
+      profile: { id: "profile-1", wallet: WALLET, walletKind: "eoa", availability: "accepting_now" },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: true, acceptVoting: false,
+        attentionAmount: "1000000", pendingReservationCapacity: 12, settledCapacity: 25, tags: [] },
+    });
+    await ownerStore.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER,
+      signer: new Wallet(SIGNER_KEY).address, token: TOKEN, gavelRecipient: GAVEL_RECIPIENT,
+      deploymentBlock: "0", nextBlock: "0", contractCodeHash: CODE_HASH,
+      config: { environment: "production" }, rpcAccess: "ciphertext", issuanceActive: true });
+
+    const rolePool = effectiveRolePool(pool, "gavel_gate");
+    const roleStore = new PostgresGateStore({ pool: rolePool, randomBytes: () => Buffer.alloc(16, 9) });
+    const publicReader = createPublicGateReader(rolePool);
+    const command = candidateIssuance("d");
+    const submissionService = createSubmissionService({
+      store: roleStore,
+      publicReader,
+      indexClient: { async getTargetSnapshot(targetId) {
+        assert.equal(targetId, command.snapshot.targetId);
+        return { ...command.snapshot, dao: "nouns", proposer: addr("a"), slug: "candidate sponsorship" };
+      } },
+      quoteSigner: command.signer,
+      deployment: { id: "deployment-1", chainId: 8453, splitter: SPLITTER, token: TOKEN, codeHash: CODE_HASH },
+      basePayerCodeReader: async () => "0x",
+    });
+    const server = createGateHttpServer({
+      authService: {
+        async issueChallenge() {}, async verifyProof() {},
+        async authenticateSession() { return { wallet: PAYER, role: "base_sender" }; },
+      },
+      profileService: { async updateProfile() {}, async listPublicProfiles() { return []; }, async getPublicProfile() { return null; } },
+      submissionService,
+    });
+
+    let issued;
+    await withServer(server, async (base) => {
+      const response = await fetch(`${base}/v1/gates/${WALLET}/submissions`, {
+        method: "POST",
+        headers: { authorization: ["Bearer", "test-session"].join(" "), "content-type": "application/json" },
+        body: JSON.stringify({ dao: "nouns", targetId: command.snapshot.targetId, stage: "PRE_VOTE", position: "SPONSOR",
+          pitch: "Please sponsor this candidate.", disclosures: "None.", evidenceUrls: [] }),
+      });
+      assert.equal(response.status, 201);
+      issued = await response.json();
+      assert.equal(issued.state, "payment_required");
+
+      const missing = await fetch(`${base}/v1/submissions/${"A".repeat(22)}/status`);
+      assert.equal(missing.status, 404);
+      assert.deepEqual(await missing.json(), { error: { code: "NOT_FOUND", message: "Not found" } });
+    });
+
+    assert.equal(await denied(pool, "gavel_gate", "SELECT * FROM gate_public.submission_receipts"), true);
+    assert.deepEqual((await pool.query(`SELECT
+      has_function_privilege('gavel_gate','gate.public_submission_receipt(text)','EXECUTE') AS gate,
+      has_function_privilege('public','gate.public_submission_receipt(text)','EXECUTE') AS public`)).rows[0],
+    { gate: true, public: false });
+    assert.deepEqual((await pool.query(`SELECT p.prosecdef,p.proconfig
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='gate' AND p.proname='public_submission_receipt'`)).rows[0],
+    { prosecdef: true, proconfig: ["search_path=pg_catalog, gate, gate_public"] });
+
+    const fromView = (await pool.query("SELECT * FROM gate_public.submission_receipts WHERE public_id=$1", [issued.publicId])).rows;
+    const fromFunction = (await pool.query("SELECT * FROM gate.public_submission_receipt($1)", [issued.publicId])).rows;
+    assert.deepEqual(fromFunction, fromView);
+    assert.deepEqual(Object.keys(fromFunction[0]), ["public_id", "state", "updated_at", "accepted_at"]);
+    assert.equal(await publicReader.getSubmission("A".repeat(22)), null);
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});

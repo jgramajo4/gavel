@@ -72,11 +72,15 @@ test("public Gate reader exposes only explicit safe profile, policy, and receipt
   const queries = [];
   const reader = createPublicGateReader({ query: async (sql, values) => {
     queries.push({ sql, values });
-    return { rows: [{ publicId: values[0], state: "payment_required", updatedAt: new Date(0), acceptedAt: null }] };
+    return { rows: values[0] === "opaque-id"
+      ? [{ publicId: values[0], state: "payment_required", updatedAt: new Date(0), acceptedAt: null }]
+      : [] };
   }});
   assert.deepEqual(Object.keys(reader), ["getProfile", "getPolicy", "getSubmission"]);
   assert.deepEqual(await reader.getSubmission("opaque-id"), { publicId: "opaque-id", state: "payment_required", updatedAt: new Date(0) });
-  assert.match(queries[0].sql, /FROM gate_public\.submission_receipts/i);
+  assert.equal(await reader.getSubmission("missing-id"), null);
+  assert.match(queries[0].sql, /FROM gate\.public_submission_receipt\(\$1\)/i);
+  assert.doesNotMatch(queries[0].sql, /FROM gate_public\.submission_receipts/i);
   assert.doesNotMatch(queries[0].sql, /gate\.inbox|delivery|signature|notification|auth_nonce|reorg|payer|voter|material/i);
   assert.equal("query" in reader, false);
 });
