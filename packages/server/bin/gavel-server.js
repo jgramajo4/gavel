@@ -37,6 +37,21 @@ function origin(env, name) {
   }
   return parsed.origin;
 }
+
+function corsOriginsFromEnv(env = process.env) {
+  const raw = env.GAVEL_GATE_CORS_ORIGINS;
+  if (raw === undefined || raw === "") return Object.freeze([]);
+  return Object.freeze(raw.split(",").map((value) => value.trim()).filter((value) => value !== "")
+    .map((value) => {
+      let parsed;
+      try { parsed = new URL(value); } catch { throw new TypeError("GAVEL_GATE_CORS_ORIGINS must contain exact HTTPS origins"); }
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password
+          || parsed.pathname !== "/" || parsed.search || parsed.hash || parsed.origin !== value) {
+        throw new TypeError("GAVEL_GATE_CORS_ORIGINS must contain exact HTTPS origins without credentials, path, query, or fragment");
+      }
+      return parsed.origin;
+    }));
+}
 function integer(value, name, fallback, minimum = 1, maximum = 65_535) {
   const result = Number(value ?? fallback);
   if (!Number.isSafeInteger(result) || result < minimum || result > maximum) {
@@ -55,6 +70,7 @@ function serverConfigFromEnv(env = process.env) {
 
   const audience = required(env, "GAVEL_GATE_API_AUDIENCE");
   if (audience.length > 256) throw new TypeError("GAVEL_GATE_API_AUDIENCE is too long");
+  const corsOrigins = corsOriginsFromEnv(env);
   return Object.freeze({
     settlement,
     databaseUrl: env.GAVEL_GATE_DATABASE_URL,
@@ -62,6 +78,7 @@ function serverConfigFromEnv(env = process.env) {
     ethereumRpcUrl: env.GAVEL_GATE_ETHEREUM_RPC_URL,
     indexUrl: origin(env, "GAVEL_GATE_INDEX_URL"),
     audience,
+    corsOrigins,
     baseVerifier: address(env, "GAVEL_GATE_BASE_VERIFIER"),
     daoVerifier: address(env, "GAVEL_GATE_DAO_VERIFIER"),
     freshnessMs: integer(env.GAVEL_GATE_NOUNS_FRESHNESS_SECONDS, "GAVEL_GATE_NOUNS_FRESHNESS_SECONDS", 900, 1, 86_400) * 1_000,
@@ -227,6 +244,7 @@ async function composeProduction(env) {
   };
   const runtime = await createGateServerRuntime({ env, store, baseClient, authService, profileService,
     submissionService, inboxService, operatorAlert, observability,
+    corsOrigins: config.corsOrigins,
     lifecycleReader: async ({ proposalId, targetId }) => targetId
       ? await indexClient.getTargetLifecycle(targetId)
       : (await indexClient.getProposalSnapshot(proposalId)).eligibility,

@@ -416,6 +416,7 @@ async function createGateServerRuntime(options = {}) {
     ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
     ...(observability ? { observability } : {}),
+    ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
   };
   const server = factories.createGateHttpServer(httpOptions);
   const timers = [];
