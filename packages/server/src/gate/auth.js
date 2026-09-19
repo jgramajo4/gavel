@@ -54,6 +54,21 @@ class MemoryAuthRepository {
     const sessions = structuredClone(this.#sessions);
     const transaction = Object.freeze({
       getNonceByHash: async (nonceHash) => clone(nonces.get(nonceHash) ?? null),
+      consumeAuthNonceAndInsertSession: async ({ expectedNonce, tokenHash, consumedAt, sessionExpiry } = {}) => {
+        const row = nonces.get(expectedNonce?.nonceHash);
+        const matches = row && Object.entries(expectedNonce).every(([key, value]) => row[key] === value);
+        if (!matches || row.consumedAt !== null || BigInt(row.expiry) <= BigInt(consumedAt)) {
+          throw new Error("authentication proof unavailable");
+        }
+        if (sessions.has(tokenHash)) throw new Error("session collision");
+        row.consumedAt = String(consumedAt);
+        const session = {
+          tokenHash, wallet: row.wallet, role: row.role, chainId: row.chainId, audience: row.audience,
+          issuedAt: String(consumedAt), expiry: String(sessionExpiry), revokedAt: null,
+        };
+        sessions.set(tokenHash, clone(session));
+        return clone(session);
+      },
       consumeNonce: async (nonceHash, consumedAt) => {
         const row = nonces.get(nonceHash);
         if (!row || row.consumedAt !== null) throw new Error("authentication proof unavailable");
@@ -134,13 +149,14 @@ function createAuthService(options = {}) {
       if (input.role !== undefined) throw new TypeError("role is not valid for GateEnrollment");
       if (input.dao !== dao.dao || String(input.daoChainId) !== String(dao.chainId)) throw new TypeError("unsupported DAO domain");
       if (!new Set(["accepting_now", "paused", "closed"]).has(input.availability)) throw new TypeError("unsupported availability");
-      if (input.acceptPreVote !== false || typeof input.acceptVoting !== "boolean") throw new TypeError("unsupported Nouns stages");
+      if (typeof input.acceptPreVote !== "boolean" || typeof input.acceptVoting !== "boolean"
+          || (!input.acceptPreVote && !input.acceptVoting)) throw new TypeError("at least one Nouns stage (PRE_VOTE or VOTING) is required");
       if (!isCanonicalUintString(input.attentionAmount)
           || BigInt(input.attentionAmount) < 1_000_000n) throw new TypeError("invalid attention amount");
       selected = dao;
       purpose = GATE_ENROLLMENT_PURPOSE;
       messageFields = { wallet, purpose, availability: input.availability, dao: dao.dao,
-        daoChainId: String(dao.chainId), acceptPreVote: false, acceptVoting: input.acceptVoting,
+        daoChainId: String(dao.chainId), acceptPreVote: input.acceptPreVote, acceptVoting: input.acceptVoting,
         attentionAmount: String(input.attentionAmount) };
     } else {
       if (input.role !== undefined) throw new TypeError("role is not valid for BasePayoutControl");
@@ -273,12 +289,13 @@ function createAuthService(options = {}) {
       const tokenBytes = randomBytes(32);
       if (!Buffer.isBuffer(tokenBytes) || tokenBytes.length !== 32) throw new TypeError("randomBytes must return exactly 32 bytes");
       const token = tokenBytes.toString("base64url");
-      const session = {
-        wallet: value.wallet, role: value.message.role, chainId: String(value.selected.chainId), audience,
-        issuedAt: value.now, expiry: String(BigInt(value.now) + BigInt(sessionLifetimeSeconds)),
-      };
-      await transaction.consumeNonce(value.nonceHash, value.now);
-      await transaction.insertSession({ ...session, tokenHash: keccak256(toUtf8Bytes(token)), revokedAt: null });
+      const storedSession = await transaction.consumeAuthNonceAndInsertSession({
+        expectedNonce: value.expectedRow,
+        tokenHash: keccak256(toUtf8Bytes(token)),
+        consumedAt: value.now,
+        sessionExpiry: String(BigInt(value.now) + BigInt(sessionLifetimeSeconds)),
+      });
+      const { tokenHash: _tokenHash, revokedAt: _revokedAt, ...session } = storedSession;
       return { token, session };
     });
   }
@@ -305,7 +322,8 @@ function createAuthService(options = {}) {
     if (proofType === "GateEnrollment") {
       if (message.purpose !== GATE_ENROLLMENT_PURPOSE || message.daoChainId !== String(dao.chainId)
           || !new Set(["accepting_now", "paused", "closed"]).has(message.availability)
-          || message.acceptPreVote !== false || typeof message.acceptVoting !== "boolean"
+          || typeof message.acceptPreVote !== "boolean" || typeof message.acceptVoting !== "boolean"
+          || (!message.acceptPreVote && !message.acceptVoting)
           || !isCanonicalUintString(message.attentionAmount) || BigInt(message.attentionAmount) < 1_000_000n) {
         throw new AuthRequestError("GateEnrollment binding mismatch");
       }

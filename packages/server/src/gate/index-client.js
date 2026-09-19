@@ -1,10 +1,12 @@
-const { adaptNounsGateLifecycle } = require("@gavel/gate");
+const { keccak256, toUtf8Bytes } = require("ethers");
+const { adaptNounsGateLifecycle, parseNounsCandidateTargetId } = require("@gavel/gate");
 
 const DEFAULT_FRESHNESS_MS = 15 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
+const { canonicalGateActions } = require("../../../governance-index/src/gate-action");
 
 class IndexUnavailableError extends Error {
   constructor(message = "Nouns governance index is unavailable") {
@@ -34,8 +36,9 @@ function timestamp(value, name) {
 
 function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs = DEFAULT_FRESHNESS_MS,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, observability } = {}) {
-  if (!source || typeof source.getHealth !== "function" || typeof source.getProposal !== "function") {
-    throw new TypeError("source.getHealth and source.getProposal are required");
+  if (!source || typeof source.getHealth !== "function"
+      || (typeof source.getProposal !== "function" && typeof source.getTarget !== "function")) {
+    throw new TypeError("source.getHealth and a target reader are required");
   }
   if (!Number.isFinite(freshnessMs) || freshnessMs <= 0) throw new TypeError("freshnessMs must be positive");
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 10_000) {
@@ -85,7 +88,45 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
     finally { clearTimeout(timer); }
   }
 
+  async function readTarget(targetId, { eligibleOnly }) {
+    let identity;
+    try { identity = parseNounsCandidateTargetId(targetId); }
+    catch { throw new IndexUnavailableError("candidate target identity is invalid"); }
+    if (typeof source.getTarget !== "function") throw new IndexUnavailableError("candidate target source is unavailable");
+    await assertFresh(await readSource((signal) => source.getHealth("nouns", { signal })), "index health");
+    const target = requireObject(await readSource((signal) => source.getTarget("nouns", targetId, { signal })), "candidate target");
+    if (typeof target.slug !== "string"
+        || target.dao !== "nouns" || target.targetId !== targetId || target.kind !== "candidate"
+        || String(target.proposer).toLowerCase() !== identity.proposer
+        || keccak256(toUtf8Bytes(target.slug)).toLowerCase() !== identity.slugHash
+        || target.slugHash !== undefined && target.slugHash !== identity.slugHash) {
+      throw new IndexUnavailableError("candidate target identity mismatch");
+    }
+    const refreshedAt = await assertFresh({ healthy: true, refreshedAt: target.refreshedAt }, "candidate target");
+    if (target.mappingVersion !== "nouns-candidate-lifecycle/1"
+        || !(["ACTIVE", "CANCELED"].includes(target.nativeState))
+        || !(["PRE_VOTE", "CLOSED"].includes(target.eligibility))
+        || (target.nativeState === "CANCELED" && target.eligibility !== "CLOSED")
+        || (eligibleOnly && (target.nativeState !== "ACTIVE" || target.eligibility !== "PRE_VOTE"))) {
+      throw new IndexUnavailableError("candidate target is not PRE_VOTE eligible");
+    }
+    if (!Array.isArray(target.actions)) throw new IndexUnavailableError("candidate actions are invalid");
+    return {
+      dao: "nouns", targetId, kind: "candidate", proposer: identity.proposer, slug: target.slug,
+      nativeState: target.nativeState, eligibility: target.eligibility, mappingVersion: target.mappingVersion,
+      refreshedAt, sourceBlock: decimal(target.sourceBlock, "candidate.sourceBlock"),
+      sourceBlockHash: hash(target.sourceBlockHash, "candidate.sourceBlockHash"),
+      contentHash: hash(target.contentHash, "candidate.contentHash"),
+      canonicalActions: (() => {
+        try { return canonicalGateActions(target.actions, { exact: true }); }
+        catch { throw new IndexUnavailableError("candidate action is invalid"); }
+      })(),
+    };
+  }
+
   return Object.freeze({
+    getTargetSnapshot: (targetId) => readTarget(targetId, { eligibleOnly: true }),
+    getTargetLifecycle: async (targetId) => (await readTarget(targetId, { eligibleOnly: false })).eligibility,
     async getVotingPower(wallet) {
       if (typeof source.getVotingPower !== "function") throw new IndexUnavailableError("voting power source is unavailable");
       if (typeof wallet !== "string" || !ADDRESS.test(wallet)) throw new TypeError("wallet must be an Ethereum address");
@@ -128,7 +169,10 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
         sourceBlock: decimal(proposal.sourceBlock, "proposal.sourceBlock"),
         sourceBlockHash: hash(proposal.sourceBlockHash, "proposal.sourceBlockHash"),
         contentHash: hash(proposal.contentHash, "proposal.contentHash"),
-        canonicalActions: structuredClone(proposal.actions),
+        canonicalActions: (() => {
+          try { return canonicalGateActions(proposal.actions, { exact: true }); }
+          catch { throw new IndexUnavailableError("proposal action is invalid"); }
+        })(),
       };
     },
   });

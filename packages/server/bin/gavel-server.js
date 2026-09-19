@@ -93,7 +93,7 @@ async function assertDatabaseReady(pool) {
     throw new Error("Gate database must use the least-privilege gavel_gate role");
   }
   if (row.migrationVersion !== "gate/001_gate-v3"
-      || row.migrationChecksum !== "sha256:gate-001-v3-runtime-readiness"
+      || row.migrationChecksum !== "sha256:gate-001-v4-nouns-candidates"
       || row.manifestMatches !== true) {
     throw new Error("Gate database migration is missing or invalid");
   }
@@ -132,7 +132,14 @@ function createCanonicalIndexSource({ baseUrl, ethereumProvider, fetchImpl = glo
       return { healthy: !failed, refreshedAt: refreshedAt || "invalid", lastError: failed ? "sync_failed" : null };
     },
     async getProposal(dao, proposalId) {
-      return fetchJson(fetchImpl, `${originValue}/v1/daos/${encodeURIComponent(dao)}/proposals/${encodeURIComponent(proposalId)}`);
+      if (dao !== "nouns") throw new Error("unsupported DAO");
+      const proposal = await fetchJson(fetchImpl, `${originValue}/v1/gate/daos/nouns/proposals/${encodeURIComponent(proposalId)}`);
+      return { dao: "nouns", ...proposal };
+    },
+    async getTarget(dao, targetId) {
+      if (dao !== "nouns") throw new Error("unsupported DAO");
+      const target = await fetchJson(fetchImpl, `${originValue}/v1/gate/daos/nouns/targets/${encodeURIComponent(targetId)}`);
+      return { dao: "nouns", ...target };
     },
     async getVotingPower(dao, wallet) {
       if (dao !== "nouns") throw new Error("unsupported DAO");
@@ -214,7 +221,9 @@ async function composeProduction(env) {
   };
   const runtime = await createGateServerRuntime({ env, store, baseClient, authService, profileService,
     submissionService, inboxService, operatorAlert, observability,
-    lifecycleReader: async ({ proposalId }) => (await indexClient.getProposalSnapshot(proposalId)).eligibility,
+    lifecycleReader: async ({ proposalId, targetId }) => targetId
+      ? await indexClient.getTargetLifecycle(targetId)
+      : (await indexClient.getProposalSnapshot(proposalId)).eligibility,
     onError: () => operatorAlert({ source: "gate_worker", code: "WORKER_FAILED" }),
     notifierLogger: { error(message) {
       const match = /^source=email_notifier code=([A-Z0-9_]{1,64})$/.exec(String(message));

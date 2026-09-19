@@ -158,8 +158,10 @@ function validateGateEnrollment(message, config, now) {
   if (parseUint(message.daoChainId, 'daoChainId') !== normalized.daoChainId) {
     throw new TypeError('daoChainId must equal the Nouns domain chain');
   }
-  if (message.acceptPreVote !== false) throw new TypeError('Nouns PRE_VOTE is unsupported');
-  if (message.acceptVoting !== true) throw new TypeError('Nouns VOTING must be accepted');
+  if (typeof message.acceptPreVote !== 'boolean' || typeof message.acceptVoting !== 'boolean'
+      || (!message.acceptPreVote && !message.acceptVoting)) {
+    throw new TypeError('at least one Nouns stage must be accepted');
+  }
   if (parseUint(message.attentionAmount, 'attentionAmount') < MIN_ATTENTION_AMOUNT) {
     throw new TypeError(`attentionAmount must be at least ${MIN_ATTENTION_AMOUNT}`);
   }

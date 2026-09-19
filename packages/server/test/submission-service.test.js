@@ -92,7 +92,7 @@ async function harness(options = {}) {
         eligibility: indexSource.nativeState === "ACTIVE" ? "VOTING" : "CLOSED",
         mappingVersion: "nouns-lifecycle/1", refreshedAt: indexSource.refreshedAt(),
         sourceBlock: "100", sourceBlockHash: BLOCK_HASH, contentHash: CONTENT_HASH,
-        canonicalActions: [{ target: VOTER, valueWei: "1000000000000000000", calldata: "0x", signature: "" }],
+        canonicalActions: [{ actionIndex: 0, target: VOTER, valueWei: "1000000000000000000", calldata: "0x", signature: "" }],
       };
     },
   };

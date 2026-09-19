@@ -35,18 +35,28 @@ const httpsUrlSchema = z.string().superRefine((value, context) => {
   }
 });
 
+const targetIdSchema = z.string().regex(/^(proposal:(0|[1-9][0-9]*)|candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64})$/);
+
 const submissionSchema = z.object({
   payer: z.string(),
   signedSender: z.string(),
   voter: z.string(),
   dao: z.string().min(1),
-  proposalId: losslessUnsignedIntegerSchema,
+  proposalId: losslessUnsignedIntegerSchema.optional(),
+  targetId: targetIdSchema.optional(),
   stage: z.enum(NORMALIZED_LIFECYCLES),
   position: z.string().min(1),
   pitch: codePointLimitedString(MAX_PITCH_CODE_POINTS, 'pitch'),
   disclosures: codePointLimitedString(MAX_DISCLOSURE_CODE_POINTS, 'disclosures'),
   evidenceUrls: z.array(httpsUrlSchema).max(MAX_EVIDENCE_URLS),
-}).strict();
+}).strict().superRefine((value, context) => {
+  if ((value.proposalId === undefined) === (value.targetId === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'exactly one target identity is required' });
+  }
+  if (value.targetId?.startsWith('candidate:') && (value.stage !== 'PRE_VOTE' || value.position !== 'SPONSOR')) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'candidate submissions must request PRE_VOTE sponsorship' });
+  }
+});
 
 const daoPolicySchema = z.object({
   dao: z.literal('nouns'),
@@ -83,6 +93,7 @@ function serializeDaoPolicy(input) {
 module.exports = {
   losslessUnsignedIntegerSchema,
   httpsUrlSchema,
+  targetIdSchema,
   submissionSchema,
   createDaoPolicySchema,
   validateDaoPolicy,

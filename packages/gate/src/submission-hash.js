@@ -11,12 +11,15 @@ function canonicalizeSubmission(input) {
     throw new TypeError('payer must equal signedSender in Gate MVP');
   }
 
+  const proposalId = parsed.proposalId?.toString(10)
+    ?? (parsed.targetId?.startsWith('proposal:') ? parsed.targetId.slice('proposal:'.length) : undefined);
+  const candidateTargetId = parsed.targetId?.startsWith('candidate:') ? parsed.targetId : undefined;
   return Object.freeze({
     payer,
     signedSender,
     voter: getAddress(parsed.voter),
     dao: parsed.dao,
-    proposalId: parsed.proposalId.toString(10),
+    ...(candidateTargetId === undefined ? { proposalId } : { targetId: candidateTargetId }),
     stage: parsed.stage,
     position: parsed.position,
     pitch: parsed.pitch,
@@ -34,7 +37,7 @@ function serializeCanonicalSubmission(input) {
     value.payer,
     value.voter,
     value.dao,
-    value.proposalId,
+    value.proposalId ?? value.targetId,
     value.stage,
     value.position,
     value.pitch,

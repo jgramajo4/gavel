@@ -11,7 +11,10 @@ const { validateDisclosureMarkdown, validatePitchMarkdown } = require('./markdow
 // The advocate supplies only content. Payer, voter, and signed sender come from
 // the authenticated session and the routed Gate profile, never from the body.
 const SUBMISSION_REQUEST_FIELDS = Object.freeze([
-  'dao', 'proposalId', 'stage', 'position', 'pitch', 'disclosures', 'evidenceUrls',
+  'dao', 'proposalId', 'targetId', 'stage', 'position', 'pitch', 'disclosures', 'evidenceUrls',
+]);
+const REQUIRED_SUBMISSION_REQUEST_FIELDS = Object.freeze([
+  'dao', 'stage', 'position', 'pitch', 'disclosures', 'evidenceUrls',
 ]);
 
 // Public rejection copy is deliberately coarse: it never echoes advocate text,
@@ -44,8 +47,9 @@ function notAccepting() {
 function validateSubmissionRequest(request, { payer, voter } = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw malformed();
   const names = Object.keys(request);
-  if (names.length !== SUBMISSION_REQUEST_FIELDS.length
-      || names.some((field) => !SUBMISSION_REQUEST_FIELDS.includes(field))) {
+  if (names.some((field) => !SUBMISSION_REQUEST_FIELDS.includes(field))
+      || REQUIRED_SUBMISSION_REQUEST_FIELDS.some((field) => !Object.hasOwn(request, field))
+      || (Object.hasOwn(request, 'proposalId') === Object.hasOwn(request, 'targetId'))) {
     throw malformed();
   }
   if (request.dao !== NOUNS_DAO) throw malformed();
@@ -65,12 +69,16 @@ function validateSubmissionRequest(request, { payer, voter } = {}) {
   try {
     submissionSchema.parse({
       payer, signedSender: payer, voter,
-      dao: request.dao, proposalId: request.proposalId, stage: request.stage, position: request.position,
+      dao: request.dao,
+      ...(Object.hasOwn(request, 'proposalId') ? { proposalId: request.proposalId } : { targetId: request.targetId }),
+      stage: request.stage, position: request.position,
       pitch: request.pitch, disclosures: request.disclosures, evidenceUrls: request.evidenceUrls,
     });
     submission = canonicalizeSubmission({
       payer, signedSender: payer, voter,
-      dao: request.dao, proposalId: request.proposalId, stage: request.stage, position: request.position,
+      dao: request.dao,
+      ...(Object.hasOwn(request, 'proposalId') ? { proposalId: request.proposalId } : { targetId: request.targetId }),
+      stage: request.stage, position: request.position,
       pitch: request.pitch, disclosures: request.disclosures, evidenceUrls: request.evidenceUrls,
     });
   } catch {
@@ -84,7 +92,7 @@ function validateSubmissionRequest(request, { payer, voter } = {}) {
 // unaccepted stage is coarsely rejected without confirming anything private.
 function assertStageAccepted(stage, policy) {
   if (!NOUNS_QUOTE_ISSUANCE_STAGES.includes(stage)) throw notAccepting();
-  if (!policy || policy.acceptPreVote !== false || policy.acceptVoting !== true) throw notAccepting();
+  if (!policy || (stage === 'PRE_VOTE' ? policy.acceptPreVote !== true : policy.acceptVoting !== true)) throw notAccepting();
   return stage;
 }
 

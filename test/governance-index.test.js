@@ -231,7 +231,21 @@ test("migration includes canonical and raw provenance columns and critical index
 test("Nouns backfill source imports normalized votes and enumerated proposals", async () => {
   const { NounsSubgraphSource } = require("../packages/governance-index");
   const rawVote = { id: "vote-1", supportDetailed: 1, votesRaw: "1", reason: "", blockNumber: "12985438", blockTimestamp: "1700000000", transactionHash: TX, clientId: 0, voter: { id: ADDRESS }, proposal: { id: "1", title: "Nouns", description: "body", status: "ACTIVE", proposer: { id: OTHER }, targets: [], values: [], signatures: [], calldatas: [], createdTimestamp: "1699999000", createdBlock: "12985438", startBlock: "12985440", endBlock: "12985500", quorumVotes: "1", forVotes: "1", againstVotes: "0", abstainVotes: "0" } };
-  const source = new NounsSubgraphSource({ finalityDepth: 0, fetch: async (_url, init) => ({ ok: true, async json(){ const { query, variables } = JSON.parse(init.body); if (query.includes("proposals(")) return { data: { _meta: { block: { number: 12985438, hash: TX2 } }, proposals: variables.after === "" ? [rawVote.proposal] : [] } }; if (query.includes("_meta")) return { data: { _meta: { block: { number: 12985438 } } } }; return { data: { votes: variables.after === "" ? [rawVote] : [] } }; } }), pageSize: 1 });
+  const source = new NounsSubgraphSource({
+    finalityDepth: 0,
+    provider: {
+      async send() { return "0x1"; },
+      async getBlock(number) { return { number, hash: TX2, timestamp: 1_700_000_000 }; },
+      async getLogs() { return []; },
+    },
+    fetch: async (_url, init) => ({ ok: true, async json(){
+      const { query, variables } = JSON.parse(init.body);
+      if (query.includes("proposals(")) return { data: { _meta: { block: { number: 12985438, hash: TX2 } }, proposals: variables.after === "" ? [rawVote.proposal] : [] } };
+      if (query.includes("_meta")) return { data: { _meta: { block: { number: 12985438 } } } };
+      return { data: { votes: variables.after === "" ? [rawVote] : [] } };
+    } }),
+    pageSize: 1,
+  });
   const store = new MemoryGovernanceStore();
   const result = await new GovernanceSyncWorker({ store, sources: { nouns: source } }).syncDao("nouns");
   assert.equal(result.records, 2);

@@ -18,7 +18,7 @@ Gavel Gate lets an opted-in governance participant publish a public Gate profile
 - Availability: `accepting_now | paused | closed`.
 - Wallet enrollment and policy updates through EIP-712.
 - EOA and ERC-1271/Safe enrollment support, including Base payout-control proof for contract wallets.
-- Proposal-stage policy exposing Nouns `VOTING` only; `PRE_VOTE` remains normalized vocabulary but is not an MVP policy option without a separately frozen, implemented, and tested native mapping.
+- Proposal-stage policy exposing Nouns Proposal Candidates as `PRE_VOTE` and Governor proposals as `VOTING`; Candidate support is enrollment/quote/inbox-only and never constructs a vote transaction.
 - One immutable paid pitch per submission, with constrained CommonMark, disclosures, and display-only evidence links.
 - A server-signed, ten-minute, single-use quote.
 - One Base native-USDC EIP-3009 authorization and one splitter transaction.
@@ -261,10 +261,10 @@ All timestamps are `timestamptz`. Amounts use `numeric(78,0)` or an equivalent l
 | `settlement_cursors` | One durable row per chain/splitter with deployment block, next range, canonical block hash/checkpoint, and reconciliation metadata; cursor advancement is atomic with recording all logs in its processed range or equivalently crash-safe. |
 | `settlement_reorg_monitors` | Durable accepted-settlement queue, uniquely upserted by `chainId + splitter + quoteId` inside the acceptance transaction, with receipt block/hash and exact transaction/log identity, next-check/progress metadata, and completion time; bounded batches revalidate every scanner cycle through a final check at 64 canonical confirmations. |
 
-`submission_hash` is globally unique across persisted Gate submissions. Its algorithm is frozen. Canonicalize `payer` and `voter` with ethers `getAddress` to EIP-55 form; require `proposalId` as a base-10 unsigned decimal string matching `0|[1-9][0-9]*` so leading-zero variants are impossible; then serialize this exact ordered JSON array with JavaScript `JSON.stringify`:
+`submission_hash` is globally unique across persisted Gate submissions. Its algorithm is frozen. Canonicalize `payer` and `voter` with ethers `getAddress` to EIP-55 form. The fifth element is the target identity: for an ordinary proposal it remains the base-10 unsigned `proposalId` matching `0|[1-9][0-9]*` (preserving every legacy proposal hash); for a Candidate it is the exact `candidate:<lowercase proposer>:<lowercase keccak256(UTF-8 slug)>` target ID. Then serialize this exact ordered JSON array with JavaScript `JSON.stringify`:
 
 ```text
-["gavel-gate-submission-v1", payer, voter, dao, proposalId, stage, position, pitch, disclosures, evidenceUrls]
+["gavel-gate-submission-v1", payer, voter, dao, targetIdentity, stage, position, pitch, disclosures, evidenceUrls]
 ```
 
 The literal domain tag is exactly `gavel-gate-submission-v1`; there are no omitted, additional, or reordered fields. Hash `keccak256(UTF8(serializedArray))`, concretely ethers `keccak256(toUtf8Bytes(serializedArray))`. `pitch` and `disclosures` are the exact JavaScript string bytes represented after `JSON.stringify` escaping: never trim or normalize spaces, tabs, Unicode, line endings, trailing newlines, or other whitespace. `evidenceUrls` is the validated array in supplied order, and URL order is hash-significant. MVP requires `payer == authenticated signed sender` before hashing. Every later quote, server, client, or test implementation MUST import `hashSubmission` from `@gavel/gate`; reimplementation of this serialization or hash is forbidden. This identity binding makes a natural cross-wallet exact-hash match unreachable absent a cryptographic hash collision or forged authentication. Public `duplicate` is possible only when an earlier successfully quoted submission exists and the authenticated original sender causes the server to compute the same hash from canonical input. It returns/reuses that row and issues no new quote.
@@ -273,7 +273,7 @@ A repeated exact hash from the same authenticated signed sender returns HTTP `40
 
 Snapshot association is relational, not an extra EIP-712 field: the quote signature binds `submissionHash`; the immutable quote row references the immutable submission row; the submission row immutably references its issuance snapshot; and the snapshot stores the canonical content hash. Quote issuance creates these relationships inside one open database transaction, signs only after they exist, persists the signature, commits, and only then returns the quote. Settlement loads this immutable chain and validates the quote and event. Swapping a snapshot requires a database integrity violation. Neither snapshot fields nor `snapshotId` are added to `Quote` or the global submission-hash preimage.
 
-This global exact-hash deduplication is distinct from (a) one active unexpired quote per sender × voter and (b) at most two settled submissions per sender × voter × proposal in the rolling 24-hour window. A second distinct submission while that pair has an active unexpired quote returns stateless `rejected_by_policy` with coarse code `ACTIVE_QUOTE_EXISTS`; a third otherwise-distinct settled-limit submission returns stateless `rejected_by_policy` with coarse code `SENDER_PROPOSAL_LIMIT`. Neither rejection persists a submission or Gate-owned snapshot, quote, or reservation, reuses or leaks existing state, or exposes private counts/details. Changing content produces a different hash but does not evade either separate limit.
+This global exact-hash deduplication is distinct from (a) one active unexpired quote per sender × voter and (b) at most two settled submissions per sender × voter × exact target in the rolling 24-hour window. A second distinct submission while that pair has an active unexpired quote returns stateless `rejected_by_policy` with coarse code `ACTIVE_QUOTE_EXISTS`; a third otherwise-distinct settled-limit submission returns stateless `rejected_by_policy` with coarse code `SENDER_PROPOSAL_LIMIT`. Neither rejection persists a submission or Gate-owned snapshot, quote, or reservation, reuses or leaks existing state, or exposes private counts/details. Changing content produces a different hash but does not evade either separate limit.
 
 Required uniqueness/idempotency boundaries include quote ID, public submission ID, global submission hash, inbox-by-submission, settled chain/transaction/log identity, and settlement-monitor `chainId + splitter + quoteId`. One profile-scoped advisory/row lock, keyed only by voter/profile, is shared by every profile/policy update and every quote issuance for that profile. Quote issuance holds it through final rereads, contract-wallet code verification, canonical and exact-hash checks, all active-quote/settled-limit/capacity/pending-liability checks, and quote transaction commit. This serializes all senders targeting the profile and prevents both profile-version/code-hash and global profile-capacity races. The one-active-quote-per-sender × voter rule remains a predicate checked under this lock; sender × voter is not the lock key. RPC timeout/failure rolls back the transaction and releases the lock with no submission artifacts. Settlement locks the quote and verifies the event before mutation.
 
@@ -313,7 +313,7 @@ const GateEnrollment = [
 ];
 ```
 
-`GateEnrollment.purpose` MUST equal the exact signed literal `enrollment`. The server-generated challenge fixes this value; clients cannot choose or override it. `GateEnrollment.daoChainId` MUST equal the domain `chainId`; `version` MUST equal `1`. For the frozen Nouns MVP mapping, `dao` MUST equal the canonical service literal for Nouns, `acceptPreVote` MUST be `false`, and `acceptVoting` is the only stage opt-in.
+`GateEnrollment.purpose` MUST equal the exact signed literal `enrollment`. The server-generated challenge fixes this value; clients cannot choose or override it. `GateEnrollment.daoChainId` MUST equal the domain `chainId`; `version` MUST equal `1`. For the frozen Nouns MVP mapping, `dao` MUST equal the canonical service literal for Nouns and at least one of `acceptPreVote` or `acceptVoting` MUST be true. `acceptPreVote` authorizes only eligible canonical Proposal Candidate submissions; `acceptVoting` authorizes Governor proposal submissions.
 
 For contract-wallet payout control, use this exact Base domain and primary type:
 
@@ -389,14 +389,16 @@ The Gate adapter output vocabulary is `PRE_VOTE | VOTING | CLOSED`, but labels a
 
 The Nouns adapter consumes only upstream canonical labeled native states such as `ACTIVE`. Raw Governor numeric state codes MUST be normalized to those labels upstream of `@gavel/gate`; the adapter never interprets numeric codes itself. In particular, numeric `1` and string `"1"` both fail closed to `CLOSED`.
 
-The currently established Nouns canonical vote-preparation mapping is:
+The established Nouns canonical Gate mapping is:
 
-| Nouns Governor native state | Gate state available in MVP | Rule |
+| Canonical Nouns target/native state | Gate state available in MVP | Rule |
 | --- | --- | --- |
+| eligible original Proposal Candidate: latest version valid, not canceled, no `proposalIdToUpdate`, no matching promoted proposal | `PRE_VOTE` | Identity is `candidate:<lowercase proposer>:<keccak256(UTF-8 slug)>`; content and provenance are reconstructed from canonical `NounsDAODataProxy` and Governor logs at one mainnet-verified finalized block. |
+| canceled, update, promoted, malformed, missing, or unknown Proposal Candidate | `CLOSED` | Fail closed; a full authoritative enumeration removes identities no longer present. |
 | `ACTIVE` | `VOTING` | Supported only when the canonical voting window and fresh index data agree. |
 | every non-`ACTIVE` or unknown state | `CLOSED` | Fail closed unless a future tested Gate adapter explicitly adds another native mapping. |
 
-Although the Governor vocabulary includes `PENDING`, PR 0 does not assert that it is an actionable Gate pre-vote lane. Therefore **Nouns `PRE_VOTE` is not exposed by the MVP until an adapter maps a real native Nouns state from available canonical data and tests that mapping.** Public policies and enrollment responses must expose only supported mappings; they must not advertise or accept `PRE_VOTE` merely because the normalized vocabulary contains it. Mapping expansion is post-MVP unless separately reviewed and frozen.
+Governor `PENDING` is not an actionable Gate pre-vote lane. `PRE_VOTE` is exposed only for the exact Proposal Candidate mapping above. Candidate quote issuance freezes the canonical target identity, content hash, actions, source block/hash, and mapping version. Candidate settlement records `PRE_VOTE`, `CLOSED`, or `UNKNOWN` lifecycle changes but never generates governance calldata, a vote choice, or a vote transaction. Public policies expose only these tested mappings.
 
 Every issuance snapshot stores native state, normalized state, adapter mapping version, source block/hash, refresh time, proposal content hash, and actions. Nouns freshness is configurable and defaults to 15 minutes. An unhealthy or stale index prevents quote issuance.
 
@@ -876,8 +878,8 @@ The following payment tests are explicitly deferred to PR 9 and are nonblocking 
 
 | Capability | MVP | Post-MVP |
 | --- | --- | --- |
-| Nouns VOTING native mapping | Yes, tested canonical mapping only | Additional DAOs/states |
-| Nouns PRE_VOTE | Not exposed unless a real native mapping is implemented and tested | Mapping expansion after explicit review |
+| Nouns VOTING native mapping | Yes, tested canonical Governor mapping | Additional DAOs/states |
+| Nouns PRE_VOTE | Yes, eligible canonical Proposal Candidates only; quote/inbox without vote transaction | Other pre-vote target types |
 | One immutable pitch | Yes | Follow-up/response threads and explicit per-thread permission/pricing |
 | Canonical + exact allowlisted decoding + labeled enrichment | Yes | Audited additional token/action decoders and hardened metadata caching |
 | Side-by-side facts, no prose verdict | Yes | Optional structured claim lane and deterministic checks over canonical/tested decoded facts |

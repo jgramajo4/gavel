@@ -134,8 +134,8 @@ test('builds exact Nouns, Base payout, and role-derived wallet-session typed dat
   }
 });
 
-test('Nouns adapter maps only canonical labeled ACTIVE to VOTING and exposes no PRE_VOTE', () => {
-  assert.deepEqual(gate.NOUNS_GATE_SUPPORTED_STAGES, ['VOTING']);
+test('Nouns adapter preserves proposal VOTING mapping while advertising candidate PRE_VOTE support', () => {
+  assert.deepEqual(gate.NOUNS_GATE_SUPPORTED_STAGES, ['PRE_VOTE', 'VOTING']);
   assert.equal(Object.isFrozen(gate.NOUNS_GATE_SUPPORTED_STAGES), true);
   assert.deepEqual(gate.adaptNounsGateLifecycle('ACTIVE'), {
     eligibility: 'VOTING',
@@ -159,8 +159,7 @@ test('validates exact literals, Nouns policy, addresses, bytes32 values, and los
     enrollment({ availability: 'ACCEPTING_NOW' }),
     enrollment({ dao: 'Nouns' }),
     enrollment({ daoChainId: '8453' }),
-    enrollment({ acceptPreVote: true }),
-    enrollment({ acceptVoting: false }),
+    enrollment({ acceptPreVote: false, acceptVoting: false }),
     enrollment({ acceptVoting: 'true' }),
     enrollment({ attentionAmount: '999999' }),
     enrollment({ attentionAmount: 1000000 }),

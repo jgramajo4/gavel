@@ -91,6 +91,61 @@ test("presentProposal overlays persisted columns without rewriting state", () =>
   assert.equal(row.normalized.trackingState, undefined);
 });
 
+test("memory proposal refresh replaces coherent snapshot provenance for unchanged material", async () => {
+  let now = "2026-09-14T00:00:00.000Z";
+  const store = new MemoryGovernanceStore({ clock: () => new Date(now) });
+  const proposal = migratedNouns992();
+  const makeRecord = (blockNumber, blockHash) => ({
+    raw: {
+      daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: "proposal:992",
+      chainId: 1, contractAddress: proposal.normalized.proposer, transactionHash: null, logIndex: null,
+      blockNumber, blockHash, observedHead: blockNumber, recordType: "proposal", proposalId: "992",
+      contentHash: proposal.contentHash, payload: { id: "992" }, sourceKind: "nouns-subgraph",
+      sourceEndpoint: "https://index.example",
+    },
+    proposal,
+  });
+  store.ingest(makeRecord("100", `0x${"1".repeat(64)}`));
+  now = "2026-09-14T00:05:00.000Z";
+  const refreshed = makeRecord("105", `0x${"2".repeat(64)}`);
+  store.reconcileProposals({ daoId: "nouns", sourceId: "nouns-subgraph", records: [refreshed] });
+  assert.equal(store.ingest(refreshed), false);
+
+  assert.deepEqual(await store.getGateProposal("nouns", "992"), {
+    proposalId: "992", refreshedAt: now, sourceBlock: "105", sourceBlockHash: `0x${"2".repeat(64)}`,
+    effectiveStatus: "DEFEATED", contentHash: `0x${proposal.contentHash}`, actions: [],
+  });
+
+  now = "2026-09-14T00:10:00.000Z";
+  const stale = makeRecord("101", `0x${"3".repeat(64)}`);
+  stale.proposal = { ...proposal, normalized: { ...proposal.normalized, effectiveStatus: "ACTIVE" } };
+  assert.equal(store.ingest(stale), false);
+  assert.deepEqual(await store.getGateProposal("nouns", "992"), {
+    proposalId: "992", refreshedAt: "2026-09-14T00:05:00.000Z", sourceBlock: "105",
+    sourceBlockHash: `0x${"2".repeat(64)}`, effectiveStatus: "DEFEATED",
+    contentHash: `0x${proposal.contentHash}`, actions: [],
+  });
+
+  store.rawRecords.push({ ...store.rawRecords[0], sourceId: "unrelated", sourceRecordKey: "proposal:unrelated",
+    blockNumber: "999", blockHash: `0x${"4".repeat(64)}`, ingestedAt: "2026-09-14T00:20:00.000Z" });
+  store.proposalActions.push({ daoId: "nouns", proposalId: "992", index: 0, target: proposal.normalized.proposer,
+    valueWei: "0", signature: "", calldata: "0x", privateDestination: "secret@example.test" });
+  const projection = await store.getGateProposal("nouns", "992");
+  assert.equal(projection.sourceBlock, "105");
+  assert.deepEqual(projection.actions, [{ actionIndex: 0, target: proposal.normalized.proposer,
+    valueWei: "0", signature: "", calldata: "0x" }]);
+
+  store.proposalActions.push({ daoId: "nouns", proposalId: "992", index: 0, target: proposal.normalized.proposer,
+    valueWei: "0", signature: "", calldata: "0x" });
+  await assert.rejects(store.getGateProposal("nouns", "992"), /action index/);
+
+  const before = structuredClone({ proposals: store.proposals, actions: store.proposalActions });
+  for (const actions of [null, false, 0, "", new Array(1)]) {
+    assert.throws(() => store.upsertProposal({ ...proposal, actions }), /proposal action/);
+    assert.deepEqual({ proposals: store.proposals, actions: store.proposalActions }, before);
+  }
+});
+
 test("a migration-style memory row is hydrated on get and list", async () => {
   const store = new MemoryGovernanceStore();
   store.proposals.push(migratedNouns992());

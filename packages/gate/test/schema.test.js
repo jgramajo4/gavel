@@ -53,18 +53,18 @@ test('validates a supported Nouns VOTING policy without integer loss', () => {
   assert.equal(serializeDaoPolicy(policy).attentionAmount, amount);
 });
 
-test('quote-issuance policy boundary rejects unsupported Nouns PRE_VOTE', () => {
+test('quote-issuance policy boundary supports Nouns PRE_VOTE and VOTING', () => {
   assert.ok(NORMALIZED_LIFECYCLES.includes('PRE_VOTE'));
-  assert.deepEqual(NOUNS_QUOTE_ISSUANCE_STAGES, ['VOTING']);
+  assert.deepEqual(NOUNS_QUOTE_ISSUANCE_STAGES, ['PRE_VOTE', 'VOTING']);
   assert.equal(Object.isFrozen(NOUNS_QUOTE_ISSUANCE_STAGES), true);
-  assert.throws(() => validateDaoPolicy({
+  assert.doesNotThrow(() => validateDaoPolicy({
     dao: 'nouns',
     daoChainId: 1,
     enabled: true,
     availability: 'accepting_now',
     attentionAmount: '1000000',
     acceptedStages: ['PRE_VOTE'],
-  }), /VOTING|acceptedStages/);
+  }));
 });
 
 test('validates policy again and emits only deterministic material during serialization', () => {
@@ -82,7 +82,7 @@ test('validates policy again and emits only deterministic material during serial
     (policy) => { policy.dao = 'forged'; },
     (policy) => { policy.daoChainId = 8453; },
     (policy) => { policy.enabled = 'true'; },
-    (policy) => { policy.acceptedStages = ['PRE_VOTE']; },
+    (policy) => { policy.acceptedStages = ['CLOSED']; },
     (policy) => { policy.extra = 'forged'; },
   ]) {
     const policy = structuredClone(validated);
@@ -117,13 +117,13 @@ test('rejects invalid policies and stages unsupported by the caller', () => {
     { ...base, attentionAmount: '999999' },
     { ...base, attentionAmount: Number.MAX_SAFE_INTEGER + 1 },
     { ...base, acceptedStages: [] },
-    { ...base, acceptedStages: ['PRE_VOTE'] },
+    { ...base, acceptedStages: ['CLOSED'] },
   ]) {
     assert.throws(() => validateDaoPolicy(input, ['VOTING']));
   }
 });
 
-test('freezes the Nouns MVP policy to VOTING regardless of caller-supported stages', () => {
+test('freezes the Nouns MVP policy to PRE_VOTE and VOTING', () => {
   const base = {
     dao: 'nouns',
     daoChainId: 1,
@@ -136,5 +136,5 @@ test('freezes the Nouns MVP policy to VOTING regardless of caller-supported stag
   assert.doesNotThrow(() => validateDaoPolicy(base, ['PRE_VOTE']));
   assert.throws(() => validateDaoPolicy({ ...base, acceptedStages: [] }, ['VOTING']));
   assert.throws(() => validateDaoPolicy({ ...base, acceptedStages: ['CLOSED'] }, ['CLOSED']));
-  assert.throws(() => validateDaoPolicy({ ...base, acceptedStages: ['PRE_VOTE'] }, ['PRE_VOTE']));
+  assert.doesNotThrow(() => validateDaoPolicy({ ...base, acceptedStages: ['PRE_VOTE'] }, ['PRE_VOTE']));
 });

@@ -1,6 +1,6 @@
 const AVAILABILITY = Object.freeze(['accepting_now', 'paused', 'closed']);
 const NORMALIZED_LIFECYCLES = Object.freeze(['PRE_VOTE', 'VOTING', 'CLOSED']);
-const NOUNS_QUOTE_ISSUANCE_STAGES = Object.freeze(['VOTING']);
+const NOUNS_QUOTE_ISSUANCE_STAGES = Object.freeze(['PRE_VOTE', 'VOTING']);
 const PUBLIC_RECEIPT_STATES = Object.freeze([
   'payment_required',
   'pending_settlement',
