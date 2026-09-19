@@ -267,9 +267,64 @@ dd { margin: 0; overflow-wrap: anywhere; }
 }
 .external-indicator { margin-left: 0.15rem; }
 
-.inbox { display: grid; gap: 1.5rem; }
+/* Inbox. A candidate seeking sponsorship must never read like a live vote, so
+   the two kinds get different, labelled badges rather than the same chip. */
+.inbox { display: grid; gap: 1rem; }
 .inbox-header { display: grid; gap: 0.4rem; }
 .inbox-header button { justify-self: start; }
+.inbox-header h2 { margin: 0.25rem 0 0; }
 .inbox-meta { color: var(--muted); margin: 0; font-size: 0.9rem; }
 .lifecycle-changed { font-weight: 600; }
 .evidence-list { display: grid; gap: 0.35rem; margin-top: 0.75rem; }
+
+.inbox-signin {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin: 1rem 0;
+}
+.inbox-wallet { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+
+.inbox-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+.inbox-toggle { font-weight: 400; display: flex; align-items: center; gap: 0.4rem; }
+.inbox-toggle input { width: auto; }
+
+.inbox-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+@media (min-width: 48rem) {
+  .inbox-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.inbox-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  background: var(--surface);
+  display: grid;
+  gap: 0.4rem;
+  align-content: start;
+}
+.inbox-card[data-archived='true'] { opacity: 0.72; }
+.inbox-card-title { font-weight: 700; margin: 0; font-size: 1.05rem; }
+.inbox-card button { justify-self: start; margin-top: 0.35rem; }
+
+.inbox-kind-candidate { color: var(--progress); background: var(--progress-bg); }
+.inbox-kind-proposal { color: var(--accent); background: transparent; }
+.inbox-archived { color: var(--muted); background: transparent; margin-left: 0.4rem; }
+
+.inbox-section { margin-top: 1.25rem; }
+.inbox-section h3 { margin: 0 0 0.35rem; font-size: 1rem; }
+.inbox-archive { margin-top: 1.25rem; }
+.fact-empty { color: var(--muted); }
+
+.enrollment-stages { display: grid; gap: 0.5rem; padding: 0.75rem 1rem 1rem; }
+.checkbox-row { font-weight: 400; display: flex; align-items: center; gap: 0.4rem; }
+.checkbox-row input { width: auto; }

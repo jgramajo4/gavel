@@ -74,7 +74,7 @@ export function App({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) 
           <Route path="/gates/:wallet" element={<ProfileRoute api={api} />} />
           <Route path="/gates/:wallet/compose" element={<ComposerRoute api={api} />} />
           <Route path="/checkout/:publicId" element={<CheckoutRoute api={api} wallet={wallet} />} />
-          <Route path="/inbox" element={<VoterInbox />} />
+          <Route path="/inbox" element={<VoterInbox api={api} wallet={wallet} />} />
           <Route path="/enroll" element={<Enrollment api={api} wallet={wallet} />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

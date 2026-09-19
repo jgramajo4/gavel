@@ -1,6 +1,8 @@
 import type {
   AuthChallenge,
   DuplicateReceipt,
+  InboxArchiveResult,
+  InboxItem,
   IssuedQuote,
   PublicGateProfile,
   SubmissionReceipt,
@@ -58,16 +60,85 @@ export interface GateApi {
     txHash: string,
     chainId: string,
   ): Promise<SubmissionReceipt>;
-}
 
-// There is deliberately no inbox client here. The merged backend serves no
-// private inbox route, and a speculative one would quietly become an undeclared
-// contract the moment some future response returned 200.
+  // --- Private inbox (owner-bound, `dao_inbox` session only) ---------------
+  // These are the three routes the merged server actually serves:
+  //   GET  /v1/gate/me/inbox
+  //   GET  /v1/gate/me/inbox/:id
+  //   POST /v1/gate/me/inbox/:id/archive
+  // There is no public inbox route and no follow-up/reply route; the server
+  // answers both with 404, and nothing is added here to paper over that.
+  listInbox(token: string): Promise<InboxItem[]>;
+  getInboxItem(token: string, id: string): Promise<InboxItem | null>;
+  archiveInboxItem(token: string, id: string): Promise<InboxArchiveResult>;
+}
 
 const RESUME_PATH = /^\/v1\/submissions\/[A-Za-z0-9_-]{22}\/resume$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function malformed(): GateApiError {
+  // Deliberately coarse and free of the offending body: a projection this
+  // client cannot read is a bug to report, not content to echo back at a user.
+  return new GateApiError(
+    200,
+    'MALFORMED_RESPONSE',
+    'The server returned an inbox response this app cannot read.',
+    null,
+  );
+}
+
+function stringOr(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function recordOr(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function arrayOf<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/**
+ * Narrows one `projectInbox` row to the declared shape.
+ *
+ * The server owns this projection, but the browser still refuses to assume it:
+ * a partial or unexpected body becomes a readable error instead of a half-drawn
+ * item. Advocate-controlled fields (`pitch`, `disclosures`, `evidenceUrls`) are
+ * carried through verbatim and are sanitized at RENDER time by MarkdownPitch
+ * and ExternalLink — never here, because a client-side scrub would quietly
+ * change what the voter paid to read.
+ */
+function toInboxItem(body: unknown): InboxItem {
+  if (!isRecord(body) || typeof body.id !== 'string' || !body.id) throw malformed();
+  const decoded = recordOr(body.decodedFacts);
+  return {
+    id: body.id,
+    archived: body.archived === true,
+    createdAt: stringOrNull(body.createdAt),
+    pitch: stringOr(body.pitch, ''),
+    disclosures: stringOr(body.disclosures, ''),
+    evidenceUrls: arrayOf<unknown>(body.evidenceUrls).filter(
+      (url): url is string => typeof url === 'string',
+    ),
+    canonicalFacts: recordOr(body.canonicalFacts),
+    decodedFacts: {
+      ...(typeof decoded.decoderVersion === 'string' ? { decoderVersion: decoded.decoderVersion } : {}),
+      actions: arrayOf(decoded.actions),
+    },
+    enrichedFacts: arrayOf(body.enrichedFacts),
+    rawUnknownActions: arrayOf(body.rawUnknownActions),
+    issuanceLifecycle: stringOrNull(body.issuanceLifecycle),
+    currentLifecycle: stringOrNull(body.currentLifecycle),
+    stateChangedAfterQuote: body.stateChangedAfterQuote === true,
+  };
 }
 
 function errorFrom(status: number, body: unknown): GateApiError {
@@ -193,6 +264,29 @@ export function createGateApi(
       })) as SubmissionReceipt;
     },
 
+    async listInbox(token) {
+      const body = await expectOk('GET', '/v1/gate/me/inbox', { token });
+      if (!isRecord(body) || !Array.isArray(body.items)) throw malformed();
+      return body.items.map(toInboxItem);
+    },
+
+    async getInboxItem(token, id) {
+      // The ID is server-issued but still arrives back through component state,
+      // so it is encoded rather than interpolated: a crafted value cannot
+      // escape the path segment and reach another authenticated route.
+      const { status, body } = await call('GET', `/v1/gate/me/inbox/${encodeURIComponent(id)}`, { token });
+      // The server answers a foreign item and a missing one identically; so
+      // does this client, so a 404 can never be read as "it exists".
+      if (status === 404) return null;
+      if (status < 200 || status >= 300) throw errorFrom(status, body);
+      return toInboxItem(body);
+    },
+
+    async archiveInboxItem(token, id) {
+      const body = await expectOk('POST', `/v1/gate/me/inbox/${encodeURIComponent(id)}/archive`, { token });
+      if (!isRecord(body) || typeof body.id !== 'string') throw malformed();
+      return { id: body.id, archived: body.archived === true };
+    },
   };
 }
 

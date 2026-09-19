@@ -113,9 +113,17 @@ export interface AuthChallenge {
   payloadHash: string;
 }
 
+/**
+ * `dao_inbox` is the private inbox role. It is issued by the same challenge /
+ * signature / session exchange as the other roles and is never interchangeable
+ * with them: the server scopes `/v1/gate/me/inbox*` to `dao_inbox` alone, and
+ * this client refuses to send a token of any other role to those routes.
+ */
+export type WalletSessionRole = 'base_sender' | 'dao_profile' | 'dao_inbox';
+
 export interface WalletSession {
   wallet: string;
-  role: 'base_sender' | 'dao_profile';
+  role: WalletSessionRole;
   chainId: string;
   audience: string;
   issuedAt: string;
@@ -182,7 +190,68 @@ export interface EnrichedFact {
 
 export type Fact = CanonicalFact | DecodedFact | EnrichedFact;
 
-// There is deliberately no `InboxItem` type. Declaring the shape of a route the
-// backend does not serve would make this file the de facto contract for it.
-// Fact provenance types above stay: they come from the frozen `@gavel/gate`
-// fact schema and are rendered by FactPanel, not by an inbox response parser.
+// --- Private inbox ---------------------------------------------------------
+// These mirror `projectInbox` in packages/server/src/gate/inbox-service.js —
+// the OWNER-BOUND projection served by `GET /v1/gate/me/inbox*`. Nothing here
+// is public: the directory and profile projections must never carry a field
+// declared below. The projection deliberately omits the advocate's identity,
+// the payer address, the quote, notification channel/destination, and read
+// state, so there is nothing of that kind to model here either.
+
+/**
+ * Canonical target identity as the server recorded it at issuance time.
+ *
+ * `kind: 'candidate'` marks a Nouns Proposal Candidate seeking sponsorship. A
+ * candidate carries `targetId`/`proposer`/`slug` and NO `proposalId`; an active
+ * proposal carries `proposalId`. Every field is optional because this is a
+ * stored snapshot projection, not a schema the browser may assume complete.
+ */
+export interface InboxCanonicalFacts {
+  dao?: string;
+  targetId?: string;
+  proposalId?: string;
+  kind?: string;
+  proposer?: string;
+  slug?: string;
+  context?: string;
+  nativeState?: string;
+  eligibility?: string;
+  mappingVersion?: string;
+  sourceBlock?: string;
+  sourceBlockHash?: string;
+  contentHash?: string;
+  refreshedAt?: string;
+}
+
+export interface InboxDecodedFacts {
+  decoderVersion?: string;
+  actions: DecodedFact[];
+}
+
+/** One accepted submission. List and detail share this exact projection. */
+export interface InboxItem {
+  id: string;
+  archived: boolean;
+  /** Inbox creation time — set only after Gate verified settlement. */
+  createdAt: string | null;
+  /** Advocate-controlled Markdown. Rendered only through MarkdownPitch. */
+  pitch: string;
+  /** Advocate-controlled Markdown. */
+  disclosures: string;
+  /** Advocate-controlled URLs. Rendered only through ExternalLink, never fetched. */
+  evidenceUrls: string[];
+  canonicalFacts: InboxCanonicalFacts;
+  decodedFacts: InboxDecodedFacts;
+  enrichedFacts: EnrichedFact[];
+  /** Canonical actions the versioned decoder could not interpret. */
+  rawUnknownActions: CanonicalEvidence[];
+  issuanceLifecycle: string | null;
+  currentLifecycle: string | null;
+  stateChangedAfterQuote: boolean;
+}
+
+/** `POST /v1/gate/me/inbox/:id/archive`. Idempotent; archives nothing else. */
+export interface InboxArchiveResult {
+  id: string;
+  archived: boolean;
+}
