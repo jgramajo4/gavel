@@ -69,6 +69,53 @@ describe('VoterInbox authentication', () => {
     expect(JSON.stringify(wallet.calls)).not.toContain('base_sender');
   });
 
+  it('reuses the header connection and asks only for the signature', async () => {
+    const { api, calls } = stubApi([
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: sessionChallenge },
+      { method: 'POST', match: /\/auth\/verify$/, status: 200, body: inboxSession },
+      { method: 'GET', match: LIST, status: 200, body: listBody },
+    ]);
+    const wallet = stubWallet({
+      eth_accounts: () => [VOTER],
+      eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+    });
+    const user = userEvent.setup();
+    renderApp(<VoterInbox api={api} wallet={wallet} />, { walletAddress: VOTER });
+
+    // The connected wallet is named, and the control asks to unlock, not to
+    // connect something that is already connected.
+    expect(screen.queryByRole('button', { name: /connect governance wallet/i })).toBeNull();
+    await user.click(screen.getByRole('button', { name: /sign to unlock inbox/i }));
+    await waitFor(() => expect(calls.some((call) => LIST.test(call))).toBe(true));
+
+    // One signature, and no second connection prompt anywhere in the flow.
+    expect(wallet.calls.map((call) => call.method)).toEqual([
+      'eth_accounts',
+      'eth_signTypedData_v4',
+    ]);
+    // Sharing the connection shares no authority: the inbox still opened on a
+    // dao_inbox session it signed for on this page.
+    const challenge = wallet.calls.find((call) => call.method === 'eth_signTypedData_v4');
+    expect(JSON.stringify(challenge?.params)).toContain('dao_inbox');
+  });
+
+  it('will not mint an inbox session for an account the header never showed', async () => {
+    const { api, calls } = stubApi([]);
+    const other = `0x${'77'.repeat(20)}`;
+    const wallet = stubWallet({
+      eth_accounts: () => [other],
+      eth_requestAccounts: () => [other],
+      eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+    });
+    const user = userEvent.setup();
+    renderApp(<VoterInbox api={api} wallet={wallet} />, { walletAddress: VOTER });
+    await user.click(screen.getByRole('button', { name: /sign to unlock inbox/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer on the account/i);
+    // Nothing was signed and no challenge was even requested.
+    expect(calls).toEqual([]);
+    expect(wallet.calls.map((call) => call.method)).toEqual(['eth_accounts']);
+  });
+
   it('refuses a session the server issued for another role', async () => {
     const { api, calls } = stubApi([
       { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: sessionChallenge },

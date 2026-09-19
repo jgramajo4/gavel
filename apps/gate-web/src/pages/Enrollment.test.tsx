@@ -28,6 +28,63 @@ const walletSession = {
   },
 };
 
+/** The Base domain the SERVER binds a payout-control proof to. */
+const payoutChallenge = {
+  proofType: 'BasePayoutControl',
+  primaryType: 'BasePayoutControl',
+  domain: { name: 'GavelGate', version: '1', chainId: 8453, verifyingContract: VOTER },
+  types: { BasePayoutControl: [{ name: 'wallet', type: 'address' }] },
+  message: { wallet: VOTER, dao: 'nouns', purpose: 'base_payout_control' },
+  nonceHash: `0x${'cc'.repeat(32)}`,
+  payloadHash: `0x${'dd'.repeat(32)}`,
+};
+
+/** A Safe's answer is its own ERC-1271 material, not a 65-byte ECDSA pair. */
+const CONTRACT_SIGNATURE = `0x${'ab'.repeat(130)}`;
+
+interface Recorded {
+  calls: string[];
+  bodies: Record<string, unknown>[];
+}
+
+/** A server that answers each challenge for the proof type actually asked. */
+function recordingApi(existingProfile: unknown, record: Recorded) {
+  const impl = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    record.calls.push(`${(init?.method ?? 'GET').toUpperCase()} ${url}`);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (body) record.bodies.push(body);
+    const reply = (status: number, value: unknown) =>
+      ({ status, ok: status >= 200 && status < 300, json: async () => value }) as Response;
+    if (url.endsWith('/auth/challenge')) {
+      return reply(200, body?.proofType === 'BasePayoutControl' ? payoutChallenge : challenge);
+    }
+    if (url.endsWith('/auth/verify')) return reply(200, walletSession);
+    if (/\/v1\/gates\/0x/.test(url)) {
+      return existingProfile ? reply(200, existingProfile) : reply(404, null);
+    }
+    return reply(200, acceptingProfile);
+  }) as typeof fetch;
+  return createGateApi('', impl);
+}
+
+/** A contract wallet: code at the account, and a chain it can be moved across. */
+function safeWallet(signature = CONTRACT_SIGNATURE) {
+  let chainId = '0x1';
+  return stubWallet({
+    eth_accounts: () => [VOTER],
+    eth_requestAccounts: () => [VOTER],
+    eth_chainId: () => chainId,
+    eth_getCode: () => '0x6080604052',
+    wallet_switchEthereumChain: (params) => {
+      const [target] = params as [{ chainId: string }];
+      chainId = target.chainId;
+      return null;
+    },
+    eth_signTypedData_v4: () => signature,
+  });
+}
+
 describe('Enrollment', () => {
   it('puts the payout fact next to the price it governs, not above the form', () => {
     const { api } = stubApi([]);
@@ -38,14 +95,17 @@ describe('Enrollment', () => {
     expect(price.closest('.field')).toContainElement(helper);
   });
 
-  it('does not claim Safe or contract-wallet support', () => {
+  it('states the contract-wallet terms without promising more than the chain decides', () => {
     const { api } = stubApi([]);
-    const { container } = renderApp(<Enrollment api={api} wallet={stubWallet()} />);
-    expect(container.textContent).not.toMatch(/safe (is )?supported|supports safe|erc-?1271 supported/i);
-    // The EOA limit survives, as small print at the control that enforces it.
-    const limit = screen.getByText(/externally owned accounts \(EOA\) only/i);
-    expect(limit).toBeInTheDocument();
+    renderApp(<Enrollment api={api} wallet={stubWallet()} />);
+    // Small print at the control it governs: the account itself is the Gate
+    // identity, its own ERC-1271 authority answers, and Base deployment is a
+    // precondition — no claim that an owner may act for it.
+    const limit = screen.getByText(/ERC-1271/i);
     expect(limit).toHaveClass('enrollment-limits');
+    expect(limit).toHaveTextContent(/the account you connect/i);
+    expect(limit).toHaveTextContent(/never stands in for it/i);
+    expect(limit).toHaveTextContent(/on Base/i);
   });
 
   it('reaches the controls almost immediately, with no wall of prose above them', () => {
@@ -75,6 +135,7 @@ describe('Enrollment', () => {
     const wallet = stubWallet({
       eth_requestAccounts: () => [VOTER],
       eth_chainId: () => '0x1',
+      eth_getCode: () => '0x',
       eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
     });
     const user = userEvent.setup();
@@ -137,6 +198,7 @@ describe('Enrollment', () => {
     const wallet = stubWallet({
       eth_requestAccounts: () => [VOTER],
       eth_chainId: () => '0x1',
+      eth_getCode: () => '0x',
       eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
     });
     const user = userEvent.setup();
@@ -185,6 +247,7 @@ describe('Enrollment', () => {
     const wallet = stubWallet({
       eth_requestAccounts: () => [VOTER],
       eth_chainId: () => '0x1',
+      eth_getCode: () => '0x',
       eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
     });
     const user = userEvent.setup();
@@ -217,6 +280,93 @@ describe('Enrollment', () => {
     expect(wallet.calls).toEqual([]);
   });
 
+  it('sends the enrollment proof in the exact shape the server accepts', async () => {
+    const record: Recorded = { calls: [], bodies: [] };
+    const api = recordingApi(null, record);
+    const user = userEvent.setup();
+    renderApp(
+      <Enrollment
+        api={api}
+        wallet={stubWallet({
+          eth_requestAccounts: () => [VOTER],
+          eth_chainId: () => '0x1',
+          eth_getCode: () => '0x',
+          eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+        })}
+      />,
+    );
+    await user.type(screen.getByLabelText(/attention price/i), '5.00');
+    await user.click(screen.getByRole('button', { name: /enroll|update gate/i }));
+
+    await waitFor(() => expect(record.calls.some((call) => call.includes('/me/profile'))).toBe(true));
+    const update = record.bodies.find((body) => 'gateEnrollmentProof' in body) as {
+      gateEnrollmentProof: Record<string, unknown>;
+    };
+    // The server allows exactly these keys and rejects the update outright for
+    // any other, `proofType` included.
+    expect(Object.keys(update.gateEnrollmentProof).sort()).toEqual([
+      'publicTags',
+      'signature',
+      'typedData',
+    ]);
+    // An EOA owes no payout proof, and one it does not owe is itself refused.
+    expect('basePayoutControlProof' in update).toBe(false);
+  });
+
+  it('enrolls a Safe as itself and proves Base payout control for it', async () => {
+    const record: Recorded = { calls: [], bodies: [] };
+    const api = recordingApi(null, record);
+    const wallet = safeWallet();
+    const user = userEvent.setup();
+    renderApp(<Enrollment api={api} wallet={wallet} />, { walletAddress: VOTER });
+
+    await user.type(screen.getByLabelText(/attention price/i), '5.00');
+    await user.click(screen.getByRole('button', { name: /enroll|update gate/i }));
+    await waitFor(() => expect(record.calls.some((call) => call.includes('/me/profile'))).toBe(true));
+
+    // Three signatures: dao_profile session, GateEnrollment, BasePayoutControl.
+    const signatures = wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4');
+    expect(signatures).toHaveLength(3);
+    // The account's own code decides it is a contract wallet.
+    expect(wallet.calls.some((call) => call.method === 'eth_getCode')).toBe(true);
+    // Payout control is signed on the Base chain the SERVER named, not chain 1.
+    expect(
+      wallet.calls.filter((call) => call.method === 'wallet_switchEthereumChain').at(-1)?.params,
+    ).toEqual([{ chainId: '0x2105' }]);
+
+    const update = record.bodies.find((body) => 'gateEnrollmentProof' in body) as {
+      gateEnrollmentProof: { typedData: { message: { wallet: string } }; signature: string };
+      basePayoutControlProof: Record<string, unknown>;
+    };
+    // The enrolled identity is the connected account itself — the Safe — and
+    // the signature travels exactly as the wallet returned it, contract shape
+    // and all, for the server to put to the account's own ERC-1271.
+    expect(update.gateEnrollmentProof.typedData.message.wallet).toBe(VOTER);
+    expect(update.gateEnrollmentProof.signature).toBe(CONTRACT_SIGNATURE);
+    expect(Object.keys(update.basePayoutControlProof).sort()).toEqual(['signature', 'typedData']);
+    const payoutBody = record.bodies.find((body) => body.proofType === 'BasePayoutControl');
+    expect(payoutBody).toMatchObject({ wallet: VOTER, dao: 'nouns' });
+  });
+
+  it('asks for no payout proof on an update the server would refuse one for', async () => {
+    // Already `accepting_now`: the server requires the Base proof on a first
+    // enrollment and on transitions back into accepting, and refuses it here.
+    const record: Recorded = { calls: [], bodies: [] };
+    const api = recordingApi(acceptingProfile, record);
+    const wallet = safeWallet();
+    const user = userEvent.setup();
+    renderApp(<Enrollment api={api} wallet={wallet} />, { walletAddress: VOTER });
+
+    await user.type(screen.getByLabelText(/attention price/i), '7.50');
+    await user.click(screen.getByRole('button', { name: /enroll|update gate/i }));
+    await waitFor(() => expect(record.calls.some((call) => call.includes('/me/profile'))).toBe(true));
+
+    expect(record.bodies.some((body) => body.proofType === 'BasePayoutControl')).toBe(false);
+    const update = record.bodies.find((body) => 'gateEnrollmentProof' in body) as Record<string, unknown>;
+    expect('basePayoutControlProof' in update).toBe(false);
+    expect(wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4')).toHaveLength(2);
+  });
+
   it('reports the resulting opt-in state the server confirmed', async () => {
     const { api } = stubApi([
       { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: challenge },
@@ -226,6 +376,7 @@ describe('Enrollment', () => {
     const wallet = stubWallet({
       eth_requestAccounts: () => [VOTER],
       eth_chainId: () => '0x1',
+      eth_getCode: () => '0x',
       eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
     });
     const user = userEvent.setup();

@@ -171,9 +171,40 @@ exercise today. None of them is worked around with invented data.
    would break on a test token — `readTokenDomain` reads both from the token and
    proves them against the token's own `DOMAIN_SEPARATOR()` before signing. A
    mismatch aborts; it never falls back to a guess.
-3. **EOA enrollment only.** The server contract includes ERC-1271 and the
-   separate Base `BasePayoutControl` proof, but the merged submission path
-   requires an EOA payer, so the UI does not offer Safe enrollment.
+3. **EOA payers only.** The advocate paying a quote must be an EOA: the
+   splitter consumes the EIP-3009 authorization as `v, r, s`, which no contract
+   wallet can produce. `assertEcdsaSignature` enforces that on the payment path
+   alone. Voter enrollment and the inbox have no such limit — a contract wallet
+   enrolls as itself, and the server decides its authority through its own
+   on-chain ERC-1271.
+
+## Contract wallets
+
+A Safe is enrolled as the Safe, never as an owner. The identity is whatever
+account the injected provider reports, and it is carried unchanged into the
+`dao_profile` session, the `GateEnrollment` payload, the stored profile, and the
+`dao_inbox` session that opens the private inbox.
+
+Three rules hold this together, and the first is the one everything else rests
+on:
+
+- **The browser never decides authority.** `signTypedData` accepts the
+  signature bytes the wallet returns, whatever their length — a 65-byte ECDSA
+  pair from an EOA, concatenated owner signatures, or the empty `0x` of an
+  already-approved SafeMessage. A length check here would reject a Safe before
+  the account's own `isValidSignature` was ever asked. The server asks it, on
+  the DAO chain, and requires `0x1626ba7e`.
+- **An owner's signature is not the Safe's.** Enrollment binds the account the
+  page connected to. A signature that merely recovers to an owner address
+  verifies as that owner and authorizes nothing for the Safe.
+- **A contract wallet also proves Base payout control.** The Gate wallet is the
+  payout wallet, so the server demands a `BasePayoutControl` proof on a first
+  enrollment and on every transition back into `accepting_now`, and records the
+  Base code hash it was proved against. This app requests that proof on exactly
+  those transitions — the server refuses an update carrying one it did not ask
+  for — which means the Safe must also be deployed at the same address on Base,
+  and the wallet must be able to switch chains to sign under the Base domain.
+  A provider pinned to one chain cannot complete that step.
 
 ## Commands
 

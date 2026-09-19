@@ -3,7 +3,7 @@ import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
 import { useWalletConnection } from '../wallet-connection';
 import { openWalletSession } from '../wallet-session';
-import { signTypedData, type Eip1193Provider } from '../wallet';
+import { ensureChain, isContractAccount, signTypedData, type Eip1193Provider } from '../wallet';
 import { formatUsdc } from '../format';
 import { WalletIdentity } from '../components/WalletIdentity';
 import type { Availability, PublicGateProfile } from '../types';
@@ -16,14 +16,25 @@ import type { Availability, PublicGateProfile } from '../types';
  * GateEnrollment payload. There is no fallback authentication path: if the
  * server rejects a step, the rejection is shown and the flow stops.
  *
- * The MVP path proven end to end by the merged backend is an externally owned
- * account. Safe / ERC-1271 enrollment and the separate Base payout-control
- * proof exist in the server contract but are not offered here, because claiming
- * Safe support before the actual backend path succeeds would be a lie a voter
- * could lose money to. That restriction, and the fact that the enrolling wallet
- * is the payout wallet, are stated as helper text at the control they apply to
- * rather than as paragraphs above the form: a voter should reach the price and
- * the stage switches immediately, and meet each limitation where it bites.
+ * An externally owned account signs twice: the `dao_profile` session, then the
+ * GateEnrollment payload. A contract wallet — a Safe — signs the same two, and
+ * a third: the server holds a contract wallet to a Base payout-control proof
+ * whenever it enrolls or moves back to `accepting_now`, because the Gate wallet
+ * is the payout wallet and Gavel records the Base code hash it was proved
+ * against. This page mirrors that rule rather than guessing at it: the account's
+ * own code decides, and the proof is requested only when the server would
+ * require it — sending one it did not ask for is itself a rejection.
+ *
+ * Nothing here decides that a Safe controls anything. The signature goes to the
+ * server exactly as the wallet returned it and the account's own ERC-1271
+ * `isValidSignature` answers on chain. An owner's EOA signature is never
+ * accepted as the Safe's: the enrolled identity is the connected account, and
+ * only that account's contract can authorize for it.
+ *
+ * The fact that the enrolling wallet is the payout wallet is stated as helper
+ * text at the control it applies to rather than as paragraphs above the form: a
+ * voter should reach the price and the stage switches immediately, and meet
+ * each limitation where it bites.
  *
  * The two stage flags are the voter's opt-in and are signed into the
  * GateEnrollment payload, so this form shows them rather than assuming them.
@@ -42,6 +53,15 @@ function toAtomic(input: string): string | null {
   return atomic < USDC_SCALE ? null : atomic.toString();
 }
 
+/** The chain the SERVER bound a challenge to, never a constant in this file. */
+function chainOf(domain: { chainId: number | string }): number {
+  const chainId = Number(domain.chainId);
+  if (!Number.isSafeInteger(chainId) || chainId < 1) {
+    throw new Error('The server issued a challenge for a chain this app cannot read.');
+  }
+  return chainId;
+}
+
 export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) {
   const { setSession } = useSession();
   const { address, noteConnected } = useWalletConnection();
@@ -53,6 +73,47 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  /**
+   * The Base payout-control proof a contract wallet owes, and only when it owes
+   * it.
+   *
+   * The server requires it on a first enrollment and on every transition back
+   * into `accepting_now`, and refuses an update that carries one it did not
+   * ask for — so the condition is read from the same published availability the
+   * server compares against rather than assumed either way.
+   */
+  const proveBasePayoutControl = useCallback(
+    async ({ account, requested }: { account: string; requested: Availability }) => {
+      const existing = await api.getGate(account);
+      const required =
+        !existing || (requested === 'accepting_now' && existing.availability !== 'accepting_now');
+      if (!required) return undefined;
+      const challenge = await api.requestChallenge({
+        proofType: 'BasePayoutControl',
+        wallet: account,
+        dao: 'nouns',
+      });
+      // Payout control is a Base fact and is signed under the Base domain the
+      // server issued, which means moving the wallet to that chain first.
+      await ensureChain(wallet, chainOf(challenge.domain));
+      const signature = await signTypedData(wallet, account, {
+        domain: challenge.domain,
+        types: challenge.types,
+        primaryType: challenge.primaryType,
+        message: challenge.message,
+      });
+      return {
+        typedData: {
+          primaryType: challenge.primaryType,
+          domain: challenge.domain,
+          message: challenge.message,
+        },
+        signature,
+      };
+    },
+    [api, wallet],
+  );
 
   const submit = useCallback(
     async (event: React.FormEvent) => {
@@ -78,6 +139,9 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           api,
           provider: wallet,
           role: 'dao_profile',
+          // A wallet already connected in the header is reused: this page asks
+          // for signatures, never for a second connection.
+          account: address,
         });
         // The header reflects the wallet that just authorized. The connection
         // is identity only; the `dao_profile` session above is the grant, and
@@ -96,6 +160,10 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           acceptVoting,
           attentionAmount,
         });
+        // The DAO chain is the server's, carried in the challenge it signed
+        // over — never a constant here. Being on it is what makes both the
+        // signature and the code read below answer for the right chain.
+        await ensureChain(wallet, chainOf(enrollmentChallenge.domain));
         const enrollmentSignature = await signTypedData(wallet, account, {
           domain: enrollmentChallenge.domain,
           types: enrollmentChallenge.types,
@@ -103,9 +171,17 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           message: enrollmentChallenge.message,
         });
 
+        // 3. A contract wallet also proves control of the Base payout address,
+        //    on exactly the transitions the server demands it: a first
+        //    enrollment, or a move back into `accepting_now`. An EOA is asked
+        //    for nothing more, and an unrequested proof is refused by the
+        //    server, so this asks the same question the server asks.
+        const basePayoutControlProof = (await isContractAccount(wallet, account))
+          ? await proveBasePayoutControl({ account, requested: availability })
+          : undefined;
+
         const updated = await api.updateProfile(verified.token, {
           gateEnrollmentProof: {
-            proofType: 'GateEnrollment',
             typedData: {
               primaryType: enrollmentChallenge.primaryType,
               domain: enrollmentChallenge.domain,
@@ -117,6 +193,7 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
               .map((tag) => tag.trim())
               .filter(Boolean),
           },
+          ...(basePayoutControlProof ? { basePayoutControlProof } : {}),
         });
         setProfile(updated);
       } catch (cause: unknown) {
@@ -131,7 +208,19 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         setBusy(false);
       }
     },
-    [api, wallet, price, availability, acceptPreVote, acceptVoting, tags, setSession, noteConnected],
+    [
+      api,
+      wallet,
+      address,
+      price,
+      availability,
+      acceptPreVote,
+      acceptVoting,
+      tags,
+      setSession,
+      noteConnected,
+      proveBasePayoutControl,
+    ],
   );
 
   return (
@@ -234,8 +323,10 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           {busy ? 'Waiting for your wallet…' : 'Enroll Gate'}
         </button>
         <p className="counter enrollment-limits">
-          Externally owned accounts (EOA) only. Contract wallets, including Safe, are not enabled in
-          this deployment.
+          A contract wallet enrolls as itself: the Gate identity is the account you connect, proved
+          by that account's own on-chain authority (ERC-1271). An owner's personal signature never
+          stands in for it. A contract wallet is also asked for one extra signature, proving control
+          of the same address on Base — where it will be paid — so it needs to be deployed there too.
         </p>
       </form>
     </div>

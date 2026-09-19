@@ -170,6 +170,90 @@ export async function connect(provider: Eip1193Provider): Promise<string> {
   return getAddress(account);
 }
 
+/**
+ * The accounts the wallet has ALREADY authorized, without prompting.
+ *
+ * `eth_accounts` never opens a wallet window: it reports what the page may
+ * already use. That is what lets a workflow reuse the header's connection
+ * instead of asking a connected person to connect a second time.
+ */
+export async function listAccounts(provider: Eip1193Provider): Promise<string[]> {
+  const accounts = await provider.request({ method: 'eth_accounts' });
+  if (!Array.isArray(accounts)) return [];
+  const authorized: string[] = [];
+  for (const entry of accounts) {
+    if (typeof entry !== 'string') continue;
+    try {
+      authorized.push(getAddress(entry));
+    } catch {
+      // A wallet that reports an unparseable account contributes nothing.
+    }
+  }
+  return authorized;
+}
+
+/**
+ * Resolves the account a role-scoped workflow is about to sign with.
+ *
+ * `preferred` is the account the global header is already showing. When the
+ * wallet still lists it, it is reused and nothing is prompted — a connected
+ * person is asked to SIGN, not to connect again. When the wallet lists other
+ * accounts but not that one, this refuses rather than silently signing as
+ * somebody else: a session minted for an account the page never named is worse
+ * than a visible failure. Only a wallet with nothing authorized prompts.
+ */
+export async function resolveAccount(
+  provider: Eip1193Provider,
+  preferred: string | null = null,
+): Promise<string> {
+  let wanted: string | null = null;
+  if (typeof preferred === 'string') {
+    try {
+      wanted = getAddress(preferred);
+    } catch {
+      wanted = null;
+    }
+  }
+  if (wanted) {
+    let authorized: string[] = [];
+    try {
+      authorized = await listAccounts(provider);
+    } catch {
+      // A wallet without `eth_accounts` simply falls through to a prompt.
+      authorized = [];
+    }
+    if (authorized.includes(wanted)) return wanted;
+    if (authorized.length > 0) {
+      throw new WalletError(
+        'ACCOUNT_CHANGED',
+        'The wallet is no longer on the account shown in the header. Reconnect and try again.',
+      );
+    }
+  }
+  return connect(provider);
+}
+
+/**
+ * Whether `account` is a contract wallet on the chain the provider is on.
+ *
+ * Empty code means an externally owned account. Anything else is a contract
+ * wallet — a Safe, typically — whose authority is an ERC-1271 question, and
+ * whose enrollment the server holds to a stricter proof set.
+ */
+export async function isContractAccount(
+  provider: Eip1193Provider,
+  account: string,
+): Promise<boolean> {
+  const code = await provider.request({
+    method: 'eth_getCode',
+    params: [getAddress(account), 'latest'],
+  });
+  if (typeof code !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(code)) {
+    throw new WalletError('CODE_UNAVAILABLE', 'The wallet could not report whether this account is a contract.');
+  }
+  return code !== '0x';
+}
+
 export async function getChainId(provider: Eip1193Provider): Promise<number> {
   const raw = await provider.request({ method: 'eth_chainId' });
   const value = Number(raw);
@@ -191,6 +275,44 @@ export async function ensureChain(provider: Eip1193Provider, chainId: number): P
   }
 }
 
+/** Any signature bytes a verifier may accept: ECDSA, or an ERC-1271 blob. */
+const SIGNATURE_BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
+
+/** The 65-byte ECDSA shape, and only that, splits into the `v, r, s` a
+ *  token's `receiveWithAuthorization` needs. */
+const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
+
+/**
+ * Refuses anything the splitter path cannot split into `v, r, s`.
+ *
+ * This is the payment boundary's own rule, deliberately NOT `signTypedData`'s:
+ * the EIP-3009 authorization is consumed as three scalars by a token contract
+ * that knows nothing about ERC-1271, so an advocate paying from a contract
+ * wallet must fail here rather than produce calldata that reverts on chain.
+ */
+export function assertEcdsaSignature(signature: string): string {
+  if (!ECDSA_SIGNATURE.test(signature)) {
+    // Never echo the raw value back in the message; a malformed signature is
+    // still signature material.
+    throw new WalletError('BAD_SIGNATURE', 'The wallet returned an unusable signature.');
+  }
+  return signature;
+}
+
+/**
+ * Signs typed data and returns the wallet's signature bytes, whatever their
+ * length.
+ *
+ * A 65-byte ECDSA signature is what an EOA returns, and it is NOT what a
+ * contract wallet returns. A Safe answers `eth_signTypedData_v4` with whatever
+ * its own ERC-1271 `isValidSignature` will later accept for that digest: the
+ * concatenated owner signatures, an empty `0x` when the SafeMessage is already
+ * approved, or another wallet-defined encoding. Assuming 65 bytes here would
+ * reject every one of those in the browser, before the server ever got the
+ * chance to ask the contract — so the check is exactly what it can honestly be
+ * (hex, whole bytes) and authority is decided where it belongs: by the account
+ * itself, on chain, through the server's ERC-1271 verification.
+ */
 export async function signTypedData(
   provider: Eip1193Provider,
   account: string,
@@ -216,7 +338,7 @@ export async function signTypedData(
       }),
     ],
   });
-  if (typeof signature !== 'string' || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+  if (typeof signature !== 'string' || !SIGNATURE_BYTES.test(signature)) {
     // Never echo the raw value back in the message; a malformed signature is
     // still signature material.
     throw new WalletError('BAD_SIGNATURE', 'The wallet returned an unusable signature.');
@@ -294,12 +416,16 @@ export async function payQuote(
 
   onPhase('authorizing');
   const tokenDomain = await readTokenDomain(provider, plan.token, plan.chainId);
-  const authorizationSignature = await signTypedData(provider, payer, {
-    domain: tokenDomain,
-    types: RECEIVE_WITH_AUTHORIZATION_TYPES as unknown as object,
-    primaryType: 'ReceiveWithAuthorization',
-    message: plan.authorization,
-  });
+  // The splitter consumes `v, r, s`, so this path — and only this path — holds
+  // the signature to the 65-byte ECDSA shape.
+  const authorizationSignature = assertEcdsaSignature(
+    await signTypedData(provider, payer, {
+      domain: tokenDomain,
+      types: RECEIVE_WITH_AUTHORIZATION_TYPES as unknown as object,
+      primaryType: 'ReceiveWithAuthorization',
+      message: plan.authorization,
+    }),
+  );
 
   onPhase('broadcasting');
   const txHash = await provider.request({

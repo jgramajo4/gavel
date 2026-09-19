@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { AbiCoder, Interface, Signature, keccak256, toUtf8Bytes } from 'ethers';
 import {
+  assertEcdsaSignature,
   assertPayableQuote,
   encodeSettleCall,
+  isContractAccount,
   isQuotePayable,
   planPayment,
   payQuote,
   readTokenDomain,
+  resolveAccount,
+  signTypedData,
   WalletError,
 } from './wallet';
 import { stubWallet } from './test/harness';
@@ -180,5 +184,83 @@ describe('quote payability gate', () => {
       code: 'UNSUPPORTED_QUOTE_VERSION',
     });
     expect(wallet.calls).toHaveLength(0);
+  });
+});
+
+const TYPED = {
+  domain: { name: 'GavelGate', version: '1', chainId: 1, verifyingContract: VOTER },
+  types: { WalletSession: [{ name: 'wallet', type: 'address' }] },
+  primaryType: 'WalletSession',
+  message: { wallet: VOTER },
+};
+
+describe('typed-data signature shape', () => {
+  it('accepts a contract wallet signature that is not 65 bytes', async () => {
+    // A Safe answers with whatever its own `isValidSignature` will accept for
+    // the digest: concatenated owner signatures here. Rejecting it in the
+    // browser would decide authority the account alone gets to decide.
+    const signature = `0x${'44'.repeat(130)}`;
+    const wallet = stubWallet({ eth_signTypedData_v4: () => signature });
+    await expect(signTypedData(wallet, VOTER, TYPED)).resolves.toBe(signature);
+  });
+
+  it('accepts an empty signature, which is what an approved SafeMessage returns', async () => {
+    const wallet = stubWallet({ eth_signTypedData_v4: () => '0x' });
+    await expect(signTypedData(wallet, VOTER, TYPED)).resolves.toBe('0x');
+  });
+
+  it('still refuses something that is not signature bytes at all', async () => {
+    for (const bad of ['signed!', '0xabc', '']) {
+      const wallet = stubWallet({ eth_signTypedData_v4: () => bad });
+      await expect(signTypedData(wallet, VOTER, TYPED)).rejects.toMatchObject({
+        code: 'BAD_SIGNATURE',
+      });
+    }
+  });
+
+  it('holds the payment path to ECDSA, because the splitter consumes v, r, s', () => {
+    expect(assertEcdsaSignature(AUTH_SIGNATURE)).toBe(AUTH_SIGNATURE);
+    // The contract-wallet shapes the auth path now accepts are exactly the
+    // ones a token's `receiveWithAuthorization` cannot use.
+    expect(() => assertEcdsaSignature(`0x${'44'.repeat(130)}`)).toThrow(WalletError);
+    expect(() => assertEcdsaSignature('0x')).toThrow(WalletError);
+  });
+});
+
+describe('account reuse', () => {
+  it('reuses an already authorized account without prompting', async () => {
+    const wallet = stubWallet({ eth_accounts: () => [VOTER.toLowerCase()] });
+    await expect(resolveAccount(wallet, VOTER)).resolves.toBe(VOTER);
+    expect(wallet.calls.map((call) => call.method)).toEqual(['eth_accounts']);
+  });
+
+  it('refuses to sign as a different account than the one the page is showing', async () => {
+    const wallet = stubWallet({
+      eth_accounts: () => [PAYER],
+      eth_requestAccounts: () => [PAYER],
+    });
+    await expect(resolveAccount(wallet, VOTER)).rejects.toMatchObject({ code: 'ACCOUNT_CHANGED' });
+    // No prompt, and above all no session minted for an account nobody named.
+    expect(wallet.calls.map((call) => call.method)).toEqual(['eth_accounts']);
+  });
+
+  it('prompts when nothing is authorized yet', async () => {
+    const wallet = stubWallet({ eth_accounts: () => [], eth_requestAccounts: () => [VOTER] });
+    await expect(resolveAccount(wallet, VOTER)).resolves.toBe(VOTER);
+    expect(wallet.calls.map((call) => call.method)).toEqual(['eth_accounts', 'eth_requestAccounts']);
+  });
+
+  it('prompts when no account is preferred at all', async () => {
+    const wallet = stubWallet({ eth_requestAccounts: () => [VOTER] });
+    await expect(resolveAccount(wallet)).resolves.toBe(VOTER);
+    expect(wallet.calls.map((call) => call.method)).toEqual(['eth_requestAccounts']);
+  });
+
+  it('reads contract-ness from the account code, on whatever chain the wallet is on', async () => {
+    await expect(isContractAccount(stubWallet({ eth_getCode: () => '0x' }), VOTER)).resolves.toBe(false);
+    await expect(isContractAccount(stubWallet({ eth_getCode: () => '0x6080' }), VOTER)).resolves.toBe(true);
+    await expect(
+      isContractAccount(stubWallet({ eth_getCode: () => null }), VOTER),
+    ).rejects.toMatchObject({ code: 'CODE_UNAVAILABLE' });
   });
 });
