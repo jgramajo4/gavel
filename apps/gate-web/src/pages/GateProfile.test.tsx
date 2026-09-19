@@ -35,6 +35,16 @@ describe('GateProfile', () => {
     expect(screen.getByText('Wallet')).toBeInTheDocument();
   });
 
+  it('publishes the voter price and not the Gavel service fee', async () => {
+    const { api } = stubApi(profileRoute(pollutedProfile));
+    const { container } = renderApp(<GateProfile api={api} wallet={pollutedProfile.wallet} />);
+    await screen.findByText('voter.eth');
+    // The advocate pays the fee and is told about it at the composer and the
+    // checkout quote. A voter's public page shows what THEY charge.
+    expect(screen.getByText('Attention price')).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/service fee|0\.25 USDC/i);
+  });
+
   it('uses a shortened address as the headline when there is no name', async () => {
     const { api } = stubApi(profileRoute(closedProfile));
     renderApp(<GateProfile api={api} wallet={closedProfile.wallet} />);

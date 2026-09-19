@@ -14,6 +14,12 @@ import { formatDateTime, formatTimestamp, formatUsdc } from '../format';
  * settings, capacity, inbox and read state, and any authorization material are
  * private and have no representation here. When a Gate is unavailable the page
  * still exists and says so, without publishing a count or a reset time.
+ *
+ * The Gavel service fee is deliberately NOT shown. This page answers "what does
+ * this voter charge for their attention"; the fee is Gavel's, is paid by the
+ * advocate, and never comes out of the voter's price. It is disclosed where it
+ * is actually owed — the composer and the checkout quote — so the number beside
+ * a voter's name is the number that reaches them.
  */
 export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
@@ -119,10 +125,6 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
                 <div className="field-row">
                   <dt>Attention price</dt>
                   <dd>{formatUsdc(policy.attentionAmount)}</dd>
-                </div>
-                <div className="field-row">
-                  <dt>Gavel service fee</dt>
-                  <dd>{formatUsdc(policy.gavelFeeAmount)} charged separately at checkout</dd>
                 </div>
               </dl>
               {policy.tags.length > 0 ? (
