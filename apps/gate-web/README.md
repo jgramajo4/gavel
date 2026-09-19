@@ -6,6 +6,64 @@ the private voter inbox.
 
 Experimental. The browser is not authoritative for anything that matters.
 
+## Visual system
+
+Gate uses the Gavel landing page's design tokens verbatim (`website/styles.css`):
+charcoal ground `#11120f`, bone text, brass `#d2b071` as the single accent,
+sage and rust reserved for state, square surfaces, thin rules, Arial for text
+and a mono stack for labels, addresses, and eyebrows. There is no second
+palette, no radius scale, and no Gate-only button — Gate is a product inside
+Gavel, not a neighbouring app. The app is dark only, like the landing page, and
+every text/background pair in use clears WCAG AA by a wide margin (the tightest
+is muted-on-raised at 6.8:1).
+
+## Global wallet connection
+
+The header carries one wallet control, on every route. It shows `Connect wallet`
+when disconnected and the ENS name — or a shortened `0x650C…50E1`, never the
+full address — when connected.
+
+**Connecting is identity, not authorization.** `wallet-connection.tsx` holds the
+authorized account and nothing else: no token, no challenge, no signature, and
+nothing in `localStorage`, `sessionStorage`, or a cookie. There is no silent
+`eth_accounts` probe on mount either, so the page does not touch a wallet until
+a person asks it to.
+
+The three WalletSession roles are unchanged and still separate. `dao_profile`
+(enrollment), `dao_inbox` (the private inbox), and `base_sender` (paying) are
+each obtained by signing that workflow's own challenge through
+`openWalletSession`, and the server still scopes every route to exactly one of
+them. A connected wallet opens no route. Enrollment and the inbox report the
+account they authorized back to the header so it stays in sync; switching
+accounts in the wallet drops the role session issued for the previous one, and
+so does Disconnect.
+
+## ENS
+
+ENS is presentation only. It is never an authorization identity and never
+replaces a canonical address in a path, a request body, or a signed payload.
+
+Resolution order:
+
+1. `PublicGateProfile.ens` — the server's indexed display field. When it is
+   present the browser resolves nothing.
+2. `VITE_ENS_RPC_URL` — an optional mainnet JSON-RPC endpoint for reverse
+   lookups of addresses the server has no name for (the connected wallet, for
+   example). It ships in the bundle, so it must be an endpoint the operator is
+   willing to publish; it must never carry a secret key. Unset means no
+   frontend resolution and no network call at all.
+3. Otherwise the address renders shortened.
+
+Lookups go through `ethers`' `lookupAddress`, which performs the forward check
+as well as the reverse record, and the result is then held to a conservative
+lowercase-ASCII shape so a homoglyph or bidi-override name cannot impersonate
+another identity on a surface that tells a payer who they are about to pay. A
+name that fails renders as the shortened address instead.
+
+Display hierarchy is fixed: name primary, shortened address secondary, and the
+same full address is never rendered twice. The full address is published once,
+as a labelled row, on the Gate profile — the detail view.
+
 ## Trust boundary
 
 The server owns validation, quote issuance, settlement verification, lifecycle
@@ -45,6 +103,21 @@ on arrival. The pay control disappears once a quote is unpayable.
 **Chain IDs are never hard-coded.** The chain comes from `quote.domain.chainId`,
 which the server signed over, so a Base Sepolia deployment works with no code
 change. The API origin comes from `VITE_GATE_API_URL`.
+
+## Environment
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `VITE_GATE_API_URL` | no (same origin) | Gate API origin |
+| `VITE_ENS_RPC_URL` | no | Public mainnet JSON-RPC for ENS reverse lookups. Never a keyed endpoint. |
+
+## Time
+
+No ISO-8601 stamp is shown to a person. `formatDateTime` renders
+`19 Sep 2026, 11:42 UTC`, built by hand rather than through `Intl` so the string
+is identical on every machine, locale, and CI runner. The exact instant is kept
+as the `title` of the element that summarizes it, so provenance is preserved
+without making a reader parse a machine format.
 
 ## Private voter inbox
 

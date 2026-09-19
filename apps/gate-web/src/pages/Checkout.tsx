@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { GateApiError, freezeQuote, type GateApi } from '../api';
 import { useSession } from '../session';
 import { SettlementState } from '../components/SettlementState';
-import { formatExpiry, formatUsdc, sumAtomic } from '../format';
+import { formatExpiryDateTime, formatUsdc, sumAtomic } from '../format';
 import { isQuotePayable, payQuote, type Eip1193Provider, type PaymentPhase } from '../wallet';
 import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../types';
 
@@ -209,7 +209,7 @@ export function Checkout({
           <Row label="Chain ID" value={String(quote.domain.chainId)} testId="chain-id" />
           <Row label="Token" value={quote.message.token} testId="token" />
           <Row label="Splitter" value={quote.domain.verifyingContract} testId="splitter" />
-          <Row label="Quote expires" value={formatExpiry(quote.message.expiry)} testId="quote-expiry" />
+          <Row label="Quote expires" value={formatExpiryDateTime(quote.message.expiry)} testId="quote-expiry" />
         </dl>
         <p className="quote-note">
           The voter receives the full attention amount. The Gavel service fee is fixed and charged

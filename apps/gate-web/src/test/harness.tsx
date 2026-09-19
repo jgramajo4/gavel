@@ -2,6 +2,8 @@ import type { ReactElement } from 'react';
 import { render, type RenderResult } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SessionProvider } from '../session';
+import { WalletConnectionProvider } from '../wallet-connection';
+import { EnsProvider, type EnsResolver } from '../ens';
 import { createGateApi, type GateApi } from '../api';
 import type { Eip1193Provider } from '../wallet';
 import type { VerifiedSession } from '../types';
@@ -58,13 +60,50 @@ export function stubWallet(
   };
 }
 
-export function renderApp(
-  ui: ReactElement,
-  options: { route?: string; session?: VerifiedSession | null } = {},
-): RenderResult {
+/** A resolver that answers from a fixed table and never touches the network. */
+export function stubEnsResolver(names: Record<string, string> = {}): EnsResolver & {
+  lookups: string[];
+} {
+  const lookups: string[] = [];
+  return {
+    lookups,
+    async lookup(address: string) {
+      lookups.push(address);
+      return names[address] ?? names[address.toLowerCase()] ?? null;
+    },
+  };
+}
+
+export interface RenderAppOptions {
+  route?: string;
+  session?: VerifiedSession | null;
+  /** Seeds the global wallet connection as if the header had connected. */
+  walletAddress?: string | null;
+  /** Wallet the global connection prompts. Defaults to one that refuses. */
+  provider?: Eip1193Provider;
+  /** Frontend ENS fallback. Absent means no resolution is attempted at all. */
+  ens?: EnsResolver | null;
+}
+
+const NO_WALLET: Eip1193Provider = {
+  async request() {
+    throw new Error('No Ethereum wallet is available in this browser.');
+  },
+};
+
+export function renderApp(ui: ReactElement, options: RenderAppOptions = {}): RenderResult {
   return render(
     <MemoryRouter initialEntries={[options.route ?? '/']}>
-      <SessionProvider initialSession={options.session ?? null}>{ui}</SessionProvider>
+      <EnsProvider resolver={options.ens ?? null}>
+        <SessionProvider initialSession={options.session ?? null}>
+          <WalletConnectionProvider
+            provider={options.provider ?? NO_WALLET}
+            initialAddress={options.walletAddress ?? null}
+          >
+            {ui}
+          </WalletConnectionProvider>
+        </SessionProvider>
+      </EnsProvider>
     </MemoryRouter>,
   );
 }

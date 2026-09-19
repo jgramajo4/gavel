@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import type { DirectoryFilters, GateApi } from '../api';
 import type { PublicGateProfile } from '../types';
 import { AvailabilityBadge } from '../components/AvailabilityBadge';
-import { formatTimestamp, formatUsdc } from '../format';
+import { WalletIdentity } from '../components/WalletIdentity';
+import { formatDateTime, formatTimestamp, formatUsdc } from '../format';
 
 /**
  * Public Gate discovery.
@@ -17,35 +18,50 @@ import { formatTimestamp, formatUsdc } from '../format';
  * nothing in this page may suggest otherwise.
  */
 
-function PowerReadout({ profile }: { profile: PublicGateProfile }) {
-  if (!profile.governancePower) return <p className="power">Voting power unavailable.</p>;
-  return (
-    <p className="power">
-      <span className="power-label">Voting power</span>{' '}
-      <span className="power-amount">{profile.governancePower.amount}</span>{' '}
-      <span className="power-asof">As of {formatTimestamp(profile.governancePower.asOf)}</span>
-    </p>
-  );
-}
-
+/**
+ * One card, one reading order: who, whether they are open, what attention
+ * costs, how much weight they carry, and when that weight was measured.
+ *
+ * The wallet address appears once, shortened, and only as the secondary line
+ * under an ENS name — a 42-character hex string is not a headline. The exact
+ * instant behind the human "as of" stays available as the element's title, so
+ * nothing about provenance is lost to legibility.
+ */
 function GateCard({ profile }: { profile: PublicGateProfile }) {
   const policy = profile.policies?.[0];
+  const power = profile.governancePower;
   return (
     <li className="gate-card">
       <h2 className="gate-card-title">
-        <Link to={`/gates/${profile.wallet}`}>{profile.ens || profile.wallet}</Link>
+        <Link to={`/gates/${profile.wallet}`}>
+          <WalletIdentity address={profile.wallet} ens={profile.ens} />
+        </Link>
       </h2>
-      <p className="gate-card-wallet">{profile.wallet}</p>
       <AvailabilityBadge
         availability={profile.availability}
         acceptingSubmissions={profile.acceptingSubmissions}
       />
-      <PowerReadout profile={profile} />
-      {policy ? (
-        <p className="gate-card-price">
-          <span className="price-label">Attention price</span>{' '}
-          <span className="price-amount">{formatUsdc(policy.attentionAmount)}</span>
+      <dl className="gate-card-stats">
+        <div className="gate-stat">
+          <dt className="price-label">Attention</dt>
+          <dd className="price-amount">
+            {policy ? formatUsdc(policy.attentionAmount) : 'Price unavailable'}
+          </dd>
+        </div>
+        <div className="gate-stat">
+          <dt className="power-label">Voting power</dt>
+          <dd className="power-amount">{power ? power.amount : '—'}</dd>
+        </div>
+      </dl>
+      {power ? (
+        <p className="power-asof" title={formatTimestamp(power.asOf)}>
+          As of {formatDateTime(power.asOf)}
         </p>
+      ) : (
+        <p className="power-asof">Voting power unavailable.</p>
+      )}
+      {policy && policy.acceptedStages.length > 0 ? (
+        <p className="gate-card-stages">Accepts {policy.acceptedStages.join(', ')}</p>
       ) : null}
       {policy && policy.tags.length > 0 ? (
         <ul className="tag-list" aria-label="Public tags">
@@ -110,9 +126,11 @@ export function GateDirectory({ api }: { api: GateApi }) {
 
   return (
     <div className="page page-directory">
+      <p className="eyebrow">Gavel Gate</p>
       <h1>Gate directory</h1>
       <p className="page-intro">
-        Governance participants who have opted in to receive paid pitches. Newest opt-ins first.
+        These governance participants have opted in and set a price for their attention. Newest
+        opt-ins first.
       </p>
       <form className="filters" role="search" aria-label="Gate filters" onSubmit={apply}>
         <div className="field">

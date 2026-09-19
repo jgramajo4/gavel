@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import type { GateApi } from '../api';
 import type { PublicGateProfile } from '../types';
 import { AvailabilityBadge } from '../components/AvailabilityBadge';
-import { formatTimestamp, formatUsdc } from '../format';
+import { WalletIdentity } from '../components/WalletIdentity';
+import { formatDateTime, formatTimestamp, formatUsdc } from '../format';
 
 /**
  * A durable public page for a Gate in every availability state.
@@ -46,6 +47,7 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
 
   return (
     <div className="page page-profile">
+      <p className="eyebrow">Gavel Gate</p>
       <h1>Gate profile</h1>
       {loading ? <p className="notice">Loading…</p> : null}
       {error ? (
@@ -56,8 +58,10 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
       {profile ? (
         <article className="profile">
           <header className="profile-header">
-            {profile.ens ? <p className="profile-ens">{profile.ens}</p> : null}
-            <p className="profile-wallet">{profile.wallet}</p>
+            {/* Name first, shortened address under it. The canonical address is
+                published in full once, below, where a reader who needs to copy
+                it can find it — not twice at the top of the page. */}
+            <WalletIdentity address={profile.wallet} ens={profile.ens} tone="header" />
             <AvailabilityBadge
               availability={profile.availability}
               acceptingSubmissions={profile.acceptingSubmissions}
@@ -73,12 +77,21 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
                 <dt>DAO</dt>
                 <dd>{policy?.dao ?? 'nouns'}</dd>
               </div>
+              <div className="field-row">
+                <dt>Wallet</dt>
+                <dd className="profile-wallet">{profile.wallet}</dd>
+              </div>
               {profile.governancePower ? (
                 <div className="field-row">
                   <dt>Voting power</dt>
-                  <dd>
-                    <span className="power-amount">{profile.governancePower.amount}</span>{' '}
-                    <span className="power-asof">As of {formatTimestamp(profile.governancePower.asOf)}</span>
+                  <dd className="profile-power">
+                    <span className="power-amount">{profile.governancePower.amount}</span>
+                    <span
+                      className="power-asof"
+                      title={formatTimestamp(profile.governancePower.asOf)}
+                    >
+                      As of {formatDateTime(profile.governancePower.asOf)}
+                    </span>
                   </dd>
                 </div>
               ) : null}

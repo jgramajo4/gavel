@@ -1,43 +1,46 @@
-/* Gavel Gate — a deliberately plain, high-contrast, mobile-first stylesheet.
-   Provenance and settlement state are the only things that get colour, because
-   they are the only things a reader can make a money decision on. */
+/* Gavel Gate.
+ *
+ * The tokens, type, rules, and square surfaces below are the Gavel landing
+ * page's system (`website/styles.css`) applied to an application shell: warm
+ * charcoal ground, bone text, brass as the single accent, sage/rust reserved
+ * for state. Gate is a product inside Gavel, so it does not get a palette,
+ * a radius scale, or a button of its own.
+ *
+ * Provenance and settlement state are still the only things that carry colour,
+ * because they are the only things a reader can make a money decision on.
+ */
 
 :root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #16181d;
-  --muted: #5b6270;
-  --line: #d9dde5;
-  --surface: #f6f7f9;
-  --accent: #1f4ed8;
-  --good: #116149;
-  --good-bg: #e6f4ee;
-  --bad: #8c1d2f;
-  --bad-bg: #fbeaed;
-  --progress: #7a5200;
-  --progress-bg: #fdf3dc;
-  --verified: #1f4ed8;
-  --unverified: #6b5300;
-  --radius: 8px;
-}
+  /* Verbatim from the Gavel landing page. */
+  --bg: #11120f;
+  --surface: #191a16;
+  --raised: #20211b;
+  --bone: #eeeade;
+  --muted: #aaa99a;
+  --brass: #d2b071;
+  --sage: #b3c5a1;
+  --rust: #d8a18b;
+  --line: #37392e;
+  --line-strong: #4a4c3d;
+  --font: Arial, Helvetica, sans-serif;
+  --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14161a;
-    --fg: #eef1f6;
-    --muted: #a3acbb;
-    --line: #2d323b;
-    --surface: #1b1e24;
-    --accent: #8fb0ff;
-    --good: #7ddcb8;
-    --good-bg: #10241d;
-    --bad: #ffa8b4;
-    --bad-bg: #2a1319;
-    --progress: #ffd98a;
-    --progress-bg: #2a2110;
-    --verified: #8fb0ff;
-    --unverified: #ffd98a;
-  }
+  /* Gate's semantic layer, mapped onto Gavel's accents rather than new hues. */
+  --fg: var(--bone);
+  --accent: var(--brass);
+  --good: var(--sage);
+  --good-bg: #1b2118;
+  --bad: var(--rust);
+  --bad-bg: #241914;
+  --progress: var(--brass);
+  --progress-bg: #221d13;
+  --verified: var(--brass);
+  --unverified: var(--muted);
+
+  /* Gavel draws square surfaces and thin rules; there is no radius scale. */
+  --radius: 0;
+
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -46,248 +49,637 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.6;
 }
 
-code, pre, .fact-value, .profile-wallet, .gate-card-wallet {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+::selection { background: var(--brass); color: var(--bg); }
+
+h1, h2, h3 { font-weight: 500; line-height: 1.12; letter-spacing: -0.03em; margin: 0; }
+h1 { font-size: clamp(2rem, 4.2vw, 2.75rem); letter-spacing: -0.045em; }
+h2 { font-size: 1.375rem; }
+h3 { font-size: 1.0625rem; }
+p { margin: 0; }
+
+/* The landing page's uppercase mono eyebrow, reused as the section marker. */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brass);
+  line-height: 1.5;
+  margin: 0 0 0.5rem;
+}
+
+code, pre, .fact-value, .profile-wallet, .inbox-wallet,
+.wallet-identity, .wallet-control-label, .wallet-control-address {
+  font-family: var(--mono);
   font-size: 0.92em;
   overflow-wrap: anywhere;
 }
 
 pre {
-  background: var(--surface);
+  background: #0d0e0b;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.75rem;
+  padding: 0.85rem;
   overflow-x: auto;
+  line-height: 1.8;
 }
 
-a { color: var(--accent); }
+a { color: var(--brass); text-decoration: none; }
+a:hover { color: var(--bone); }
 
 /* A visible focus ring everywhere: every flow here is keyboard-operable. */
 :focus-visible {
-  outline: 3px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--brass);
+  outline-offset: 3px;
 }
 
-.skip-link {
-  position: absolute;
-  left: -9999px;
-}
+.skip-link { position: absolute; left: -9999px; }
 .skip-link:focus {
   left: 1rem;
   top: 1rem;
-  z-index: 10;
-  background: var(--bg);
-  padding: 0.5rem 0.75rem;
-  border: 2px solid var(--accent);
-  border-radius: var(--radius);
+  z-index: 20;
+  background: var(--brass);
+  color: var(--bg);
+  padding: 0.6rem 1rem;
+  border: 0;
 }
 
-.app-header,
-.app-footer {
-  padding: 1rem;
+/* --- Header ---------------------------------------------------------------
+   Brand, navigation, and the global wallet control share one row on desktop.
+   Below 48rem the nav drops to its own full-width row and scrolls rather than
+   wrapping into the wallet control, so the header never overflows. */
+
+.app-header {
   border-bottom: 1px solid var(--line);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 1.25rem;
-  align-items: baseline;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
+.app-header-inner {
+  width: min(1280px, calc(100% - 4rem));
+  margin-inline: auto;
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.5rem 2rem;
+  padding-block: 0.75rem;
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--bone);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -1px;
+  line-height: 1;
+}
+.wordmark:hover { color: var(--bone); }
+.wordmark-mark { width: 26px; height: 26px; color: var(--brass); display: block; flex-shrink: 0; }
+.wordmark-dot { color: var(--brass); }
+.wordmark-product {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brass);
+  border: 1px solid var(--line-strong);
+  padding: 0.2rem 0.45rem;
+  margin-left: 0.15rem;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  font-size: 0.875rem;
+}
+nav a {
+  color: var(--muted);
+  padding: 0.35rem 0;
+  border-bottom: 2px solid transparent;
+}
+nav a:hover { color: var(--bone); }
+nav a.active { color: var(--bone); border-bottom-color: var(--brass); }
+
+/* --- Global wallet control ------------------------------------------------ */
+
+.wallet-control { position: relative; justify-self: end; }
+.wallet-control-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 40px;
+  padding: 0.4rem 0.85rem;
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--bone);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+  max-width: 14rem;
+}
+.wallet-control-trigger:hover { background: var(--raised); border-color: var(--brass); }
+.wallet-control-connect { color: var(--brass); }
+.wallet-control-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sage);
+  flex-shrink: 0;
+}
+.wallet-control-label {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wallet-control-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 30;
+  min-width: 15rem;
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.9rem;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-top: 2px solid var(--brass);
+  box-shadow: 0 20px 45px #0008;
+}
+.wallet-control-name { font-family: var(--mono); font-size: 0.9375rem; color: var(--bone); }
+.wallet-control-address { color: var(--muted); font-size: 0.8125rem; }
+.wallet-control-note {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.55;
+  border-top: 1px solid var(--line);
+  padding-top: 0.5rem;
+  margin-top: 0.2rem;
+}
+.wallet-control-disconnect {
+  justify-self: start;
+  min-height: 34px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8125rem;
+  color: var(--bone);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+}
+.wallet-control-disconnect:hover { border-color: var(--rust); color: var(--rust); }
+.wallet-control-error {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 30;
+  width: max-content;
+  max-width: 18rem;
+  font-size: 0.75rem;
+  color: var(--rust);
+  background: var(--bad-bg);
+  border: 1px solid var(--rust);
+  padding: 0.4rem 0.6rem;
+}
+
+/* --- Wallet identity ------------------------------------------------------
+   ENS primary, shortened address secondary. The full address is never drawn
+   twice, and outside a detail view it is never drawn in full. */
+
+.wallet-identity { display: inline-flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.wallet-identity-primary { color: inherit; }
+.wallet-identity-secondary {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.wallet-identity-header { display: flex; align-items: baseline; gap: 0.65rem; }
+.wallet-identity-header .wallet-identity-primary {
+  font-family: var(--font);
+  font-size: 1.5rem;
+  letter-spacing: -0.03em;
+  color: var(--bone);
+}
+.wallet-identity-header .wallet-identity-secondary { font-family: var(--mono); font-size: 0.875rem; }
+
+/* --- Footer --------------------------------------------------------------- */
+
 .app-footer {
-  border-bottom: 0;
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.75rem;
+  line-height: 1.7;
+  margin-top: 3rem;
 }
-.brand { font-weight: 700; margin: 0; }
-nav { display: flex; gap: 1rem; flex-wrap: wrap; }
+.app-footer p {
+  width: min(1280px, calc(100% - 4rem));
+  margin-inline: auto;
+  padding-block: 1.75rem;
+  max-width: 70ch;
+}
+
 main:focus { outline: none; }
 
 .page {
-  max-width: 62rem;
+  width: min(72rem, calc(100% - 4rem));
   margin: 0 auto;
-  padding: 1rem 1rem 3rem;
+  padding: 2.75rem 0 3rem;
 }
-.page-intro { color: var(--muted); }
+.page-intro {
+  color: var(--muted);
+  font-size: 1rem;
+  max-width: 54ch;
+  margin-top: 1rem;
+}
 
-/* Filters and forms stack on narrow screens and never need a pointer. */
+/* --- Forms ---------------------------------------------------------------- */
+
 .filters,
 .composer,
 .enrollment {
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
+  gap: 1rem;
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
+  border: 1px solid var(--line-strong);
+  padding: 1.5rem;
+  margin-top: 2rem;
 }
-.field { display: flex; flex-direction: column; gap: 0.3rem; }
-label, legend, dt { font-weight: 600; }
-input, select, textarea {
-  font: inherit;
-  color: inherit;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.5rem;
-  width: 100%;
-}
-textarea { resize: vertical; min-height: 6rem; }
-button {
-  font: inherit;
-  font-weight: 600;
-  color: var(--bg);
-  background: var(--accent);
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  padding: 0.6rem 1rem;
-  cursor: pointer;
-  min-height: 44px;
-}
-button[type='button'] { background: var(--bg); color: var(--fg); border-color: var(--line); }
-button[disabled] { opacity: 0.6; cursor: not-allowed; }
-fieldset { border: 1px solid var(--line); border-radius: var(--radius); }
-.counter { color: var(--muted); font-size: 0.85rem; margin: 0; }
-.composer-note, .profile-note, .quote-note, .fact-note, .evidence-note {
+/* The forms a voter fills in get the brass rule; the directory's filter bar is
+   a tool beside the results, so it stays quiet and lets the Gates lead. */
+.composer, .enrollment { border-top: 2px solid var(--brass); max-width: 48rem; }
+.filters { gap: 0.85rem 1.5rem; padding: 1.15rem 1.25rem; }
+/* A submit control is sized by its label, never stretched by the column. */
+.composer > button, .enrollment > button, .inbox-signin > button { align-self: flex-start; }
+.field { display: flex; flex-direction: column; gap: 0.4rem; }
+label, legend, dt { font-weight: 400; color: var(--bone); }
+label, legend {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted);
-  font-size: 0.9rem;
+}
+.checkbox-row, .inbox-toggle {
+  font-family: var(--font);
+  font-size: 0.9375rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--bone);
 }
 
+input, select, textarea {
+  font: inherit;
+  font-family: var(--font);
+  color: var(--bone);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  padding: 0.65rem 0.75rem;
+  width: 100%;
+  min-height: 44px;
+}
+input:hover, select:hover, textarea:hover { border-color: #5d604c; }
+textarea { resize: vertical; min-height: 7rem; }
+
+button {
+  font: inherit;
+  font-family: var(--font);
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: #17170f;
+  background: var(--brass);
+  border: 1px solid transparent;
+  border-radius: 0;
+  padding: 0.7rem 1.3rem;
+  cursor: pointer;
+  min-height: 46px;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+button:hover { background: #e4c48e; }
+button[type='button'] {
+  background: transparent;
+  color: var(--bone);
+  border-color: var(--line-strong);
+}
+button[type='button']:hover { background: var(--raised); border-color: var(--brass); }
+button[disabled] { opacity: 0.55; cursor: not-allowed; }
+button[disabled]:hover { background: var(--brass); }
+button[type='button'][disabled]:hover { background: transparent; }
+
+fieldset { border: 1px solid var(--line); border-radius: 0; margin: 0; }
+.counter, .composer-note, .profile-note, .quote-note, .fact-note, .evidence-note {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: 0;
+}
+.enrollment-limits { border-top: 1px solid var(--line); padding-top: 0.8rem; }
+.enrollment-wallet {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.9rem;
+  font-size: 0.875rem;
+}
+.enrollment-wallet-label {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.enrollment-wallet-hint { color: var(--muted); font-size: 0.8125rem; }
+
+/* The two filter actions stay on one line at every width rather than becoming
+   two full-bleed bars that push the results below the fold. */
+.filters button { align-self: start; }
+.filters button[type='submit'] { grid-column: 1; }
+@media (max-width: 40rem) {
+  .filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem 0.75rem; }
+  .filters .field { grid-column: 1 / -1; }
+  .filters button { width: 100%; }
+}
 @media (min-width: 40rem) {
   .filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
-  .filters button { grid-column: auto; }
+  .filters button { grid-column: auto; justify-self: start; }
 }
+
+/* --- Directory ------------------------------------------------------------ */
 
 .gate-list, .tag-list, .stage-list, .evidence-list, .fact-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
-.gate-list { display: grid; gap: 1rem; margin-top: 1.25rem; }
+.gate-list { display: grid; gap: 1px; margin-top: 2rem; background: var(--line); border: 1px solid var(--line); }
 @media (min-width: 48rem) {
   .gate-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.gate-card, .profile, .inbox-item, .quote-summary, .fact-group {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-  background: var(--surface);
+@media (min-width: 76rem) {
+  .gate-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
-.gate-card-title { margin: 0 0 0.25rem; font-size: 1.1rem; }
-.gate-card-wallet, .profile-wallet { color: var(--muted); margin: 0.25rem 0; }
-.power-amount, .price-amount, .lifecycle-value { font-weight: 700; }
-.power-asof, .power-label, .price-label, .lifecycle-label { color: var(--muted); font-size: 0.9rem; }
 
-.tag-list { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+.gate-card {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+  padding: 1.5rem;
+  background: var(--surface);
+  position: relative;
+  transition: background 0.18s;
+}
+.gate-card:hover { background: var(--raised); }
+.gate-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 48px;
+  background: var(--brass);
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.gate-card:hover::before, .gate-card:focus-within::before { opacity: 1; }
+
+.gate-card-title { margin: 0; font-size: 1.25rem; }
+.gate-card-title a { color: var(--bone); }
+.gate-card-title a:hover { color: var(--brass); }
+.gate-card .badge { justify-self: start; }
+
+/* Price and power read as two equal facts, not as a paragraph of labels. */
+.gate-card-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem 1rem;
+  margin: 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+.gate-stat { display: grid; gap: 0.15rem; min-width: 0; }
+.gate-stat dd { margin: 0; }
+.price-label, .power-label, .lifecycle-label {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 400;
+}
+.price-amount, .power-amount, .lifecycle-value {
+  font-size: 1.125rem;
+  font-weight: 400;
+  color: var(--brass);
+  letter-spacing: -0.01em;
+}
+.power-amount { color: var(--bone); }
+.power-asof {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  margin: 0;
+}
+.gate-card-stages {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  color: var(--sage);
+  margin: 0;
+}
+
+/* Test and demo provenance tags are data, so they stay — quietly. They must
+   never out-shout the price or the availability of the Gate carrying them. */
+.tag-list { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.25rem; }
 .tag {
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
   border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0.1rem 0.6rem;
-  font-size: 0.85rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0;
+  opacity: 0.85;
 }
 
 .badge {
   display: inline-block;
-  border-radius: 999px;
-  padding: 0.1rem 0.6rem;
-  font-size: 0.8rem;
-  font-weight: 700;
+  border-radius: 0;
+  padding: 0.2rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 400;
   border: 1px solid currentColor;
 }
-.availability-accepting_now { color: var(--good); background: var(--good-bg); }
-.availability-paused { color: var(--progress); background: var(--progress-bg); }
-.availability-closed { color: var(--bad); background: var(--bad-bg); }
+.availability-accepting_now { color: var(--sage); background: var(--good-bg); }
+.availability-paused { color: var(--brass); background: var(--progress-bg); }
+.availability-closed { color: var(--rust); background: var(--bad-bg); }
+
+/* --- Profile and detail rows ---------------------------------------------- */
+
+.gate-card, .profile, .inbox-item, .quote-summary, .fact-group {
+  border-radius: 0;
+}
+.profile, .inbox-item, .quote-summary {
+  border: 1px solid var(--line-strong);
+  border-top: 2px solid var(--brass);
+  padding: 1.75rem;
+  background: var(--surface);
+  margin-top: 2rem;
+}
+.profile-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+.profile-message { color: var(--muted); margin-top: 1rem; max-width: 60ch; }
+.profile-section { margin-top: 2rem; }
+.profile-section > h2 {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brass);
+  font-weight: 400;
+}
+.profile-wallet { color: var(--muted); }
 
 .field-row {
   display: grid;
   gap: 0.15rem;
-  padding: 0.5rem 0;
+  padding: 0.7rem 0;
   border-bottom: 1px solid var(--line);
 }
 @media (min-width: 40rem) {
-  .field-row { grid-template-columns: 14rem minmax(0, 1fr); gap: 1rem; align-items: baseline; }
+  .field-row { grid-template-columns: 14rem minmax(0, 1fr); gap: 1.5rem; align-items: baseline; }
 }
-dl { margin: 0.5rem 0; }
-dd { margin: 0; overflow-wrap: anywhere; }
-
-.primary-link {
-  display: inline-block;
-  margin-top: 1rem;
-  font-weight: 700;
+dl { margin: 0.75rem 0 0; }
+dt {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
+dd { margin: 0; overflow-wrap: anywhere; color: var(--bone); }
+.stage-list { display: flex; flex-wrap: wrap; gap: 0.5rem; font-family: var(--mono); font-size: 0.8125rem; color: var(--sage); }
 
-/* Provenance styling. Enriched facts are visually quieter and carry a distinct
-   badge so they can never be mistaken for verified material. */
-.fact-panel { display: grid; gap: 1rem; margin-top: 1rem; }
+/* The one brass call to action on a page that has one. */
+.primary-action, .primary-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  margin-top: 2rem;
+  padding: 0.7rem 1.3rem;
+  background: var(--brass);
+  color: #17170f;
+  font-size: 0.875rem;
+}
+.primary-action:hover, .primary-link:hover { background: #e4c48e; color: #17170f; }
+button.primary-action { border-color: transparent; }
+button.primary-action[disabled]:hover { background: var(--brass); }
+
+/* --- Provenance ----------------------------------------------------------
+   Enriched facts stay visually quieter and carry a distinct badge so they can
+   never be mistaken for verified material. */
+.fact-panel { display: grid; gap: 1rem; margin-top: 2rem; }
+.fact-group { border: 1px solid var(--line); padding: 1.25rem; background: var(--surface); }
 .fact-group-title {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
-  margin: 0 0 0.25rem;
+  margin: 0 0 0.5rem;
   font-size: 1rem;
 }
-.badge-verified { color: var(--verified); }
-.badge-unverified { color: var(--unverified); border-style: dashed; }
-.fact-group-canonical { border-left: 4px solid var(--verified); }
-.fact-group-decoded { border-left: 4px solid var(--verified); }
-.fact-group-enriched { border-left: 4px dashed var(--unverified); background: transparent; }
+.badge-verified { color: var(--brass); }
+.badge-unverified { color: var(--muted); border-style: dashed; }
+.fact-group-canonical, .fact-group-decoded { border-left: 3px solid var(--brass); }
+.fact-group-enriched { border-left: 3px dashed var(--muted); background: transparent; }
 .fact-list { display: grid; gap: 0.75rem; }
-.fact-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.75rem; background: var(--bg); }
+.fact-card { border: 1px solid var(--line); padding: 0.85rem; background: var(--bg); }
 .fact-card-enriched { border-style: dashed; }
-.fact-label { font-weight: 700; margin: 0 0 0.35rem; }
+.fact-label { font-weight: 400; color: var(--bone); margin: 0 0 0.35rem; }
 .fact-index { color: var(--muted); font-weight: 400; }
 .fact-field { display: grid; gap: 0.1rem; padding: 0.25rem 0; }
+.fact-empty { color: var(--muted); }
 
 .settlement {
   border: 1px solid var(--line);
-  border-left-width: 4px;
-  border-radius: var(--radius);
-  padding: 0.85rem 1rem;
-  margin-top: 1rem;
+  border-left-width: 3px;
+  padding: 1rem 1.25rem;
+  margin-top: 1.5rem;
 }
-.settlement-headline { font-weight: 700; margin: 0 0 0.25rem; }
-.settlement-detail, .settlement-tx { margin: 0.2rem 0 0; color: var(--muted); }
-.settlement-good { border-left-color: var(--good); background: var(--good-bg); }
-.settlement-bad { border-left-color: var(--bad); background: var(--bad-bg); }
-.settlement-progress { border-left-color: var(--progress); background: var(--progress-bg); }
+.settlement-headline { font-weight: 400; color: var(--bone); margin: 0 0 0.3rem; }
+.settlement-detail, .settlement-tx { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.875rem; }
+.settlement-good { border-left-color: var(--sage); background: var(--good-bg); }
+.settlement-bad { border-left-color: var(--rust); background: var(--bad-bg); }
+.settlement-progress { border-left-color: var(--brass); background: var(--progress-bg); }
 
-.notice { border-radius: var(--radius); padding: 0.75rem 1rem; background: var(--surface); }
-.notice-error { color: var(--bad); background: var(--bad-bg); border: 1px solid currentColor; }
-.notice-info { color: var(--good); background: var(--good-bg); border: 1px solid currentColor; }
+.notice {
+  padding: 0.85rem 1.15rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  margin-top: 1.25rem;
+}
+.notice-error { color: var(--rust); background: var(--bad-bg); border-color: currentColor; }
+.notice-info { color: var(--sage); background: var(--good-bg); border-color: currentColor; }
+.notice-info p { color: inherit; }
 
+.markdown { color: var(--bone); }
 .markdown > :first-child { margin-top: 0; }
 .markdown blockquote {
-  margin: 0.75rem 0;
-  padding-left: 0.9rem;
-  border-left: 3px solid var(--line);
+  margin: 0.85rem 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--brass);
   color: var(--muted);
 }
-.external-indicator { margin-left: 0.15rem; }
+.external-indicator { margin-left: 0.15rem; color: var(--brass); }
 
-/* Inbox. A candidate seeking sponsorship must never read like a live vote, so
-   the two kinds get different, labelled badges rather than the same chip. */
-.inbox { display: grid; gap: 1rem; }
-.inbox-header { display: grid; gap: 0.4rem; }
+/* --- Inbox ---------------------------------------------------------------
+   A candidate seeking sponsorship must never read like a live vote, so the two
+   kinds get different, labelled badges rather than the same chip. */
+.inbox { display: grid; gap: 1.25rem; margin-top: 2rem; }
+.inbox-header { display: grid; gap: 0.5rem; }
 .inbox-header button { justify-self: start; }
-.inbox-header h2 { margin: 0.25rem 0 0; }
-.inbox-meta { color: var(--muted); margin: 0; font-size: 0.9rem; }
-.lifecycle-changed { font-weight: 600; }
+.inbox-header h2 { margin: 0.35rem 0 0; font-size: 1.5rem; }
+.inbox-meta { color: var(--muted); margin: 0; font-size: 0.8125rem; font-family: var(--mono); }
+.lifecycle-changed { color: var(--brass); background: var(--progress-bg); border-color: currentColor; }
 .evidence-list { display: grid; gap: 0.35rem; margin-top: 0.75rem; }
 
 .inbox-signin {
   display: grid;
-  gap: 0.75rem;
+  gap: 1rem;
   justify-items: start;
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-  margin: 1rem 0;
+  border: 1px solid var(--line-strong);
+  border-top: 2px solid var(--brass);
+  padding: 1.5rem;
+  margin: 2rem 0;
+  max-width: 44rem;
 }
-.inbox-wallet { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+.inbox-wallet { color: var(--bone); }
+.inbox-signin-note { color: var(--muted); font-size: 0.875rem; line-height: 1.65; max-width: 52ch; margin: 0; }
+.profile-power { display: grid; gap: 0.2rem; }
 
 .inbox-controls {
   display: flex;
@@ -295,36 +687,97 @@ dd { margin: 0; overflow-wrap: anywhere; }
   gap: 0.75rem 1rem;
   align-items: center;
   justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
 }
-.inbox-toggle { font-weight: 400; display: flex; align-items: center; gap: 0.4rem; }
-.inbox-toggle input { width: auto; }
+.inbox-toggle { display: flex; align-items: center; gap: 0.5rem; }
+.inbox-toggle input, .checkbox-row input { width: auto; min-height: 0; accent-color: var(--brass); }
+.checkbox-row { display: flex; align-items: center; gap: 0.5rem; }
 
-.inbox-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+.inbox-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); }
 @media (min-width: 48rem) {
   .inbox-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .inbox-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
+  border: 0;
+  padding: 1.5rem;
   background: var(--surface);
   display: grid;
-  gap: 0.4rem;
+  gap: 0.5rem;
   align-content: start;
 }
-.inbox-card[data-archived='true'] { opacity: 0.72; }
-.inbox-card-title { font-weight: 700; margin: 0; font-size: 1.05rem; }
-.inbox-card button { justify-self: start; margin-top: 0.35rem; }
+.inbox-card:hover { background: var(--raised); }
+.inbox-card[data-archived='true'] { opacity: 0.65; }
+.inbox-card-title { font-weight: 400; color: var(--bone); margin: 0; font-size: 1.125rem; }
+.inbox-card button { justify-self: start; margin-top: 0.5rem; }
 
-.inbox-kind-candidate { color: var(--progress); background: var(--progress-bg); }
-.inbox-kind-proposal { color: var(--accent); background: transparent; }
+.inbox-kind-candidate { color: var(--brass); background: var(--progress-bg); }
+.inbox-kind-proposal { color: var(--sage); background: var(--good-bg); }
 .inbox-archived { color: var(--muted); background: transparent; margin-left: 0.4rem; }
 
-.inbox-section { margin-top: 1.25rem; }
-.inbox-section h3 { margin: 0 0 0.35rem; font-size: 1rem; }
-.inbox-archive { margin-top: 1.25rem; }
-.fact-empty { color: var(--muted); }
+.inbox-section { margin-top: 2rem; }
+.inbox-section h3 {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brass);
+  font-weight: 400;
+  margin: 0 0 0.6rem;
+}
+.inbox-archive { margin-top: 2rem; }
 
-.enrollment-stages { display: grid; gap: 0.5rem; padding: 0.75rem 1rem 1rem; }
-.checkbox-row { font-weight: 400; display: flex; align-items: center; gap: 0.4rem; }
-.checkbox-row input { width: auto; }
+.enrollment-stages { display: grid; gap: 0.6rem; padding: 1rem 1.25rem 1.25rem; }
+
+/* --- Narrow screens -------------------------------------------------------
+   Desktop is the primary target, but the header has to stay usable at phone
+   widths: the brand and the wallet keep the top row, the nav takes its own row
+   and scrolls horizontally instead of wrapping or pushing anything off-screen. */
+
+@media (max-width: 62rem) {
+  .app-header-inner, .app-footer p, .page { width: calc(100% - 3rem); }
+  nav { gap: 1.25rem; }
+}
+
+@media (max-width: 48rem) {
+  .app-header-inner, .app-footer p, .page { width: calc(100% - 2rem); }
+  .app-header-inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand wallet"
+      "nav   nav";
+    gap: 0.5rem 0.75rem;
+    min-height: 0;
+    padding-block: 0.75rem 0;
+  }
+  .wordmark { grid-area: brand; font-size: 1.25rem; }
+  .wordmark-mark { width: 22px; height: 22px; }
+  .wallet-control { grid-area: wallet; }
+  .wallet-control-trigger { max-width: 10.5rem; font-size: 0.75rem; padding-inline: 0.65rem; }
+  nav {
+    grid-area: nav;
+    gap: 1.25rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  nav::-webkit-scrollbar { display: none; }
+  nav a { white-space: nowrap; padding-block: 0.6rem; }
+
+  .page { padding-top: 2rem; }
+  h1 { font-size: clamp(1.75rem, 7vw, 2.25rem); }
+  .filters, .composer, .enrollment, .inbox-signin, .profile, .inbox-item, .quote-summary { padding: 1.15rem; }
+  .gate-card, .inbox-card { padding: 1.15rem; }
+  .gate-card-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wallet-identity-header { flex-wrap: wrap; gap: 0.25rem 0.65rem; }
+  .wallet-identity-header .wallet-identity-primary { font-size: 1.25rem; }
+  .app-footer p { padding-block: 1.25rem; }
+}
+
+@media (max-width: 22rem) {
+  .wordmark-product { display: none; }
+  .wallet-control-trigger { max-width: 8.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
