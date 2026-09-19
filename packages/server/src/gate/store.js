@@ -1195,7 +1195,7 @@ function createPublicGateReader(queryable) {
     async getSubmission(publicId) {
       const row = (await queryable.query(`SELECT public_id AS "publicId",state,
         updated_at AS "updatedAt",accepted_at AS "acceptedAt"
-        FROM gate_public.submission_receipts WHERE public_id=$1`, [publicId])).rows[0];
+        FROM gate.public_submission_receipt($1)`, [publicId])).rows[0];
       if (!row) return null;
       const status = ({ payment_required: "QUOTED", pending_settlement: "SETTLEMENT_PENDING", accepted: "SETTLED", expired: "EXPIRED" })[row.state];
       return publicSubmissionProjection(

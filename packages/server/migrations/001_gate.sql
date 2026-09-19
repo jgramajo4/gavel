@@ -1343,6 +1343,14 @@ CREATE OR REPLACE VIEW gate_public.submission_receipts WITH (security_barrier=tr
  FROM gate.submissions s LEFT JOIN gate.inbox_items i ON i.submission_id=s.id;
 REVOKE ALL ON ALL TABLES IN SCHEMA gate_public FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.public_submission_receipt(p_public_id text)
+RETURNS TABLE(public_id text,state text,updated_at timestamptz,accepted_at timestamptz)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate,gate_public AS $$
+ SELECT r.public_id,r.state,r.updated_at,r.accepted_at
+ FROM gate_public.submission_receipts r WHERE r.public_id=p_public_id
+$$;
+REVOKE ALL ON FUNCTION gate.public_submission_receipt(text) FROM PUBLIC;
+
 -- Remove inherited/default Gate grants, then apply the matrix audited in roles.js.
 REVOKE ALL ON ALL TABLES IN SCHEMA gate FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA gate FROM PUBLIC;
@@ -1364,6 +1372,7 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb,boolean) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.lock_issuance_profile_policy(text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.public_submission_receipt(text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,boolean,text,boolean,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.claim_notification_attempts(integer,integer,integer) TO gavel_gate;
