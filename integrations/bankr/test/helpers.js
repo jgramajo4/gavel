@@ -12,6 +12,8 @@ const VOTER = getAddress("0x00000000000000000000000000000000000ab1e5");
 const PAYER_KEY = `0x${"11".repeat(32)}`;
 const payerWallet = new Wallet(PAYER_KEY);
 const PAYER = getAddress(payerWallet.address);
+// The relayer is a separate funded account. It is never the payer.
+const RELAYER = getAddress("0x00000000000000000000000000000000000007e1");
 
 const usdcInterface = new Interface([
   "function name() view returns (string)",
@@ -26,17 +28,36 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
 const TOKEN_NAME = "USDC";
 const TOKEN_VERSION = "2";
 
-function tokenDomainSeparator({ chainId = BASE_SEPOLIA, token = TOKEN } = {}) {
+function tokenDomainSeparator({ chainId = BASE_SEPOLIA, token = TOKEN, name = TOKEN_NAME, version = TOKEN_VERSION } = {}) {
   return keccak256(AbiCoder.defaultAbiCoder().encode(
     ["bytes32", "bytes32", "bytes32", "uint256", "address"],
     [
       EIP712_DOMAIN_TYPEHASH,
-      keccak256(toUtf8Bytes(TOKEN_NAME)),
-      keccak256(toUtf8Bytes(TOKEN_VERSION)),
+      keccak256(toUtf8Bytes(name)),
+      keccak256(toUtf8Bytes(version)),
       chainId,
       token,
     ],
   ));
+}
+
+/**
+ * A recording relayer. Its address is deliberately NOT the payer, and it can
+ * see only the `{ to, data, value }` it is handed.
+ */
+function createRelayerStub({ account = RELAYER, failSend = false } = {}) {
+  const calls = { sendTransaction: [], getAddress: 0 };
+  return {
+    calls,
+    relayer: {
+      async getAddress() { calls.getAddress += 1; return account; },
+      async sendTransaction(tx) {
+        calls.sendTransaction.push(tx);
+        if (failSend) throw new Error("execution reverted");
+        return `0x${"ab".repeat(32)}`;
+      },
+    },
+  };
 }
 
 function submissionHashFor(overrides = {}) {
@@ -170,15 +191,20 @@ function createFetchStub(routes) {
   return { fetchImpl, calls };
 }
 
-/** A recording wallet with real ECDSA typed-data signing and no private key leak. */
+/**
+ * A recording SIGNING wallet. It has real ECDSA typed-data signing, no private
+ * key leak, and deliberately NO `sendTransaction`: Bankr signs, it never
+ * broadcasts.
+ */
 function createWalletStub({
   chainId = BASE_SEPOLIA,
   balance = 10_000_000n,
   account = PAYER,
   failSign = false,
-  failSend = false,
+  tokenName = TOKEN_NAME,
+  tokenVersion = TOKEN_VERSION,
 } = {}) {
-  const calls = { signTypedData: [], sendTransaction: [], call: [], switchChain: [] };
+  const calls = { signTypedData: [], call: [], switchChain: [] };
   let currentChain = chainId;
   return {
     calls,
@@ -193,22 +219,19 @@ function createWalletStub({
         void EIP712Domain;
         return payerWallet.signTypedData(payload.domain, types, payload.message);
       },
-      async sendTransaction(tx) {
-        calls.sendTransaction.push(tx);
-        if (failSend) throw new Error("execution reverted");
-        return `0x${"ab".repeat(32)}`;
-      },
       async call({ to, data }) {
         calls.call.push({ to, data });
         const selector = data.slice(0, 10);
         if (selector === usdcInterface.getFunction("name").selector) {
-          return usdcInterface.encodeFunctionResult("name", [TOKEN_NAME]);
+          return usdcInterface.encodeFunctionResult("name", [tokenName]);
         }
         if (selector === usdcInterface.getFunction("version").selector) {
-          return usdcInterface.encodeFunctionResult("version", [TOKEN_VERSION]);
+          return usdcInterface.encodeFunctionResult("version", [tokenVersion]);
         }
         if (selector === usdcInterface.getFunction("DOMAIN_SEPARATOR").selector) {
-          return usdcInterface.encodeFunctionResult("DOMAIN_SEPARATOR", [tokenDomainSeparator({ chainId: currentChain, token: to })]);
+          return usdcInterface.encodeFunctionResult("DOMAIN_SEPARATOR", [
+            tokenDomainSeparator({ chainId: currentChain, token: to, name: tokenName, version: tokenVersion }),
+          ]);
         }
         if (selector === usdcInterface.getFunction("balanceOf").selector) {
           return usdcInterface.encodeFunctionResult("balanceOf", [balance]);
@@ -224,6 +247,7 @@ module.exports = {
   CANDIDATE_PROPOSER,
   CANDIDATE_SLUG,
   PAYER,
+  RELAYER,
   SPLITTER,
   TOKEN,
   TOKEN_NAME,
@@ -232,6 +256,7 @@ module.exports = {
   candidateRow,
   candidateTargetIdFixture,
   createFetchStub,
+  createRelayerStub,
   createWalletStub,
   gateProfile,
   issuedQuote,

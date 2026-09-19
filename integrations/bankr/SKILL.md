@@ -71,6 +71,7 @@ Environment (Bankr secure Env Vars; refer to them by name, never echo a value):
 | `GAVEL_GATE_URL` | Gate API origin. Required. Origin only — no path, query, or credentials. |
 | `GAVEL_INDEX_API_URL` | Optional. Defaults to the public `https://index.0773h.com`. |
 | `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `84532` (Base Sepolia). |
+| Relayer credentials | Held by the relayer, never by this skill. See "Payment" below. |
 
 Base Sepolia only. A quote for any other chain, Base mainnet included, is
 refused by the client before anything is signed. Do not add a mainnet chain id.
@@ -159,12 +160,30 @@ broadcast.
 
 ### 6. Payment
 
-Bankr wallet capabilities perform three things and nothing else:
+**Bankr signs. Bankr does not broadcast.**
+
+The Gate splitter does not require `msg.sender == payer`: the payer's authority
+travels entirely inside the EIP-3009 authorization signature, which binds the
+`from`, the `to`, the amount, and the quote id as its nonce. So the account that
+pays gas need not be the account that pays USDC — and here it deliberately is
+not. Bankr's EIP-712 signing on Base Sepolia is proven; its broadcast path is
+not, so a separate funded relayer sends the transaction.
+
+Bankr wallet capabilities perform exactly two signatures:
 
 1. the EIP-712 `WalletSession` proof for `base_sender`;
 2. the EIP-3009 `ReceiveWithAuthorization` authorization on the token's own
-   proven EIP-712 domain;
-3. one `settle` transaction to the Gate splitter on Base Sepolia.
+   proven EIP-712 domain.
+
+The client then verifies locally that the authorization recovers to the quote's
+payer, builds the exact splitter `settle` calldata, and hands a **relayer** one
+immutable `{ to, data, value }` object. The relayer broadcasts that and nothing
+else: it cannot substitute a target, mutate calldata, add ETH value, or become
+the authorization's `from`, and it never receives a Gate session token, a Bankr
+API credential, or an RPC credential.
+
+If no relayer is configured, stop and say so. **Do not fall back to broadcasting
+from Bankr on Base Sepolia.**
 
 There is **no ERC-20 approve flow**. Never ask for, accept, or print a private
 key, a seed phrase, or an RPC credential. Never print a session token or a
@@ -179,7 +198,8 @@ After the transaction is submitted:
   verifying it**;
 - poll Gate's status endpoint.
 
-A mined transaction is not acceptance. Wallet broadcast is not acceptance. Only
+A mined transaction is not acceptance. A successful relayer broadcast is not
+acceptance, and a relayer receipt is not settlement authority. Only
 Gate returning the authoritative `accepted` means the request was delivered to
 the voter's private Gate inbox — inbox creation is the durable completion
 condition, and notification is private and best-effort.
@@ -201,7 +221,10 @@ yet, and no new quote is needed. If Gate eventually returns
 | `WRONG_CHAIN` / `CHAIN_NOT_ALLOWED` | The wallet or the quote is not on Base Sepolia. |
 | `INSUFFICIENT_BALANCE` | The payer wallet is short of the total. Nothing was signed. |
 | `AUTHORIZATION_FAILED` | The wallet did not authorize the payment. |
-| `BROADCAST_FAILED` | The settlement transaction was not accepted by the network. |
+| `BROADCAST_FAILED` | The relayer did not get the transaction onto the network. |
+| `RELAYER_UNAVAILABLE` | No funded relayer is configured. Bankr signs; it does not broadcast. |
+| `RELAYER_IS_PAYER` | The relayer must be a separate account from the payer wallet. |
+| `PREPARED_TX_REJECTED` | The transaction handed to the relayer does not match the quote. |
 | `pending_settlement` | Broadcast succeeded; Gate is still verifying. Not delivered. |
 | `rejected_by_policy` | Gate rejected the request. Not delivered. |
 

@@ -5,12 +5,14 @@ const assert = require("node:assert/strict");
 const { Interface, Signature, TypedDataEncoder, getAddress, verifyTypedData } = require("ethers");
 
 const {
-  RECEIVE_WITH_AUTHORIZATION_TYPES, SPLITTER_ABI, buildAuthorization, encodeSettleCall, payQuote, readTokenDomain,
+  RECEIVE_WITH_AUTHORIZATION_TYPES, SPLITTER_ABI, authorizePayment, buildAuthorization, encodeSettleCall, payQuote,
+  readTokenDomain,
 } = require("../src/payment");
 const { parseIssuedQuote } = require("../src/quote");
-const { createEip1193Wallet, serializeTypedData } = require("../src/wallet");
+const { REQUIRED_CAPABILITIES, createEip1193Wallet, serializeTypedData } = require("../src/wallet");
 const {
-  BASE_SEPOLIA, PAYER, SPLITTER, TOKEN, TOKEN_NAME, TOKEN_VERSION, VOTER, createWalletStub, issuedQuote,
+  BASE_SEPOLIA, PAYER, RELAYER, SPLITTER, TOKEN, TOKEN_NAME, TOKEN_VERSION, VOTER, createRelayerStub, createWalletStub,
+  issuedQuote,
 } = require("./helpers");
 
 const splitterInterface = new Interface([...SPLITTER_ABI]);
@@ -23,12 +25,11 @@ test("payment refuses to touch the wallet without explicit confirmation", async 
   const { wallet, calls } = createWalletStub();
   for (const confirmed of [undefined, false, "yes", 1, null]) {
     await assert.rejects(
-      payQuote({ wallet, quote: quoteFixture(), confirmed, now }),
+      payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed, now }),
       (error) => error.code === "CONFIRMATION_REQUIRED",
     );
   }
   assert.equal(calls.signTypedData.length, 0);
-  assert.equal(calls.sendTransaction.length, 0);
   assert.equal(calls.call.length, 0);
 });
 
@@ -36,25 +37,25 @@ test("an expired quote never reaches the wallet", async () => {
   const { wallet, calls } = createWalletStub();
   const expired = parseIssuedQuote(issuedQuote({ message: { expiry: String(Math.floor(NOW_MS / 1000) - 1) } }));
   await assert.rejects(
-    payQuote({ wallet, quote: expired, confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: expired, confirmed: true, now }),
     (error) => error.code === "QUOTE_EXPIRED",
   );
-  assert.equal(calls.signTypedData.length + calls.sendTransaction.length + calls.call.length, 0);
+  assert.equal(calls.signTypedData.length + calls.call.length, 0);
 });
 
 test("a quote for a chain outside the allow-list never reaches the wallet", async () => {
   const { wallet, calls } = createWalletStub();
   const mainnet = parseIssuedQuote(issuedQuote({ domain: { chainId: 8453 } }));
   await assert.rejects(
-    payQuote({ wallet, quote: mainnet, confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: mainnet, confirmed: true, now }),
     (error) => error.code === "CHAIN_NOT_ALLOWED",
   );
-  assert.equal(calls.signTypedData.length + calls.sendTransaction.length, 0);
+  assert.equal(calls.signTypedData.length, 0);
 });
 
 test("a wallet on the wrong chain is switched to the quote's chain", async () => {
   const { wallet, calls } = createWalletStub({ chainId: 11_155_111 });
-  await payQuote({ wallet, quote: quoteFixture(), confirmed: true, now });
+  await payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now });
   assert.deepEqual(calls.switchChain, [BASE_SEPOLIA]);
 });
 
@@ -62,7 +63,7 @@ test("a wallet that cannot switch chains refuses rather than paying on the wrong
   const { wallet } = createWalletStub({ chainId: 11_155_111 });
   delete wallet.switchChain;
   await assert.rejects(
-    payQuote({ wallet, quote: quoteFixture(), confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now }),
     (error) => error.code === "WRONG_CHAIN",
   );
 });
@@ -70,7 +71,7 @@ test("a wallet that cannot switch chains refuses rather than paying on the wrong
 test("an insufficient token balance refuses before any signature", async () => {
   const { wallet, calls } = createWalletStub({ balance: 1_000_000n });
   await assert.rejects(
-    payQuote({ wallet, quote: quoteFixture(), confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now }),
     (error) => error.code === "INSUFFICIENT_BALANCE" && /1\.00 test USDC/.test(error.message),
   );
   assert.equal(calls.signTypedData.length, 0);
@@ -111,7 +112,7 @@ test("the EIP-3009 authorization is derived entirely from the signed quote", asy
 test("the authorization signing request is ReceiveWithAuthorization on the token domain", async () => {
   const { wallet, calls } = createWalletStub();
   const quote = quoteFixture();
-  await payQuote({ wallet, quote, confirmed: true, now });
+  await payQuote({ wallet, relayer: createRelayerStub().relayer, quote, confirmed: true, now });
 
   const [, authorizationRequest] = [null, calls.signTypedData[0]];
   assert.equal(calls.signTypedData.length, 1);
@@ -136,23 +137,29 @@ test("the authorization signing request is ReceiveWithAuthorization on the token
 });
 
 test("there is no ERC-20 approve anywhere in the payment path", async () => {
-  const { wallet, calls } = createWalletStub();
-  await payQuote({ wallet, quote: quoteFixture(), confirmed: true, now });
+  const { wallet } = createWalletStub();
+  const relayerStub = createRelayerStub();
+  await payQuote({ wallet, relayer: relayerStub.relayer, quote: quoteFixture(), confirmed: true, now });
   const approveSelector = new Interface(["function approve(address,uint256)"]).getFunction("approve").selector;
-  for (const tx of calls.sendTransaction) assert.ok(!tx.data.startsWith(approveSelector));
-  assert.equal(calls.sendTransaction.length, 1);
+  for (const tx of relayerStub.calls.sendTransaction) assert.ok(!tx.data.startsWith(approveSelector));
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
 });
 
-test("the settle transaction is built from the quote and sent to the splitter", async () => {
-  const { wallet, calls } = createWalletStub();
+test("the settle transaction is built from the quote and relayed to the splitter", async () => {
+  const { wallet } = createWalletStub();
+  const relayerStub = createRelayerStub();
   const quote = quoteFixture();
-  const result = await payQuote({ wallet, quote, confirmed: true, now });
+  const result = await payQuote({ wallet, relayer: relayerStub.relayer, quote, confirmed: true, now });
 
-  assert.equal(calls.sendTransaction.length, 1);
-  const [tx] = calls.sendTransaction;
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
+  const [tx] = relayerStub.calls.sendTransaction;
   assert.equal(getAddress(tx.to), SPLITTER);
-  assert.equal(getAddress(tx.from), PAYER);
   assert.equal(tx.value, "0x0");
+  // The relayer pays gas; the payer's authority is the EIP-3009 signature.
+  assert.equal(tx.from, undefined);
+  assert.equal(result.relayer, RELAYER);
+  assert.equal(result.payer, PAYER);
+  assert.notEqual(result.relayer, result.payer);
 
   const decoded = splitterInterface.decodeFunctionData("settle", tx.data);
   assert.equal(decoded[0].quoteId, quote.message.quoteId);
@@ -170,31 +177,88 @@ test("the settle transaction is built from the quote and sent to the splitter", 
 
 test("a broadcast transaction hash is explicitly NOT acceptance", async () => {
   const { wallet } = createWalletStub();
-  const result = await payQuote({ wallet, quote: quoteFixture(), confirmed: true, now });
+  const result = await payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now });
   assert.equal(result.broadcast, true);
   assert.equal(result.accepted, false);
   assert.equal(result.delivered, undefined);
 });
 
-test("a rejected signature and a reverted broadcast are distinct failures", async () => {
+test("a rejected signature and a failed relayer broadcast are distinct failures", async () => {
   const rejected = createWalletStub({ failSign: true });
+  const untouched = createRelayerStub();
   await assert.rejects(
-    payQuote({ wallet: rejected.wallet, quote: quoteFixture(), confirmed: true, now }),
+    payQuote({ wallet: rejected.wallet, relayer: untouched.relayer, quote: quoteFixture(), confirmed: true, now }),
     (error) => error.code === "AUTHORIZATION_FAILED",
   );
-  assert.equal(rejected.calls.sendTransaction.length, 0);
+  // A signature that never happened is never handed to a relayer.
+  assert.equal(untouched.calls.sendTransaction.length, 0);
 
-  const reverted = createWalletStub({ failSend: true });
+  const { wallet } = createWalletStub();
   await assert.rejects(
-    payQuote({ wallet: reverted.wallet, quote: quoteFixture(), confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub({ failSend: true }).relayer, quote: quoteFixture(), confirmed: true, now }),
     (error) => error.code === "BROADCAST_FAILED",
   );
+});
+
+test("a Bankr wallet with no sendTransaction is accepted", async () => {
+  const { wallet } = createWalletStub();
+  assert.equal(typeof wallet.sendTransaction, "undefined");
+  assert.deepEqual([...REQUIRED_CAPABILITIES], ["getAddress", "getChainId", "signTypedData", "call"]);
+  assert.ok(!REQUIRED_CAPABILITIES.includes("sendTransaction"));
+
+  const result = await payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now });
+  assert.equal(result.broadcast, true);
+});
+
+test("authorizePayment signs and prepares, but broadcasts nothing", async () => {
+  const { wallet } = createWalletStub();
+  const relayerStub = createRelayerStub();
+  const quote = quoteFixture();
+  const prepared = await authorizePayment({ wallet, quote, confirmed: true, now });
+
+  assert.deepEqual(Object.keys(prepared).sort(), ["data", "to", "value"]);
+  assert.equal(prepared.to, SPLITTER);
+  assert.equal(prepared.value, "0x0");
+  assert.ok(Object.isFrozen(prepared));
+  assert.equal(relayerStub.calls.sendTransaction.length, 0);
+
+  const decoded = splitterInterface.decodeFunctionData("settle", prepared.data);
+  assert.equal(getAddress(decoded[2].from), PAYER);
+  assert.equal(getAddress(decoded[2].to), SPLITTER);
+});
+
+test("an authorization that does not recover to the payer is refused before broadcast", async () => {
+  const { wallet } = createWalletStub();
+  const relayerStub = createRelayerStub();
+  // A wallet that signs a DIFFERENT payload than the one it was handed.
+  const original = wallet.signTypedData.bind(wallet);
+  wallet.signTypedData = (payload) => original({
+    ...payload,
+    message: { ...payload.message, value: "1" },
+  });
+
+  await assert.rejects(
+    payQuote({ wallet, relayer: relayerStub.relayer, quote: quoteFixture(), confirmed: true, now }),
+    (error) => error.code === "AUTHORIZATION_FAILED" && /recover/.test(error.message),
+  );
+  assert.equal(relayerStub.calls.sendTransaction.length, 0);
+});
+
+test("the token domain is read and proven, never assumed", async () => {
+  // The fixture name and version are arbitrary on purpose: a testnet token may
+  // report anything, and this path proves whatever it reports.
+  for (const [name, version] of [["USDC", "2"], ["USD Coin", "2"], ["Some Test USDC", "1"]]) {
+    const { wallet } = createWalletStub({ tokenName: name, tokenVersion: version });
+    const domain = await readTokenDomain(wallet, TOKEN, BASE_SEPOLIA);
+    assert.equal(domain.name, name);
+    assert.equal(domain.version, version);
+  }
 });
 
 test("a quote issued to another payer is refused", async () => {
   const { wallet } = createWalletStub({ account: getAddress(`0x${"7".repeat(40)}`) });
   await assert.rejects(
-    payQuote({ wallet, quote: quoteFixture(), confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now }),
     (error) => error.code === "PAYER_MISMATCH",
   );
 });

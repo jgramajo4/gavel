@@ -7,11 +7,12 @@ const { discoverVoters, selectVoter } = require("./discovery");
 const { assertPayableQuote, confirmationSummary, parseIssuedQuote, secondsUntilExpiry } = require("./quote");
 const { buildSubmissionRequest, createOrResumeSubmission } = require("./submission");
 const { openBaseSenderSession } = require("./session");
-const { payQuote } = require("./payment");
+const { authorizePayment, broadcastPayment, payQuote } = require("./payment");
 const { pollUntilTerminal, submitSettlementHint } = require("./settlement");
 const { resolveTarget } = require("./targets");
 const { resolveConfig } = require("./config");
 const { assertWalletCapabilities } = require("./wallet");
+const { assertRelayerCapabilities } = require("./relayer");
 
 /**
  * The Bankr advocate flow, as discrete steps.
@@ -28,6 +29,7 @@ function createBankrGateFlow({
   gateApi,
   indexApi,
   wallet,
+  relayer,
   config,
   env = process.env,
   fetchImpl,
@@ -46,6 +48,7 @@ function createBankrGateFlow({
     timeoutMs: resolved.requestTimeoutMs,
   });
   if (wallet) assertWalletCapabilities(wallet);
+  if (relayer) assertRelayerCapabilities(relayer);
   const displayChainId = resolved.allowedChainIds[0];
 
   return Object.freeze({
@@ -109,10 +112,28 @@ function createBankrGateFlow({
       });
     },
 
-    /** 6. One authorization signature, one settle transaction. Never success. */
+    /** 6a. Bankr signs one EIP-3009 authorization. Nothing is broadcast here. */
+    authorize({ quote, confirmed, onPhase }) {
+      return authorizePayment({
+        wallet,
+        quote,
+        confirmed,
+        onPhase,
+        now,
+        allowedChainIds: resolved.allowedChainIds,
+      });
+    },
+
+    /** 6b. A separate funded relayer broadcasts that exact prepared transaction. */
+    broadcast({ prepared, quote, onPhase }) {
+      return broadcastPayment({ relayer, prepared, quote, onPhase, now });
+    },
+
+    /** 6. Authorize then broadcast. A broadcast is never success. */
     pay({ quote, confirmed, onPhase }) {
       return payQuote({
         wallet,
+        relayer,
         quote,
         confirmed,
         onPhase,

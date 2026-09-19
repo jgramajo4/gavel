@@ -57,9 +57,6 @@ function createIndexApi({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = DEF
   }
 
   return Object.freeze({
-    async getHealth() {
-      return read("/health");
-    },
     /** `candidate:<proposer>:<slugHash>` or `proposal:<id>`. */
     async getTarget(targetId) {
       if (typeof targetId !== "string" || !TARGET_ID.test(targetId)) {

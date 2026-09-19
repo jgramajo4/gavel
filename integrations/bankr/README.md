@@ -91,11 +91,15 @@ and each step is a call into Gate's own surfaces:
 - every payment value comes from the server-issued quote. Conversational text
   never overrides a quote payment field, and a `409 duplicate` resumes the
   original quote rather than creating a second one;
-- payment is one EIP-3009 authorization consumed by one `settle` call on the
-  Gate splitter. There is no ERC-20 approve flow and no private key is read;
-- the broadcast transaction hash goes to Gate as a settlement HINT. A mined
-  transaction is not acceptance: only Gate returning the authoritative
-  `accepted` means the request reached the voter's private Gate inbox.
+- Bankr signs and does not broadcast. It produces one EIP-3009 authorization,
+  which the client verifies recovers to the quote's payer, and a separate funded
+  relayer broadcasts the exact prepared `settle` transaction. The splitter does
+  not require `msg.sender == payer`, so the gas payer and the USDC payer are
+  different accounts. There is no ERC-20 approve flow and no private key is read;
+- the broadcast transaction hash goes to Gate as a settlement HINT. Neither a
+  mined transaction nor a successful relayer receipt is acceptance: only Gate
+  returning the authoritative `accepted` means the request reached the voter's
+  private Gate inbox.
 
 Base Sepolia only. `GAVEL_GATE_CHAIN_IDS` defaults to `84532` and the client
 refuses a quote for any other chain before anything is signed. Splitter, token,

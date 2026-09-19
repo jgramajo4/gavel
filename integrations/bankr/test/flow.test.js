@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 
 const { createBankrGateFlow, sendAttentionRequest } = require("../src/flow");
 const {
-  BASE_SEPOLIA, VOTER, candidateRow, candidateTargetIdFixture, createFetchStub, createWalletStub, gateProfile,
-  issuedQuote, PAYER,
+  BASE_SEPOLIA, PAYER, RELAYER, VOTER, candidateRow, candidateTargetIdFixture, createFetchStub, createRelayerStub,
+  createWalletStub, gateProfile, issuedQuote,
 } = require("./helpers");
 
 const PUBLIC_ID = "abcdefghijklmnopqrstuv";
@@ -81,10 +81,12 @@ function stubWorld({ statuses = ["pending_settlement", "accepted"], submissionSt
   ]);
 }
 
-function flowFor(world, walletStub = createWalletStub()) {
+function flowFor(world, walletStub = createWalletStub(), relayerStub = createRelayerStub()) {
   return {
+    relayerStub,
     flow: createBankrGateFlow({
       wallet: walletStub.wallet,
+      relayer: relayerStub.relayer,
       fetchImpl: world.fetchImpl,
       config: {
         gateUrl: "https://gate.test",
@@ -102,7 +104,8 @@ function flowFor(world, walletStub = createWalletStub()) {
 
 test("the full demo flow runs target -> voter -> pitch -> quote -> confirmation -> payment -> verification", async () => {
   const world = stubWorld();
-  const { flow, walletStub } = flowFor(world);
+  const walletStub = createWalletStub();
+  const { flow, relayerStub } = flowFor(world, walletStub);
   const phases = [];
   const confirmations = [];
 
@@ -128,13 +131,16 @@ test("the full demo flow runs target -> voter -> pitch -> quote -> confirmation 
 
   assert.deepEqual(phases, [
     "target_resolved", "voter_selected", "quote_issued",
-    "authorizing", "broadcasting", "broadcast", "settlement_hint_recorded",
+    "authorizing", "authorized", "broadcasting", "broadcast", "settlement_hint_recorded",
   ]);
   assert.equal(confirmations.length, 1);
   assert.equal(confirmations[0].lines[2], "Attention: 1.00 test USDC");
   assert.equal(confirmations[0].lines[3], "Gavel fee: 0.25 test USDC");
   assert.equal(confirmations[0].lines[4], "Total: 1.25 test USDC");
-  assert.equal(walletStub.calls.sendTransaction.length, 1);
+  // Bankr signed; a separate relayer broadcast.
+  assert.equal(typeof walletStub.wallet.sendTransaction, "undefined");
+  assert.equal(result.payment.relayer, RELAYER);
+  assert.equal(result.payment.payer, PAYER);
 });
 
 test("evidence URLs are carried to Gate verbatim and NEVER fetched", async () => {
@@ -168,7 +174,8 @@ test("evidence URLs are carried to Gate verbatim and NEVER fetched", async () =>
 
 test("declining the confirmation signs nothing, sends nothing, and keeps the quote resumable", async () => {
   const world = stubWorld();
-  const { flow, walletStub } = flowFor(world);
+  const walletStub = createWalletStub();
+  const { flow, relayerStub } = flowFor(world, walletStub);
 
   await assert.rejects(
     sendAttentionRequest({
@@ -184,13 +191,14 @@ test("declining the confirmation signs nothing, sends nothing, and keeps the quo
   // The WalletSession signature is the only signature; no authorization, no tx.
   assert.equal(walletStub.calls.signTypedData.length, 1);
   assert.equal(walletStub.calls.signTypedData[0].primaryType, "WalletSession");
-  assert.equal(walletStub.calls.sendTransaction.length, 0);
+  assert.equal(relayerStub.calls.sendTransaction.length, 0);
   assert.equal(world.calls.some((call) => call.url.endsWith("/settlement")), false);
 });
 
-test("an omitted confirm callback can never reach the wallet", async () => {
+test("an omitted confirm callback can never reach the wallet or the relayer", async () => {
   const world = stubWorld();
-  const { flow, walletStub } = flowFor(world);
+  const walletStub = createWalletStub();
+  const { flow, relayerStub } = flowFor(world, walletStub);
   await assert.rejects(
     sendAttentionRequest({
       flow,
@@ -200,7 +208,83 @@ test("an omitted confirm callback can never reach the wallet", async () => {
     }),
     (error) => error.code === "CONFIRMATION_REQUIRED",
   );
-  assert.equal(walletStub.calls.sendTransaction.length, 0);
+  // Only the WalletSession proof was signed; no EIP-3009, no broadcast.
+  assert.equal(walletStub.calls.signTypedData.length, 1);
+  assert.equal(walletStub.calls.signTypedData[0].primaryType, "WalletSession");
+  assert.equal(relayerStub.calls.sendTransaction.length, 0);
+});
+
+test("Bankr signs both EIP-712 payloads and the relayer broadcasts once", async () => {
+  const world = stubWorld();
+  const walletStub = createWalletStub();
+  const { flow, relayerStub } = flowFor(world, walletStub);
+  await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "Please sponsor this candidate.",
+    confirm: async () => true,
+    poll: { attempts: 5 },
+  });
+
+  assert.deepEqual(
+    walletStub.calls.signTypedData.map((payload) => payload.primaryType),
+    ["WalletSession", "ReceiveWithAuthorization"],
+  );
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
+  assert.deepEqual(Object.keys(relayerStub.calls.sendTransaction[0]).sort(), ["data", "to", "value"]);
+});
+
+test("a relayer broadcast alone never produces delivered", async () => {
+  const world = stubWorld({ statuses: ["pending_settlement"] });
+  const { flow, relayerStub } = flowFor(world);
+  const result = await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "Please sponsor this candidate.",
+    confirm: async () => true,
+    poll: { attempts: 3 },
+  });
+
+  // The relayer succeeded and the request is still not delivered.
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
+  assert.equal(result.payment.broadcast, true);
+  assert.equal(result.payment.accepted, false);
+  assert.equal(result.delivered, false);
+});
+
+test("only a subsequent Gate accepted produces delivered", async () => {
+  const world = stubWorld({ statuses: ["pending_settlement", "pending_settlement", "accepted"] });
+  const { flow, relayerStub } = flowFor(world);
+  const result = await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "Please sponsor this candidate.",
+    confirm: async () => true,
+    poll: { attempts: 5 },
+  });
+
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
+  assert.equal(result.verdict.state, "accepted");
+  assert.equal(result.delivered, true);
+});
+
+test("no Gate session token reaches the relayer", async () => {
+  const world = stubWorld();
+  const { flow, relayerStub } = flowFor(world);
+  await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "Please sponsor this candidate.",
+    confirm: async () => true,
+    poll: { attempts: 5 },
+  });
+  const serialized = JSON.stringify(relayerStub.calls.sendTransaction);
+  assert.ok(!serialized.includes("T".repeat(43)));
+  assert.doesNotMatch(serialized, /Bearer|token|session/i);
 });
 
 test("a duplicate resumes the original quote and pays that one", async () => {

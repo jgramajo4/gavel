@@ -33,15 +33,17 @@ function sourceFiles(directory, extensions = [".js"]) {
 /**
  * Gate payment is a separate, bounded boundary.
  *
- * The Bankr advocate client signs one EIP-712 WalletSession proof, one EIP-3009
- * authorization, and sends one `settle` call whose every field is derived from a
- * quote the Gate server signed. That is not the governance execution path and it
- * is not reachable from a natural-language target plus calldata, so the
- * arbitrary-call invariant below still holds. These files carry extra
- * assertions of their own in the next test.
+ * The Bankr advocate client signs one EIP-712 WalletSession proof and one
+ * EIP-3009 authorization, and a SEPARATE relayer broadcasts one `settle` call
+ * whose every field is derived from a quote the Gate server signed. That is not
+ * the governance execution path and it is not reachable from a
+ * natural-language target plus calldata, so the arbitrary-call invariant below
+ * still holds. These files carry extra assertions of their own in the next test.
  */
 const GATE_PAYMENT_BOUNDARY = new Set([
   path.join(root, "integrations", "bankr", "src", "wallet.js"),
+  path.join(root, "integrations", "bankr", "src", "splitter.js"),
+  path.join(root, "integrations", "bankr", "src", "relayer.js"),
   path.join(root, "integrations", "bankr", "src", "payment.js"),
   path.join(root, "integrations", "bankr", "src", "session.js"),
 ]);
@@ -84,16 +86,23 @@ test("neither runtime implements governance reasoning or execution", () => {
 });
 
 test("the Gate payment boundary signs only what a Gate quote determines", () => {
-  const payment = fs.readFileSync(path.join(root, "integrations", "bankr", "src", "payment.js"), "utf8");
+  const bankrSrc = path.join(root, "integrations", "bankr", "src");
+  const read = (name) => fs.readFileSync(path.join(bankrSrc, name), "utf8");
+  const payment = read("payment.js");
+  const splitter = read("splitter.js");
 
   // One authorization consumed by one settle call. No approve path exists.
-  assert.match(payment, /function settle\(/);
-  assert.doesNotMatch(payment, /function approve\(|"approve"|'approve'/);
+  assert.match(splitter, /function settle\(/);
+  for (const source of [payment, splitter]) {
+    assert.doesNotMatch(source, /function approve\(|"approve"|'approve'/);
+  }
 
   // The destination and the chain come from the signed quote, never from a
   // caller, a config value, or a hard-coded address.
   assert.match(payment, /to: quote\.splitter/);
-  assert.doesNotMatch(payment, /0x[0-9a-fA-F]{40}/, "payment.js hard-codes an address");
+  for (const name of ["payment.js", "splitter.js", "relayer.js", "wallet.js"]) {
+    assert.doesNotMatch(read(name), /0x[0-9a-fA-F]{40}/, `${name} hard-codes an address`);
+  }
 
   // Payment cannot happen without an explicit confirmation.
   assert.match(payment, /confirmed !== true/);
@@ -101,10 +110,36 @@ test("the Gate payment boundary signs only what a Gate quote determines", () => 
 
   // There is no target+calldata entry point: the only calldata built here is
   // the splitter settle call encoded from the quote.
-  const encodes = payment.match(/encodeFunctionData\(([^)]*)\)/g) || [];
-  for (const call of encodes) {
+  const encodes = [...payment.matchAll(/encodeFunctionData\(([^)]*)\)/g), ...splitter.matchAll(/encodeFunctionData\(([^)]*)\)/g)];
+  for (const [call] of encodes) {
     assert.match(call, /"settle"|"name"|"version"|"DOMAIN_SEPARATOR"|"balanceOf"/, `unexpected calldata: ${call}`);
   }
+});
+
+test("Bankr signs but never broadcasts, and the relayer only broadcasts", () => {
+  // The Gate splitter does not require msg.sender == payer, so the payer signs
+  // and a separate funded relayer pays gas. The capability split is what makes a
+  // Bankr broadcast fallback impossible rather than merely discouraged.
+  const bankrSrc = path.join(root, "integrations", "bankr", "src");
+  const read = (name) => fs.readFileSync(path.join(bankrSrc, name), "utf8");
+
+  const wallet = read("wallet.js");
+  assert.match(wallet, /REQUIRED_CAPABILITIES = Object\.freeze\(\["getAddress", "getChainId", "signTypedData", "call"\]\)/);
+  assert.doesNotMatch(wallet, /eth_sendTransaction/, "the Bankr wallet adapter can still broadcast");
+
+  // Only the relayer module calls sendTransaction, and only on a relayer.
+  const payment = read("payment.js");
+  assert.doesNotMatch(payment, /wallet\.sendTransaction/, "payment.js broadcasts through the Bankr wallet");
+  const relayer = read("relayer.js");
+  assert.match(relayer, /relayer\.sendTransaction\(\{ to: safe\.to, data: safe\.data, value: safe\.value \}\)/);
+
+  // The relayer boundary is exactly three fields, and the relayer is never the
+  // payer. What actually crosses that boundary at runtime is asserted in
+  // integrations/bankr/test/relayer.test.js.
+  assert.match(relayer, /PREPARED_TX_FIELDS = Object\.freeze\(\["to", "data", "value"\]\)/);
+  assert.match(relayer, /RELAYER_IS_PAYER/);
+  // Every prepared transaction is re-derived from the quote before broadcast.
+  assert.match(relayer, /assertPreparedTransaction\(prepared, quote, nowSeconds\)/);
 });
 
 test("both runtimes reach Gavel only through the canonical CLI", () => {

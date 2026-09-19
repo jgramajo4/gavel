@@ -17,30 +17,39 @@ const EIP712_DOMAIN_TYPE = Object.freeze([
 /**
  * The wallet capability surface this integration needs from Bankr.
  *
- * Bankr owns the keys. This integration asks for signatures and one transaction
- * and receives back only public material: an address, a chain id, an EIP-712
- * signature, a transaction hash, and `eth_call` results. It never asks for,
- * accepts, derives, stores, or logs a private key or a seed phrase, and there
- * is no code path here that could use one.
+ * Bankr is the PAYER and the SIGNER. It is not the broadcaster.
+ *
+ * Bankr owns the keys. This integration asks for signatures and chain reads and
+ * receives back only public material: an address, a chain id, an EIP-712
+ * signature, and `eth_call` results. It never asks for, accepts, derives,
+ * stores, or logs a private key or a seed phrase, and there is no code path
+ * here that could use one.
  *
  *   getAddress()                           -> 0x-address of the payer
  *   getChainId()                           -> number
  *   switchChain(chainId)                   -> optional; moves the wallet
  *   signTypedData({domain,types,primaryType,message}) -> 65-byte signature
- *   sendTransaction({from,to,data,value})  -> transaction hash
  *   call({to,data})                        -> hex return data
+ *
+ * There is deliberately NO broadcasting capability here, and the EIP-1193
+ * adapter below exposes no transaction-sending method at all. Broadcasting is a
+ * separate, narrow relayer
+ * capability (see `relayer.js`), because the Gate splitter does not require
+ * `msg.sender == payer`: the payer's authority travels entirely in the EIP-3009
+ * signature. Removing the capability is what makes a Bankr broadcast fallback
+ * impossible rather than merely discouraged.
  *
  * Only `switchChain` is optional. A wallet missing any other capability is
  * refused up front, before an advocate is shown a price.
  */
-const REQUIRED_CAPABILITIES = Object.freeze(["getAddress", "getChainId", "signTypedData", "sendTransaction", "call"]);
+const REQUIRED_CAPABILITIES = Object.freeze(["getAddress", "getChainId", "signTypedData", "call"]);
 
 function assertWalletCapabilities(wallet) {
   const missing = REQUIRED_CAPABILITIES.filter((name) => typeof wallet?.[name] !== "function");
   if (missing.length) {
     throw new BankrGateError(
       "WALLET_CAPABILITY_MISSING",
-      `This Bankr wallet cannot ${missing.join(", ")}. Gate payment needs typed-data signing, a contract read, and one transaction.`,
+      `This Bankr wallet cannot ${missing.join(", ")}. Gate payment needs typed-data signing and a contract read.`,
     );
   }
   return wallet;
@@ -92,6 +101,9 @@ function serializeTypedData(payload) {
 /**
  * Adapts an EIP-1193 provider (what a Bankr sandbox exposes for a connected
  * wallet) to the capability surface above.
+ *
+ * It exposes signing and reads only. The provider's transaction-sending method
+ * is intentionally unreachable through this adapter.
  */
 function createEip1193Wallet(provider) {
   if (!provider || typeof provider.request !== "function") {
@@ -123,13 +135,6 @@ function createEip1193Wallet(provider) {
         params: [getAddress(payload.account ?? (await this.getAddress())), JSON.stringify(serializeTypedData(payload))],
       });
       return assertSignature(signature);
-    },
-    async sendTransaction({ from, to, data, value = "0x0" }) {
-      const txHash = await provider.request({
-        method: "eth_sendTransaction",
-        params: [{ from: getAddress(from), to: getAddress(to), data, value }],
-      });
-      return assertTxHash(txHash);
     },
     async call({ to, data }) {
       const result = await provider.request({ method: "eth_call", params: [{ to: getAddress(to), data }, "latest"] });

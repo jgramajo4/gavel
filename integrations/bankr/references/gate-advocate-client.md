@@ -24,12 +24,37 @@ const {
 | `session.js` | Gate's `base_sender` WalletSession exchange. |
 | `submission.js` | Advocate content validation, the Gate body, create-or-resume. |
 | `quote.js` | Quote parsing, payability, and the confirmation summary. |
-| `wallet.js` | The Bankr wallet capability surface and the EIP-1193 adapter. |
-| `payment.js` | EIP-3009 authorization and the single splitter `settle` call. |
+| `wallet.js` | The Bankr SIGNING capability surface and the EIP-1193 adapter. |
+| `splitter.js` | Splitter ABI, `settle` encoding, and calldata decoding. |
+| `relayer.js` | The narrow broadcaster boundary and its pre-broadcast assertions. |
+| `payment.js` | `authorizePayment` (sign + prepare) and `broadcastPayment` (relay). |
 | `settlement.js` | Settlement hint, authoritative status polling, state copy. |
 | `flow.js` | The ordered advocate flow and `sendAttentionRequest`. |
 
-## Wallet capability surface
+## Payer / relayer split
+
+The Gate splitter does not require `msg.sender == payer`. The payer's authority
+travels entirely inside the EIP-3009 authorization signature, which binds
+`from`, `to`, `value`, and the quote id as its nonce. So the account that pays
+gas is separate from the account that pays USDC:
+
+```
+Bankr wallet  --signs--> EIP-712 WalletSession proof
+              --signs--> EIP-3009 ReceiveWithAuthorization
+                             |
+                             v
+                   prepared { to, data, value }     (immutable, re-derived)
+                             |
+                             v
+Relayer       --broadcasts--> splitter.settle()     (pays gas; is NOT the payer)
+                             |
+                             v
+                        tx hash = HINT for Gate
+```
+
+Bankr signs; it never broadcasts. There is no broadcast fallback.
+
+## Wallet capability surface (signing only)
 
 Bankr owns the keys. The client asks only for public material.
 
@@ -38,9 +63,36 @@ getAddress(): Promise<string>
 getChainId(): Promise<number>
 switchChain?(chainId: number): Promise<void>
 signTypedData({ account?, domain, types, primaryType, message }): Promise<string>   // 65-byte signature
-sendTransaction({ from, to, data, value }): Promise<string>                          // tx hash
 call({ to, data }): Promise<string>                                                  // eth_call return data
 ```
+
+There is no `sendTransaction`, and the EIP-1193 adapter exposes no
+transaction-sending method.
+
+## Relayer interface
+
+```ts
+getAddress(): Promise<string>                          // pays gas; MUST NOT be the payer
+sendTransaction({ to, data, value }): Promise<string>   // tx hash
+```
+
+`{ to, data, value }` is the only object that crosses this boundary. A relayer
+never receives a Gate session token, a Bankr API credential, an RPC credential,
+or any advocate content, and there is no arbitrary-call abstraction.
+
+Immediately before broadcast, `assertPreparedTransaction` re-derives the
+transaction from the authoritative quote and refuses unless all of these hold:
+
+- `to` equals `quote.domain.verifyingContract` (the splitter Gate signed over);
+- the calldata selector is exactly the splitter's `settle`;
+- `value` is zero;
+- the decoded quote tuple matches the signed quote field for field, including
+  the Gate quote signature;
+- the decoded authorization's `from` is the Bankr payer, `to` is the splitter,
+  `value` is the quote total, and its nonce is the quote id;
+- the quote has not expired;
+- the prepared object carries no field beyond `to`, `data`, and `value`;
+- the relayer address is not the payer.
 
 `createEip1193Wallet(provider)` adapts a standard provider. The only
 adaptation is adding the `EIP712Domain` type entry `eth_signTypedData_v4`
@@ -54,7 +106,8 @@ There is no method that reads, derives, exports, or accepts a private key.
 
 ```js
 const flow = createBankrGateFlow({
-  wallet: createEip1193Wallet(provider),
+  wallet: createEip1193Wallet(provider),   // signs
+  relayer,                                  // broadcasts; separate funded account
   env: process.env,
 });
 

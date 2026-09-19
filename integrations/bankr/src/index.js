@@ -20,6 +20,8 @@ module.exports = {
   ...require("./quote"),
   ...require("./submission"),
   ...require("./wallet"),
+  ...require("./splitter"),
+  ...require("./relayer"),
   ...require("./payment"),
   ...require("./settlement"),
   ...require("./flow"),

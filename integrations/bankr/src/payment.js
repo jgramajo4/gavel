@@ -1,11 +1,12 @@
 "use strict";
 
-const { AbiCoder, Interface, Signature, getAddress, keccak256, toUtf8Bytes } = require("ethers");
-const { deriveUsdcAuthorization } = require("@gavel/gate");
+const { AbiCoder, Interface, getAddress, keccak256, toUtf8Bytes, verifyTypedData } = require("ethers");
 const { BankrGateError } = require("./errors");
 const { DEFAULT_ALLOWED_CHAIN_IDS, formatUsdcWithUnit } = require("./format");
 const { assertPayableQuote } = require("./quote");
-const { assertTxHash, assertSignature, assertWalletCapabilities, ensureChain } = require("./wallet");
+const { SPLITTER_ABI, buildAuthorization, encodeSettleCall } = require("./splitter");
+const { broadcastSettlement } = require("./relayer");
+const { assertSignature, assertWalletCapabilities, ensureChain } = require("./wallet");
 
 /**
  * The EIP-3009 struct USDC signs. Gate's semantics are unchanged: this is the
@@ -22,11 +23,6 @@ const RECEIVE_WITH_AUTHORIZATION_TYPES = Object.freeze({
   ]),
 });
 
-// Matches contracts/gate/src/GavelGateSplitter.sol exactly.
-const SPLITTER_ABI = Object.freeze([
-  "function settle((bytes32 quoteId,address payer,address voter,uint256 attentionAmount,uint256 gavelFeeAmount,bytes32 submissionHash,address token,uint256 expiry,uint256 quoteVersion) quote, bytes quoteSignature, (address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,uint8 v,bytes32 r,bytes32 s) authorization)",
-]);
-
 const USDC_ABI = Object.freeze([
   "function name() view returns (string)",
   "function version() view returns (string)",
@@ -34,7 +30,6 @@ const USDC_ABI = Object.freeze([
   "function balanceOf(address owner) view returns (uint256)",
 ]);
 
-const splitterInterface = new Interface([...SPLITTER_ABI]);
 const usdcInterface = new Interface([...USDC_ABI]);
 
 const EIP712_DOMAIN_TYPEHASH = keccak256(
@@ -102,48 +97,20 @@ async function readTokenBalance(wallet, token, owner) {
   }
 }
 
-/** The authorization is a deterministic derivative of the signed quote. */
-function buildAuthorization(quote) {
-  return deriveUsdcAuthorization(quote.message, quote.splitter);
-}
-
 /**
- * Encodes the single `settle` call.
- *
- * There is NO ERC-20 approve path: one EIP-3009 `receiveWithAuthorization`
- * authorization is consumed by one `settle` call on the splitter, and no USDC
- * ever moves to a Gavel-operated server address.
- */
-function encodeSettleCall(quote, authorizationSignature) {
-  const { v, r, s } = Signature.from(assertSignature(authorizationSignature));
-  return splitterInterface.encodeFunctionData("settle", [
-    {
-      quoteId: quote.message.quoteId,
-      payer: quote.message.payer,
-      voter: quote.message.voter,
-      attentionAmount: quote.message.attentionAmount,
-      gavelFeeAmount: quote.message.gavelFeeAmount,
-      submissionHash: quote.message.submissionHash,
-      token: quote.message.token,
-      expiry: quote.message.expiry,
-      quoteVersion: quote.message.quoteVersion,
-    },
-    quote.signature,
-    { ...buildAuthorization(quote), v, r, s },
-  ]);
-}
-
-/**
- * Signs one authorization and broadcasts one `settle` transaction.
+ * Step 1 of 2: Bankr signs, and nothing is broadcast.
  *
  * The confirmation gate is the first thing checked and it is strict: without
  * `confirmed === true` this function touches the wallet zero times. No signing,
- * no chain switch, no token read, no broadcast.
+ * no chain switch, no token read.
  *
- * Returning a transaction hash is NOT success. The wallet broadcast — and even
- * a mined receipt — is not acceptance. Only Gate's scanner can accept.
+ * What comes back is an immutable prepared transaction — `{ to, data, value }`
+ * and nothing else. Every field in it is derived from the quote Gate signed;
+ * none of it is caller-supplied. The authorization signature is verified
+ * LOCALLY to recover to the quote's payer before the calldata is built, so a
+ * wallet that signed the wrong payload fails here rather than on chain.
  */
-async function payQuote({
+async function authorizePayment({
   wallet,
   quote,
   confirmed,
@@ -170,6 +137,8 @@ async function payQuote({
     );
   }
 
+  // The signing wallet must sit on the quote's chain: the token domain read and
+  // the EIP-712 domain it produces are chain-bound.
   await ensureChain(wallet, quote.chainId);
 
   const total = BigInt(quote.totalAmount);
@@ -199,25 +168,72 @@ async function payQuote({
     throw new BankrGateError("AUTHORIZATION_FAILED", "The wallet did not authorize this payment.", { cause: error });
   }
 
-  onPhase("broadcasting");
-  let txHash;
+  // Local proof that the signature covers THIS authorization and recovers to
+  // the payer. A relayer is about to spend gas on it; a bad signature should
+  // cost nothing. The failure never echoes the signature itself.
+  let recovered;
   try {
-    txHash = assertTxHash(await wallet.sendTransaction({
-      from: payer,
-      to: quote.splitter,
-      data: encodeSettleCall(quote, authorizationSignature),
-      value: "0x0",
-    }));
-  } catch (error) {
-    if (error instanceof BankrGateError) throw error;
+    recovered = getAddress(verifyTypedData(
+      tokenDomain,
+      { ...RECEIVE_WITH_AUTHORIZATION_TYPES },
+      authorization,
+      authorizationSignature,
+    ));
+  } catch (cause) {
+    throw new BankrGateError("AUTHORIZATION_FAILED", "The payment authorization could not be verified.", { cause });
+  }
+  if (recovered !== payer) {
     throw new BankrGateError(
-      "BROADCAST_FAILED",
-      "The settlement transaction was not accepted by the network.",
-      { cause: error },
+      "AUTHORIZATION_FAILED",
+      "The payment authorization does not recover to the quote's payer. Nothing was broadcast.",
     );
   }
+
+  onPhase("authorized");
+  // Immutable, and exactly the three fields a relayer may see.
+  return Object.freeze({
+    to: quote.splitter,
+    data: encodeSettleCall(quote, authorizationSignature),
+    value: "0x0",
+  });
+}
+
+/**
+ * Step 2 of 2: a separate funded relayer broadcasts the prepared transaction.
+ *
+ * Bankr does not broadcast. The Gate splitter does not require
+ * `msg.sender == payer`, so the relayer pays gas while the payer's USDC
+ * authority stays entirely inside the EIP-3009 signature.
+ */
+async function broadcastPayment({ relayer, prepared, quote, onPhase = () => {}, now = () => Date.now() } = {}) {
+  onPhase("broadcasting");
+  const result = await broadcastSettlement({
+    relayer,
+    prepared,
+    quote,
+    nowSeconds: Math.floor(Number(now()) / 1000),
+  });
   onPhase("broadcast");
-  return Object.freeze({ txHash, chainId: String(quote.chainId), broadcast: true, accepted: false });
+  return result;
+}
+
+/**
+ * Authorize then broadcast.
+ *
+ * Returning a transaction hash is NOT success. A relayer receipt — even a mined
+ * one — is not acceptance. Only Gate's scanner can accept.
+ */
+async function payQuote({
+  wallet,
+  relayer,
+  quote,
+  confirmed,
+  onPhase = () => {},
+  now = () => Date.now(),
+  allowedChainIds = DEFAULT_ALLOWED_CHAIN_IDS,
+} = {}) {
+  const prepared = await authorizePayment({ wallet, quote, confirmed, onPhase, now, allowedChainIds });
+  return broadcastPayment({ relayer, prepared, quote, onPhase, now });
 }
 
 module.exports = {
@@ -225,6 +241,8 @@ module.exports = {
   RECEIVE_WITH_AUTHORIZATION_TYPES,
   SPLITTER_ABI,
   USDC_ABI,
+  authorizePayment,
+  broadcastPayment,
   buildAuthorization,
   encodeSettleCall,
   payQuote,
