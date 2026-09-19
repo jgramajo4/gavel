@@ -30,24 +30,80 @@ function sourceFiles(directory, extensions = [".js"]) {
   });
 }
 
+/**
+ * Gate payment is a separate, bounded boundary.
+ *
+ * The Bankr advocate client signs one EIP-712 WalletSession proof, one EIP-3009
+ * authorization, and sends one `settle` call whose every field is derived from a
+ * quote the Gate server signed. That is not the governance execution path and it
+ * is not reachable from a natural-language target plus calldata, so the
+ * arbitrary-call invariant below still holds. These files carry extra
+ * assertions of their own in the next test.
+ */
+const GATE_PAYMENT_BOUNDARY = new Set([
+  path.join(root, "integrations", "bankr", "src", "wallet.js"),
+  path.join(root, "integrations", "bankr", "src", "payment.js"),
+  path.join(root, "integrations", "bankr", "src", "session.js"),
+]);
+
+function isTestFixture(filename) {
+  return filename.includes(`${path.sep}test${path.sep}`);
+}
+
+function isGatePaymentBoundary(filename) {
+  return GATE_PAYMENT_BOUNDARY.has(filename) || isTestFixture(filename);
+}
+
 test("neither runtime implements governance reasoning or execution", () => {
   // A runtime that reached for a governor ABI, a voter model, or a wallet
   // provider would be a second implementation, and the two would drift.
   const forbidden = [
-    [/castVote|castRefundableVote|proposalSnapshot|hashProposal/, "governance contract calls"],
-    [/predictVote|buildVoterProfile|runChronologicalBacktest/, "voter modelling"],
-    [/safeTxHash|SafeApiKit|proposeTransaction|senderSignature/, "Safe provider calls"],
-    [/new Wallet\(|privateKeyToAccount|signTypedData|sendTransaction/, "transaction signing"],
-    [/governanceIntentHash|executionIntentHash|createExecutionIntent/, "intent construction"],
+    [/castVote|castRefundableVote|proposalSnapshot|hashProposal/, "governance contract calls", "all"],
+    [/predictVote|buildVoterProfile|runChronologicalBacktest/, "voter modelling", "all"],
+    [/safeTxHash|SafeApiKit|proposeTransaction|senderSignature/, "Safe provider calls", "all"],
+    // Reading a key from the environment is forbidden everywhere, with no
+    // exception: no runtime file and no test fixture may reach for one.
+    [/AGENT_PRIVATE_KEY|GAVEL_PRIVATE_KEY|PRIVATE_KEY\b|privateKeyToAccount/, "private key handling", "all"],
+    // A locally constructed signer is runtime-forbidden; a test fixture may
+    // build a deterministic one to produce a real signature to assert against.
+    [/new Wallet\(/, "a locally constructed signer", "runtime"],
+    [/signTypedData|sendTransaction/, "transaction signing", "non-payment"],
+    [/governanceIntentHash|executionIntentHash|createExecutionIntent/, "intent construction", "all"],
   ];
 
   for (const runtime of ["bankr", "hermes"]) {
     for (const filename of sourceFiles(path.join(root, "integrations", runtime))) {
       const source = fs.readFileSync(filename, "utf8");
-      for (const [pattern, description] of forbidden) {
+      for (const [pattern, description, scope] of forbidden) {
+        if (scope === "runtime" && isTestFixture(filename)) continue;
+        if (scope === "non-payment" && isGatePaymentBoundary(filename)) continue;
         assert.doesNotMatch(source, pattern, `${filename} implements ${description}`);
       }
     }
+  }
+});
+
+test("the Gate payment boundary signs only what a Gate quote determines", () => {
+  const payment = fs.readFileSync(path.join(root, "integrations", "bankr", "src", "payment.js"), "utf8");
+
+  // One authorization consumed by one settle call. No approve path exists.
+  assert.match(payment, /function settle\(/);
+  assert.doesNotMatch(payment, /function approve\(|"approve"|'approve'/);
+
+  // The destination and the chain come from the signed quote, never from a
+  // caller, a config value, or a hard-coded address.
+  assert.match(payment, /to: quote\.splitter/);
+  assert.doesNotMatch(payment, /0x[0-9a-fA-F]{40}/, "payment.js hard-codes an address");
+
+  // Payment cannot happen without an explicit confirmation.
+  assert.match(payment, /confirmed !== true/);
+  assert.match(payment, /CONFIRMATION_REQUIRED/);
+
+  // There is no target+calldata entry point: the only calldata built here is
+  // the splitter settle call encoded from the quote.
+  const encodes = payment.match(/encodeFunctionData\(([^)]*)\)/g) || [];
+  for (const call of encodes) {
+    assert.match(call, /"settle"|"name"|"version"|"DOMAIN_SEPARATOR"|"balanceOf"/, `unexpected calldata: ${call}`);
   }
 });
 
@@ -59,8 +115,29 @@ test("both runtimes reach Gavel only through the canonical CLI", () => {
   assert.doesNotMatch(runner, /require\(["'].*packages\/core/);
   assert.doesNotMatch(runner, /require\(["'].*-adapter/);
 
-  // Bankr is a skill wrapper over the same CLI and ships no runtime code at all.
-  assert.deepEqual(sourceFiles(path.join(root, "integrations", "bankr")), []);
+  // Bankr ships no governance runtime code. Its only source is the Gate
+  // advocate client, which is an HTTP client over Gate's own surfaces: it
+  // imports no core module, no DAO adapter, and no CLI internal, so it cannot
+  // grow a second implementation of anything Gavel core owns.
+  const bankrSources = sourceFiles(path.join(root, "integrations", "bankr"));
+  assert.ok(bankrSources.length > 0, "expected the Bankr Gate advocate client to exist");
+  for (const filename of bankrSources) {
+    const source = fs.readFileSync(filename, "utf8");
+    assert.doesNotMatch(source, /require\(["'].*packages\/core/, `${filename} imports core`);
+    assert.doesNotMatch(source, /require\(["'].*-adapter/, `${filename} imports a DAO adapter`);
+    assert.doesNotMatch(source, /require\(["'].*packages\/cli/, `${filename} imports CLI internals`);
+    assert.doesNotMatch(source, /require\(["'].*packages\/server/, `${filename} imports Gate server internals`);
+  }
+
+  // And it never reaches a voter-private Gate route: the payer is a different
+  // actor from the recipient, and Bankr must not be able to read an inbox.
+  for (const filename of bankrSources.filter((name) => name.includes(`${path.sep}src${path.sep}`))) {
+    assert.doesNotMatch(
+      fs.readFileSync(filename, "utf8"),
+      /\/v1\/gate\/me\//,
+      `${filename} reaches a voter-private Gate route`,
+    );
+  }
 });
 
 test("both runtime skills forbid arbitrary calldata and name the intent path", () => {
