@@ -41,9 +41,9 @@ function issuanceClient(deployment) {
   return { async query(sql) {
     sql = String(sql);
     if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) return { rows: [] };
-    if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "eoa", availability: "accepting_now", profile_version: "1" }] };
-    if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_voting: true,
-      pending_reservation_capacity: 12, settled_capacity: 25 }] };
+    if (/gate\.lock_issuance_profile_policy/.test(sql)) return { rows: [{ wallet: A, walletKind: "eoa", availability: "accepting_now",
+      profileVersion: "1", enabled: true, chainId: "1", attentionAmount: "1000000", acceptPreVote: false,
+      acceptVoting: true, pendingReservationCapacity: 12, settledCapacity: 25 }] };
     if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [deployment] };
     if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: new Date(0), expiresAt: new Date(600_000) }] };
     if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 0, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
@@ -125,9 +125,9 @@ test("Postgres issuance compares counts with the persisted policy capacities sel
   const client = { async query(sql) {
     sql = String(sql); calls.push(sql);
     if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) return { rows: [] };
-    if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "eoa", availability: "accepting_now", profile_version: "1" }] };
-    if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_voting: true,
-      pending_reservation_capacity: 2, settled_capacity: 4 }] };
+    if (/gate\.lock_issuance_profile_policy/.test(sql)) return { rows: [{ wallet: A, walletKind: "eoa", availability: "accepting_now",
+      profileVersion: "1", enabled: true, chainId: "1", attentionAmount: "1000000", acceptPreVote: false,
+      acceptVoting: true, pendingReservationCapacity: 2, settledCapacity: 4 }] };
     if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [productionDeployment()] };
     if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: new Date(0), expiresAt: new Date(600_000) }] };
     if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 2, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
@@ -135,7 +135,7 @@ test("Postgres issuance compares counts with the persisted policy capacities sel
   }, release() {} };
   const store = new PostgresGateStore({ pool: { connect: async () => client }, quoteSigner: async () => "signed" });
   await assert.rejects(store.issue(issuanceCommand()), /capacity unavailable/);
-  assert.match(calls.find((sql) => /FROM gate\.dao_policies/.test(sql)), /FOR UPDATE/);
+  assert.match(calls.find((sql) => /gate\.lock_issuance_profile_policy/.test(sql)), /lock_issuance_profile_policy/);
 });
 
 test("Postgres issuance accepts an explicit canonical production deployment", async () => {
@@ -309,8 +309,9 @@ test("issuance uses independent DAO/Base chains, exact database-clock lifetime, 
     async query(sql, values) {
       sql = String(sql); calls.push({ sql, values });
       if (/FROM gate\.submissions WHERE submission_hash/.test(sql)) return { rows: [] };
-      if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(sql)) return { rows: [{ id: "p", wallet: A, wallet_kind: "contract", availability: "accepting_now", profile_version: "7", base_payout_code_hash: keccak256(code) }] };
-      if (/FROM gate\.dao_policies/.test(sql)) return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_pre_vote: false, accept_voting: true, pending_reservation_capacity: 12, settled_capacity: 25 }] };
+      if (/gate\.lock_issuance_profile_policy/.test(sql)) return { rows: [{ wallet: A, walletKind: "contract", availability: "accepting_now",
+        profileVersion: "7", basePayoutCodeHash: keccak256(code), enabled: true, chainId: "1", attentionAmount: "1000000",
+        acceptPreVote: false, acceptVoting: true, pendingReservationCapacity: 12, settledCapacity: 25 }] };
       if (/FROM gate\.splitter_deployments/.test(sql)) return { rows: [productionDeployment()] };
       if (/interval '600 seconds'/.test(sql)) return { rows: [{ now: databaseNow, expiresAt: trustedExpiry }] };
       if (/AS pending_count/.test(sql)) return { rows: [{ pending_count: 0, settled_count: 0, pair_proposal: 0, active_pair: 0 }] };
@@ -947,8 +948,8 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(capacityQuery, /count\(\*\)[\s\S]*state='consumed'[\s\S]*consumed_at>clock_timestamp\(\)-interval '24 hours'/i);
   assert.doesNotMatch(capacityQuery, /settled_at/);
   assert.match(storeSource, /interval '600 seconds'/i);
-  assert.match(storeSource, /pending_count\)\s*<\s*Number\(policy\.pending_reservation_capacity\)/i);
-  assert.match(storeSource, /settled_count\)\s*<\s*Number\(policy\.settled_capacity\)/i);
+  assert.match(storeSource, /pending_count\)\s*<\s*Number\(locked\.pendingReservationCapacity\)/i);
+  assert.match(storeSource, /settled_count\)\s*<\s*Number\(locked\.settledCapacity\)/i);
   assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.release_expired_reservation/i);
   const releaseFunction = sql.match(/CREATE OR REPLACE FUNCTION gate\.release_expired_reservation[\s\S]*?END \$\$;/i)?.[0] || "";
   assert.ok(releaseFunction.indexOf("FROM gate.settlement_cursors") < releaseFunction.indexOf("FROM gate.quotes"));

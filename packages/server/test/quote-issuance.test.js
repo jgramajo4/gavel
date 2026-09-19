@@ -68,13 +68,10 @@ function postgresStore(options = {}) {
       const text = String(sql);
       calls.push({ sql: text, values });
       if (/FROM gate\.submissions WHERE submission_hash/.test(text)) return { rows: [] };
-      if (/FROM gate\.profiles WHERE id=.*FOR UPDATE/.test(text)) {
-        return { rows: [{ id: "profile-1", wallet: VOTER.toLowerCase(), wallet_kind: "eoa",
-          availability: "accepting_now", profile_version: "1", base_payout_code_hash: null }] };
-      }
-      if (/FROM gate\.dao_policies/.test(text)) {
-        return { rows: [{ enabled: true, chain_id: "1", attention_amount: "1000000", accept_pre_vote: false,
-          accept_voting: true, pending_reservation_capacity: 12, settled_capacity: 25 }] };
+      if (/gate\.lock_issuance_profile_policy/.test(text)) {
+        return { rows: [{ wallet: VOTER.toLowerCase(), walletKind: "eoa", availability: "accepting_now",
+          profileVersion: "1", basePayoutCodeHash: null, enabled: true, chainId: "1", attentionAmount: "1000000",
+          acceptPreVote: false, acceptVoting: true, pendingReservationCapacity: 12, settledCapacity: 25 }] };
       }
       if (/FROM gate\.splitter_deployments/.test(text)) {
         return { rows: [{ issuance_active: true, chain_id: "8453", splitter: SPLITTER.toLowerCase(),
