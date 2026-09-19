@@ -3,9 +3,11 @@ import type {
   DecodedFact,
   DuplicateReceipt,
   EnrichedFact,
+  InboxItem,
   IssuedQuote,
   PublicGateProfile,
   SubmissionReceipt,
+  VerifiedSession,
 } from '../types';
 
 export const SPLITTER = '0x1111111111111111111111111111111111111111';
@@ -169,3 +171,90 @@ export const decodedFacts: DecodedFact[] = [
 export const enrichedFacts: EnrichedFact[] = [
   { source: 'enriched', displayLabel: 'Recipient ENS', value: 'builder.eth', verifiable: false },
 ];
+
+
+// --- Private inbox ---------------------------------------------------------
+// Bodies shaped exactly like `projectInbox` in the merged server's
+// inbox-service.js, so a test that passes here is testing the real contract.
+
+export const PROPOSER = '0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa';
+export const CANDIDATE_TARGET_ID = `candidate:${PROPOSER.toLowerCase()}:0x${'cd'.repeat(32)}`;
+
+/** A `dao_inbox` session. Never interchangeable with the other two roles. */
+export const inboxSession: VerifiedSession = {
+  token: 'i'.repeat(43),
+  session: {
+    wallet: VOTER,
+    role: 'dao_inbox',
+    chainId: '1',
+    audience: 'gate',
+    issuedAt: '1',
+    expiry: '9999999999',
+  },
+};
+
+/** A `dao_profile` session — valid for enrollment, never for the inbox. */
+export const profileSession: VerifiedSession = {
+  ...inboxSession,
+  token: 'p'.repeat(43),
+  session: { ...inboxSession.session, role: 'dao_profile' },
+};
+
+/** A Nouns proposal candidate seeking sponsorship: PRE_VOTE, no proposalId. */
+export const candidateInboxItem: InboxItem = {
+  id: 'inbox-candidate',
+  archived: false,
+  createdAt: '2026-09-18T00:10:00.000Z',
+  pitch: 'Please **sponsor** this candidate. [Context](https://example.com/candidate)',
+  disclosures: 'Paid by the proposer.',
+  evidenceUrls: ['https://example.com/evidence', 'http://insecure.example.com/leak'],
+  canonicalFacts: {
+    dao: 'nouns',
+    targetId: CANDIDATE_TARGET_ID,
+    kind: 'candidate',
+    proposer: PROPOSER,
+    slug: 'fund nouns',
+    context: 'candidate sponsorship',
+    nativeState: 'ACTIVE',
+    eligibility: 'PRE_VOTE',
+    mappingVersion: 'nouns-candidate-lifecycle/1',
+    sourceBlock: '123',
+    sourceBlockHash: `0x${'cc'.repeat(32)}`,
+    contentHash: `0x${'dd'.repeat(32)}`,
+    refreshedAt: '2026-09-18T00:09:00.000Z',
+  },
+  decodedFacts: { decoderVersion: 'gate-facts/1', actions: [] },
+  enrichedFacts: [],
+  rawUnknownActions: [],
+  issuanceLifecycle: 'PRE_VOTE',
+  currentLifecycle: 'PRE_VOTE',
+  stateChangedAfterQuote: false,
+};
+
+/** An active governance proposal: VOTING, with a canonical proposal ID. */
+export const proposalInboxItem: InboxItem = {
+  id: 'inbox-proposal',
+  archived: false,
+  createdAt: '2026-09-18T01:10:00.000Z',
+  pitch: 'Vote FOR proposal 812.',
+  disclosures: '',
+  evidenceUrls: [],
+  canonicalFacts: {
+    dao: 'nouns',
+    targetId: 'proposal:812',
+    proposalId: '812',
+    nativeState: 'ACTIVE',
+    eligibility: 'VOTING',
+    mappingVersion: 'nouns-lifecycle/1',
+    sourceBlock: '900',
+    sourceBlockHash: `0x${'ee'.repeat(32)}`,
+    contentHash: `0x${'ff'.repeat(32)}`,
+    refreshedAt: '2026-09-18T01:09:00.000Z',
+  },
+  decodedFacts: { decoderVersion: 'gate-facts/1', actions: decodedFacts },
+  enrichedFacts: enrichedFacts,
+  rawUnknownActions: [canonicalFacts[0].canonicalEvidence],
+  issuanceLifecycle: 'VOTING',
+  currentLifecycle: 'VOTING',
+  stateChangedAfterQuote: false,
+};

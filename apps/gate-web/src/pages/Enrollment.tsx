@@ -1,7 +1,9 @@
 import { useCallback, useState } from 'react';
 import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
-import { connect, signTypedData, type Eip1193Provider } from '../wallet';
+import { openWalletSession } from '../wallet-session';
+import { signTypedData, type Eip1193Provider } from '../wallet';
+import { formatUsdc } from '../format';
 import type { Availability, PublicGateProfile } from '../types';
 
 /**
@@ -17,6 +19,12 @@ import type { Availability, PublicGateProfile } from '../types';
  * proof exist in the server contract but are not offered here, because claiming
  * Safe support before the actual backend path succeeds would be a lie a voter
  * could lose money to.
+ *
+ * The two stage flags are the voter's opt-in and are signed into the
+ * GateEnrollment payload, so this form shows them rather than assuming them.
+ * They are exactly the two the server supports (`acceptPreVote`,
+ * `acceptVoting`), with the server's own rule that at least one must be on; no
+ * other combination is offered, because no other combination exists.
  */
 
 const USDC_SCALE = 1_000_000n;
@@ -32,6 +40,8 @@ function toAtomic(input: string): string | null {
 export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) {
   const { setSession } = useSession();
   const [availability, setAvailability] = useState<Availability>('accepting_now');
+  const [acceptPreVote, setAcceptPreVote] = useState(true);
+  const [acceptVoting, setAcceptVoting] = useState(true);
   const [price, setPrice] = useState('');
   const [tags, setTags] = useState('');
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
@@ -48,30 +58,20 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         setError('Enter an attention price of at least 1.00 USDC, with at most six decimals.');
         return;
       }
+      // Mirrors the server rule so a voter learns about it before signing.
+      if (!acceptPreVote && !acceptVoting) {
+        setError('Choose at least one stage. A Gate that accepts neither stage cannot be enrolled.');
+        return;
+      }
       setBusy(true);
       try {
-        const account = await connect(wallet);
-
-        // 1. Session challenge, signed on the DAO chain.
-        const sessionChallenge = await api.requestChallenge({
-          proofType: 'WalletSession',
-          wallet: account,
+        // 1. Session challenge, signed on the DAO chain. Profile edits use the
+        //    `dao_profile` role; the private inbox uses `dao_inbox` and the two
+        //    are never interchangeable.
+        const { account, verified } = await openWalletSession({
+          api,
+          provider: wallet,
           role: 'dao_profile',
-        });
-        const sessionSignature = await signTypedData(wallet, account, {
-          domain: sessionChallenge.domain,
-          types: sessionChallenge.types,
-          primaryType: sessionChallenge.primaryType,
-          message: sessionChallenge.message,
-        });
-        const verified = await api.verifyProof({
-          proofType: 'WalletSession',
-          typedData: {
-            primaryType: sessionChallenge.primaryType,
-            domain: sessionChallenge.domain,
-            message: sessionChallenge.message,
-          },
-          signature: sessionSignature,
         });
         setSession(verified);
 
@@ -82,8 +82,8 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           availability,
           dao: 'nouns',
           daoChainId: '1',
-          acceptPreVote: false,
-          acceptVoting: true,
+          acceptPreVote,
+          acceptVoting,
           attentionAmount,
         });
         const enrollmentSignature = await signTypedData(wallet, account, {
@@ -121,7 +121,7 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         setBusy(false);
       }
     },
-    [api, wallet, price, availability, tags, setSession],
+    [api, wallet, price, availability, acceptPreVote, acceptVoting, tags, setSession],
   );
 
   return (
@@ -134,6 +134,11 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
       <p className="page-intro">
         This experimental deployment enrolls externally owned accounts (EOA) only. Contract wallets,
         including Safe, are not enabled here.
+      </p>
+      <p className="page-intro">
+        Enrolling opts you in to <strong>paid attention requests</strong>: an advocate pays your
+        attention price to put one message in your private inbox. Payment buys delivery and your
+        attention, never your vote, and you are never obliged to act on anything you read.
       </p>
 
       <form className="enrollment" aria-label="Gate enrollment" onSubmit={submit}>
@@ -152,7 +157,36 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
         <div className="field">
           <label htmlFor="enroll-price">Attention price (USDC)</label>
           <input id="enroll-price" inputMode="decimal" value={price} onChange={(event) => setPrice(event.target.value)} />
+          <p className="counter">
+            Minimum 1.00 USDC. The full amount is paid to this wallet; Gavel's service fee is charged
+            separately to the advocate and never comes out of your price.
+          </p>
         </div>
+
+        <fieldset className="field enrollment-stages">
+          <legend>Requests you accept</legend>
+          <p className="composer-note">
+            Nouns supports exactly these two stages. At least one must stay on.
+          </p>
+          <label className="checkbox-row" htmlFor="enroll-pre-vote">
+            <input
+              id="enroll-pre-vote"
+              type="checkbox"
+              checked={acceptPreVote}
+              onChange={(event) => setAcceptPreVote(event.target.checked)}
+            />{' '}
+            PRE_VOTE — proposal candidates seeking sponsorship
+          </label>
+          <label className="checkbox-row" htmlFor="enroll-voting">
+            <input
+              id="enroll-voting"
+              type="checkbox"
+              checked={acceptVoting}
+              onChange={(event) => setAcceptVoting(event.target.checked)}
+            />{' '}
+            VOTING — proposals already open for a vote
+          </label>
+        </fieldset>
         <div className="field">
           <label htmlFor="enroll-tags">Public tags (comma separated)</label>
           <input id="enroll-tags" value={tags} onChange={(event) => setTags(event.target.value)} />
@@ -164,9 +198,23 @@ export function Enrollment({ api, wallet }: { api: GateApi; wallet: Eip1193Provi
           </p>
         ) : null}
         {profile ? (
-          <p role="status" className="notice notice-info">
-            Gate updated. Availability: {profile.availability}.
-          </p>
+          <div role="status" className="notice notice-info">
+            <p>
+              Gate updated.{' '}
+              {profile.acceptingSubmissions
+                ? 'You are accepting paid attention requests now.'
+                : 'You are not accepting paid attention requests right now.'}
+            </p>
+            <p>
+              Availability: {profile.availability}
+              {profile.policies?.[0]
+                ? ` · Attention price ${formatUsdc(profile.policies[0].attentionAmount)} · Accepting ${
+                    profile.policies[0].acceptedStages.join(' and ') || 'no stages'
+                  }`
+                : ''}
+              .
+            </p>
+          </div>
         ) : null}
 
         <button type="submit" disabled={busy}>
