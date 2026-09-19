@@ -155,10 +155,10 @@ describe('global wallet control', () => {
   it('keeps the inbox behind its own dao_inbox session even with a wallet connected', async () => {
     renderRoute('/inbox', { walletAddress: VOTER });
     // A globally connected wallet is identity; the inbox still asks for a
-    // signature before it will read anything.
-    expect(
-      await screen.findByRole('button', { name: /connect governance wallet/i }),
-    ).toBeInTheDocument();
+    // signature before it will read anything. It asks for exactly that — the
+    // connection it can already see is not requested a second time.
+    expect(await screen.findByRole('button', { name: /sign to unlock inbox/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /connect governance wallet/i })).toBeNull();
     expect(screen.queryByRole('list', { name: /inbox/i })).toBeNull();
   });
 });

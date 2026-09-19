@@ -222,7 +222,7 @@ export interface VoterInboxProps {
 
 export function VoterInbox({ api, wallet }: VoterInboxProps) {
   const { session, setSession, clearSession } = useSession();
-  const { noteConnected } = useWalletConnection();
+  const { address, noteConnected } = useWalletConnection();
   const inboxSession = isSessionForRole(session, INBOX_ROLE) ? session : null;
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [openItem, setOpenItem] = useState<InboxItem | null>(null);
@@ -286,7 +286,14 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
     setError(null);
     setBusy(true);
     try {
-      const { account, verified } = await openWalletSession({ api, provider: wallet, role: INBOX_ROLE });
+      // A wallet already connected in the header is reused: this page asks for
+      // the `dao_inbox` signature, never for a second connection.
+      const { account, verified } = await openWalletSession({
+        api,
+        provider: wallet,
+        role: INBOX_ROLE,
+        account: address,
+      });
       // Identity for the header; the `dao_inbox` token below is the grant.
       noteConnected(account);
       setItems(null);
@@ -304,7 +311,7 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
     } finally {
       setBusy(false);
     }
-  }, [api, wallet, setSession, explain, noteConnected]);
+  }, [api, wallet, address, setSession, explain, noteConnected]);
 
   const open = useCallback(
     async (id: string) => {
@@ -361,17 +368,30 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
           Paid pitches that Gate independently accepted appear privately here.
         </p>
         <div className="inbox-signin">
-          <p className="inbox-signin-note">
-            Sign in with the governance wallet you enrolled. Signing proves wallet control — a
-            typed-data signature, not a transaction: no gas, no funds moved.
-          </p>
+          {address ? (
+            <p className="inbox-signin-note">
+              Unlocking the inbox for <WalletIdentity address={address} />. Your wallet is already
+              connected, so all this needs is one signature: a connected wallet is identity, and the
+              inbox opens on a <code>dao_inbox</code> session of its own. Signing proves wallet
+              control — a typed-data signature, not a transaction: no gas, no funds moved.
+            </p>
+          ) : (
+            <p className="inbox-signin-note">
+              Sign in with the governance wallet you enrolled. Signing proves wallet control — a
+              typed-data signature, not a transaction: no gas, no funds moved.
+            </p>
+          )}
           {error ? (
             <p role="alert" className="notice notice-error">
               {error}
             </p>
           ) : null}
           <button type="button" className="primary-action" onClick={authenticate} disabled={busy}>
-            {busy ? 'Waiting for your wallet…' : 'Connect governance wallet'}
+            {busy
+              ? 'Waiting for your wallet…'
+              : address
+                ? 'Sign to unlock inbox'
+                : 'Connect governance wallet'}
           </button>
         </div>
         <p className="page-intro">
