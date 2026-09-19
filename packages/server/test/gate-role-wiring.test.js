@@ -53,6 +53,36 @@ test("Gate privilege audit requires only the atomic WalletSession persistence fu
   assert.equal(GATE_REQUIRED_FUNCTIONS.some((signature) => signature.startsWith("gate.insert_auth_session(")), false);
 });
 
+test("Gate privilege audit exactly matches the production definer runtime surface", () => {
+  const sql = fs.readFileSync(path.join(ROOT, "packages/server/migrations/001_gate.sql"), "utf8");
+  const audit = sql.match(/CREATE OR REPLACE FUNCTION gate\.runtime_privilege_audit[\s\S]*?\$runtime_privilege_audit\$;/i)?.[0] || "";
+  const requiredFunctions = audit.match(/required_function\(signature\) AS \(VALUES([\s\S]*?)\)\s*SELECT/i)?.[1] || "";
+  const auditedSignatures = [...requiredFunctions.matchAll(/\('([^']+)'\)/g)].map(([, signature]) => signature);
+  assert.deepEqual(auditedSignatures, GATE_REQUIRED_FUNCTIONS);
+  for (const signature of [
+    "gate.lock_issuance_profile_policy(text,text)",
+    "gate.public_submission_receipt(text)",
+    "gate.public_profile(text)",
+    "gate.public_dao_policy(text,text)",
+    "gate.scanner_range_prereads(text,bigint,bigint)",
+    "gate.unsettled_settlement_observations(bigint,text,integer)",
+    "gate.runtime_migration_status()",
+    "gate.runtime_privilege_audit()",
+  ]) assert.ok(GATE_REQUIRED_FUNCTIONS.includes(signature), signature);
+});
+
+test("runtime privilege audit reports explicit schema, table, and function requirements without dynamic SQL", () => {
+  const sql = fs.readFileSync(path.join(ROOT, "packages/server/migrations/001_gate.sql"), "utf8");
+  const audit = sql.match(/CREATE OR REPLACE FUNCTION gate\.runtime_privilege_audit[\s\S]*?\$runtime_privilege_audit\$;/i)?.[0] || "";
+  assert.match(audit, /has_schema_privilege\('gavel_gate'/i);
+  assert.match(audit, /has_table_privilege\('gavel_gate'/i);
+  assert.match(audit, /has_function_privilege\('gavel_gate'/i);
+  assert.match(audit, /'schema:'\|\|schema_name[\s\S]*'table:'\|\|relation[\s\S]*'function:'\|\|signature/i);
+  assert.doesNotMatch(audit, /EXECUTE\s+(?:format|quote_ident|quote_literal)/i);
+  assert.match(sql, /REVOKE ALL ON FUNCTION gate\.runtime_privilege_audit\(\) FROM PUBLIC/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.runtime_privilege_audit\(\) TO gavel_gate/i);
+});
+
 test("Gate privilege audit has one exact migration-matched table matrix", () => {
   assert.deepEqual(GATE_TABLE_PRIVILEGES, {
     auth_nonces: ["SELECT"],
@@ -225,12 +255,17 @@ test("migration grants only safe projections to the public API role", () => {
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.release_expired_reservation\(text,text\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile\(text,text,text,gate\.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.record_scanner_range\(text,bigint,bigint,text,timestamptz,jsonb\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.scanner_range_prereads\(text,bigint,bigint\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.unsettled_settlement_observations\(bigint,text,integer\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.public_profile\(text\) TO gavel_gate/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.public_dao_policy\(text,text\) TO gavel_gate/i);
+  assert.doesNotMatch(sql, /GRANT[^;]*(?:USAGE ON SCHEMA gate_public|SELECT ON gate_public\.)[^;]*TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.insert_auth_nonce\(gate\.auth_proof_type,gate\.auth_purpose,gate\.auth_role,text,text,bigint,text,text,text,bigint,bigint\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.consume_auth_nonce\(text,bigint\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.consume_auth_nonce_and_insert_session\(text,text,text,gate\.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint\) TO gavel_gate/i);
   assert.match(sql, /REVOKE ALL ON FUNCTION gate\.insert_auth_session\(text,text,gate\.auth_role,bigint,text,bigint,bigint\) FROM gavel_gate/i);
-  assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*gate\.(?:auth_nonces|auth_sessions)[^;]*TO gavel_gate/i);
-  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*gate\.notification_attempts/i);
+  assert.doesNotMatch(sql, /\bGRANT\s[^;]*(?:INSERT|UPDATE|DELETE)[^;]*gate\.(?:auth_nonces|auth_sessions)[^;]*TO gavel_gate/i);
+  assert.doesNotMatch(sql, /\bGRANT\s[^;]*UPDATE[^;]*gate\.notification_attempts/i);
 });
 
 test("fresh-volume init scripts remain separate and never pass secrets in psql argv", () => {

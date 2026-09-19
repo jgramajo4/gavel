@@ -88,15 +88,34 @@ test("scanner state returns the durable deployment overlap as its sole window au
   assert.match(calls[0].sql, /config->>'overlap'/i);
 });
 
-test("scanner exposes latest durable exact observations that still need settlement", async () => {
+test("scanner reads latest durable exact observations only through the narrow definer function", async () => {
   const settlement = { txHash: H("4"), event: { quoteId: H("3") } };
-  const { calls, store } = mockStore((sql) => /settlement_scan_observations/.test(sql)
+  const { calls, store } = mockStore((sql) => /gate\.unsettled_settlement_observations/.test(sql)
     ? { rows: [{ quoteId: H("3"), settlement }] } : { rows: [] });
   assert.deepEqual(await store.listUnsettledSettlementObservations({ chainId: "8453", splitter: A, limit: 7 }),
     [{ quoteId: H("3"), settlement }]);
-  assert.match(calls[0].sql, /max\(b\.scan_generation\)/i);
-  assert.match(calls[0].sql, /q\.state<>'settled'/i);
+  assert.match(calls[0].sql, /FROM gate\.unsettled_settlement_observations\(\$1,\$2,\$3\)/i);
+  assert.doesNotMatch(calls[0].sql, /gate\.settlement_scan_(?:observations|blocks)/i);
   assert.deepEqual(calls[0].values, ["8453", A, 7]);
+});
+
+test("scanner range prereads use one narrow definer function instead of scanner evidence tables", async () => {
+  const { calls, store } = mockStore((sql) => {
+    if (/gate\.scanner_range_prereads/.test(sql)) return { rows: [
+      { readKind: "anomaly", quoteId: null, txHash: H("4"), logIndex: 0, code: "UNKNOWN_QUOTE" },
+      { readKind: "current_exact", quoteId: H("3"), txHash: H("5"), logIndex: 1, code: null },
+      { readKind: "reorged_exact", quoteId: H("6"), txHash: H("7"), logIndex: 2, code: null },
+    ] };
+    if (/gate\.record_scanner_range/.test(sql)) return { rows: [{ released: 0 }] };
+    return { rows: [] };
+  });
+  await store.recordScannerRange({ deploymentId: "d", generation: "1", fromBlock: "40", throughBlock: "40",
+    canonicalBlockHash: H("2"), canonicalBlockTimestamp: new Date("2026-01-01T00:00:00Z"),
+    canonicalBlocks: blocks(40, 40), observations: [] });
+  const preread = calls.find(({ sql }) => /gate\.scanner_range_prereads/.test(sql));
+  assert.deepEqual(preread.values, ["d", "40", "40"]);
+  assert.equal(calls.filter(({ sql }) => /gate\.scanner_range_prereads/.test(sql)).length, 1);
+  assert.equal(calls.some(({ sql }) => /FROM gate\.settlement_scan_(?:observations|blocks)/i.test(sql)), false);
 });
 
 test("scanner rejects incomplete canonical block evidence before opening a transaction", async () => {
@@ -159,6 +178,13 @@ test("migration makes persisted contiguous ranges and exact logs the sole releas
   assert.match(sql, /NOT EXISTS \(SELECT 1 FROM gate\.settlement_scan_observations[\s\S]*scan_generation/i);
   assert.match(sql, /settlement evidence was not persisted by scanner/i);
   assert.match(sql, /CREATE TRIGGER settlement_scan_ranges_immutable[\s\S]*CREATE TRIGGER settlement_scan_blocks_immutable[\s\S]*CREATE TRIGGER settlement_scan_observations_immutable/i);
+  for (const name of ["scanner_range_prereads", "unsettled_settlement_observations"]) {
+    const fn = sql.match(new RegExp(`CREATE OR REPLACE FUNCTION gate\\.${name}[\\s\\S]*?\\$\\$;`, "i"))?.[0] || "";
+    assert.match(fn, /SECURITY DEFINER SET search_path=pg_catalog,gate/i);
+    assert.doesNotMatch(fn, /EXECUTE\s+|format\s*\(/i);
+    assert.match(sql, new RegExp(`REVOKE ALL ON FUNCTION gate\\.${name}\\([^;]+ FROM PUBLIC`, "i"));
+    assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION gate\\.${name}\\([^;]+ TO gavel_gate`, "i"));
+  }
   assert.match(sql, /gavel_gate_catalog_manifest[\s\S]*pg_constraint[\s\S]*pg_index/);
   assert.match(sql, /sha256:gate-001-v3-postgres-parity/);
   const release = sql.match(/CREATE OR REPLACE FUNCTION gate\.release_expired_reservation[\s\S]*?END \$\$;/i)?.[0] || "";

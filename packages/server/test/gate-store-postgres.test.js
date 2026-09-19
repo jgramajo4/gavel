@@ -10,6 +10,7 @@ const { createProfileService } = require("../src/gate/profile-service");
 const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { createSubmissionService } = require("../src/gate/submission-service");
 const { createGateHttpServer } = require("../src/gate/http");
+const { assertDatabaseReady } = require("../bin/gavel-server");
 const { PostgresGateStore, createPublicGateReader } = require("../src/gate/store");
 
 const databaseUrl = process.env.GAVEL_GATE_TEST_DATABASE_URL;
@@ -478,7 +479,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
       { enabled: true, accept_pre_vote: true, accept_voting: false });
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v4-nouns-candidates",
+      migration_checksum: "sha256:gate-001-v4-runtime-privilege-audit",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -1137,6 +1138,109 @@ test("candidate HTTP issuance reads only the narrow public receipt function as g
     assert.deepEqual(fromFunction, fromView);
     assert.deepEqual(Object.keys(fromFunction[0]), ["public_id", "state", "updated_at", "accepted_at"]);
     assert.equal(await publicReader.getSubmission("A".repeat(22)), null);
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
+test("runtime role scans, settles, reads public projections, and fails readiness when one required privilege is removed", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 6 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_gate') THEN CREATE ROLE gavel_gate NOLOGIN; END IF;
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_api') THEN CREATE ROLE gavel_api NOLOGIN; END IF;
+      ALTER ROLE gavel_gate NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+    END $$`);
+    await pool.query(migration);
+    await pool.query(migration);
+
+    const ownerStore = new PostgresGateStore({ pool });
+    await ownerStore.mutateProfile({
+      profile: { id: "profile-1", wallet: WALLET, walletKind: "eoa", availability: "accepting_now",
+        display: { ens: "gate.eth", message: "Open for governance" } },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
+        attentionAmount: "1000000", pendingReservationCapacity: 12, settledCapacity: 25, tags: ["governance"] },
+    });
+    await ownerStore.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER,
+      token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "5", contractCodeHash: CODE_HASH,
+      config: { environment: "production", overlap: 2 }, rpcAccess: "ciphertext", issuanceActive: true });
+
+    const rolePool = effectiveRolePool(pool, "gavel_gate");
+    const roleStore = new PostgresGateStore({ pool: rolePool });
+    const issued = await roleStore.issue(issuance("1", hash("b")));
+    const settlement = { txHash: hash("c"), logIndex: 0, receiptBlock: "7", receiptBlockHash: hash("d"),
+      receiptBlockTimestamp: new Date(Date.now() - 1_000), settledAt: new Date(),
+      event: { quoteId: issued.quote.quoteId, payer: PAYER, voter: WALLET, attentionAmount: "1000000",
+        gavelFeeAmount: "250000", gavelRecipient: GAVEL_RECIPIENT, token: TOKEN, submissionHash: hash("b") },
+      evidence: { oneConfirmation: true, confirmations: 1, canonical: true, scannerVerified: true,
+        chainId: "8453", splitter: SPLITTER } };
+    const scan = await roleStore.recordScannerRange({ deploymentId: "deployment-1", generation: "1",
+      fromBlock: "5", throughBlock: "7", canonicalBlockHash: hash("d"),
+      canonicalBlockTimestamp: settlement.receiptBlockTimestamp,
+      canonicalBlocks: canonicalBlocks(5, 7, { timestamp: settlement.receiptBlockTimestamp }),
+      observations: [{ kind: "exact_log", quoteId: issued.quote.quoteId, txHash: settlement.txHash, logIndex: 0,
+        blockNumber: "7", blockHash: hash("d"), blockTimestamp: settlement.receiptBlockTimestamp, exactMatch: true,
+        details: { settlement } }] });
+    assert.deepEqual(scan, { released: 0, reorged: 0 });
+    assert.equal((await roleStore.getScannerState({ chainId: "8453", splitter: SPLITTER })).nextRangeFrom, "8");
+    const [observation] = await roleStore.listUnsettledSettlementObservations({ chainId: "8453", splitter: SPLITTER });
+    assert.equal(observation.quoteId, issued.quote.quoteId);
+    assert.equal((await roleStore.settle({ quoteId: observation.quoteId, settlement: observation.settlement,
+      inbox: { id: "inbox-runtime", issuanceLifecycle: "VOTING", currentLifecycle: "UNKNOWN", lifecycleChanged: false,
+        currentLifecycleUnavailable: true, privateUnavailabilityReason: "private" },
+      notification: null, monitor: { id: "monitor-runtime", nextCheckBlock: "8" } })).settled, true);
+    assert.deepEqual(await roleStore.listUnsettledSettlementObservations({ chainId: "8453", splitter: SPLITTER }), []);
+
+    for (const table of ["settlement_scan_ranges", "settlement_scan_blocks", "settlement_scan_observations"]) {
+      assert.equal(await denied(pool, "gavel_gate", `SELECT * FROM gate.${table}`), true, table);
+    }
+    for (const view of ["profiles", "dao_policies", "submission_receipts"]) {
+      assert.equal(await denied(pool, "gavel_gate", `SELECT * FROM gate_public.${view}`), true, view);
+    }
+    const functionSecurity = (await pool.query(`SELECT p.proname,p.prosecdef,p.proconfig,
+      has_function_privilege('public',p.oid,'EXECUTE') AS public_execute,
+      has_function_privilege('gavel_gate',p.oid,'EXECUTE') AS gate_execute
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='gate' AND p.proname=ANY($1::text[]) ORDER BY p.proname`, [[
+      "public_dao_policy", "public_profile", "scanner_range_prereads", "unsettled_settlement_observations",
+    ]])).rows;
+    assert.equal(functionSecurity.length, 4);
+    for (const row of functionSecurity) assert.deepEqual(
+      { definer: row.prosecdef, config: row.proconfig, public: row.public_execute, gate: row.gate_execute },
+      { definer: true, config: ["search_path=pg_catalog, gate"], public: false, gate: true }, row.proname,
+    );
+    const reader = createPublicGateReader(rolePool);
+    assert.deepEqual((await reader.getProfile("profile-1")).display,
+      { ens: "gate.eth", message: "Open for governance" });
+    assert.deepEqual((await reader.getPolicy("profile-1", "nouns")).tags, ["governance"]);
+    assert.equal((await reader.getSubmission(issued.publicId)).state, "accepted");
+
+    const audit = (await rolePool.query("SELECT * FROM gate.runtime_privilege_audit() ORDER BY requirement")).rows;
+    assert.equal(audit.length > 0, true);
+    assert.deepEqual(audit.filter(({ granted }) => !granted), []);
+    for (const priorPath of ["gate.lock_issuance_profile_policy(text,text)", "gate.public_submission_receipt(text)"]) {
+      assert.equal(audit.find(({ requirement }) => requirement.includes(priorPath))?.granted, true, priorPath);
+    }
+    assert.deepEqual(await assertDatabaseReady(rolePool), { role: "gavel_gate", migration: "gate/001_gate-v3" });
+
+    await pool.query("REVOKE EXECUTE ON FUNCTION gate.public_profile(text) FROM gavel_gate");
+    await pool.query(`UPDATE public.schema_migrations SET catalog_manifest=public.gavel_gate_catalog_manifest()
+      WHERE version='gate/001_gate-v3'`);
+    assert.deepEqual((await rolePool.query(`SELECT requirement FROM gate.runtime_privilege_audit()
+      WHERE NOT granted ORDER BY requirement`)).rows,
+    [{ requirement: "function:gate.public_profile(text):EXECUTE" }]);
+    await assert.rejects(assertDatabaseReady(rolePool), /runtime privilege.*public_profile/i);
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});

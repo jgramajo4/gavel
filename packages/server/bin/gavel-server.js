@@ -85,17 +85,23 @@ async function assertDatabaseReady(pool) {
       UNION ALL SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE p.proowner=r.oid AND n.nspname !~ '^pg_(temp|toast_temp)_'
     ) owned) AS "ownershipCount",
-    has_schema_privilege(current_user,'gate','USAGE') AS "hasGateUsage"
-    FROM pg_roles r CROSS JOIN gate.runtime_migration_status() m WHERE r.rolname=current_user`)).rows[0];
+    has_schema_privilege(current_user,'gate','USAGE') AS "hasGateUsage",a."missingPrivileges"
+    FROM pg_roles r CROSS JOIN gate.runtime_migration_status() m
+    CROSS JOIN LATERAL (SELECT COALESCE(array_agg(p.requirement ORDER BY p.requirement)
+      FILTER (WHERE NOT p.granted),ARRAY[]::text[]) AS "missingPrivileges"
+      FROM gate.runtime_privilege_audit() p) a WHERE r.rolname=current_user`)).rows[0];
   if (!row || row.currentUser !== "gavel_gate" || row.isSuperuser || row.canCreateDb || row.canCreateRole
       || row.bypassRls || row.canReplicate || row.inheritsRoles || row.membershipCount !== "0"
       || row.ownershipCount !== "0" || row.hasGateUsage !== true) {
     throw new Error("Gate database must use the least-privilege gavel_gate role");
   }
   if (row.migrationVersion !== "gate/001_gate-v3"
-      || row.migrationChecksum !== "sha256:gate-001-v4-nouns-candidates"
+      || row.migrationChecksum !== "sha256:gate-001-v4-runtime-privilege-audit"
       || row.manifestMatches !== true) {
     throw new Error("Gate database migration is missing or invalid");
+  }
+  if (!Array.isArray(row.missingPrivileges) || row.missingPrivileges.length > 0) {
+    throw new Error(`Gate database runtime privilege audit failed: ${(row.missingPrivileges || []).join(",")}`);
   }
   return Object.freeze({ role: row.currentUser, migration: "gate/001_gate-v3" });
 }

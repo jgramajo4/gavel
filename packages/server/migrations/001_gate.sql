@@ -43,7 +43,7 @@ BEGIN
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
             'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
             'sha256:gate-001-v3-runtime-readiness','sha256:gate-001-v3-atomic-auth-session',
-            'sha256:gate-001-v4-nouns-candidates') AND installed_tables <> 20)
+            'sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND installed_tables <> 20)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
@@ -51,14 +51,14 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') AND NOT EXISTS(
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') AND (
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -85,7 +85,7 @@ BEGIN
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
             'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates')
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -868,6 +868,49 @@ DROP TRIGGER IF EXISTS settlement_scan_observations_immutable ON gate.settlement
 CREATE TRIGGER settlement_scan_observations_immutable BEFORE UPDATE OR DELETE ON gate.settlement_scan_observations
  FOR EACH ROW EXECUTE FUNCTION gate.protect_scanner_evidence();
 
+CREATE OR REPLACE FUNCTION gate.scanner_range_prereads(p_deployment_id text,p_from bigint,p_through bigint)
+RETURNS TABLE("readKind" text,"quoteId" text,"txHash" text,"logIndex" integer,code text)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT 'anomaly'::text,NULL::text,o.tx_hash,o.log_index,o.details->>'code'
+ FROM gate.settlement_scan_observations o
+ WHERE o.deployment_id=p_deployment_id AND o.kind='anomaly' AND o.block_number BETWEEN p_from AND p_through
+ UNION ALL
+ SELECT 'current_exact'::text,o.quote_id,o.tx_hash,o.log_index,NULL::text
+ FROM gate.settlement_scan_observations o JOIN gate.quotes q ON q.quote_id=o.quote_id
+ WHERE o.deployment_id=p_deployment_id AND o.kind='exact_log' AND o.exact_match AND q.state<>'settled'
+   AND o.block_number BETWEEN p_from AND p_through
+   AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number)
+ UNION ALL
+ SELECT DISTINCT 'reorged_exact'::text,o.quote_id,o.tx_hash,o.log_index,NULL::text
+ FROM gate.settlement_scan_observations o
+ WHERE o.deployment_id=p_deployment_id AND o.kind='exact_log' AND o.exact_match
+   AND o.block_number BETWEEN p_from AND p_through AND EXISTS (
+     SELECT 1 FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number
+       AND b.scan_generation>o.scan_generation AND NOT EXISTS (
+         SELECT 1 FROM gate.settlement_scan_observations later
+         WHERE later.deployment_id=o.deployment_id AND later.scan_generation=b.scan_generation
+           AND later.block_number=o.block_number AND later.kind='exact_log' AND later.exact_match
+           AND later.quote_id=o.quote_id AND later.tx_hash=o.tx_hash AND later.log_index=o.log_index))
+$$;
+REVOKE ALL ON FUNCTION gate.scanner_range_prereads(text,bigint,bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.unsettled_settlement_observations(p_chain_id bigint,p_splitter text,p_limit integer)
+RETURNS TABLE("quoteId" text,settlement jsonb)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT o.quote_id,o.details->'settlement'
+ FROM gate.settlement_scan_observations o
+ JOIN gate.splitter_deployments d ON d.id=o.deployment_id
+ JOIN gate.quotes q ON q.quote_id=o.quote_id
+ WHERE d.chain_id=p_chain_id AND d.splitter=p_splitter AND o.exact_match AND q.state<>'settled'
+   AND jsonb_typeof(o.details->'settlement')='object'
+   AND o.scan_generation=(SELECT max(b.scan_generation) FROM gate.settlement_scan_blocks b
+     WHERE b.deployment_id=o.deployment_id AND b.block_number=o.block_number AND b.parent_hash IS NOT NULL)
+ ORDER BY o.block_number,o.log_index LIMIT p_limit
+$$;
+REVOKE ALL ON FUNCTION gate.unsettled_settlement_observations(bigint,text,integer) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION gate.record_scanner_range(p_deployment_id text,p_from bigint,p_through bigint,p_hash text,p_timestamp timestamptz,p_metadata jsonb)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
 DECLARE
@@ -1278,7 +1321,7 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
     NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-      'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates') THEN
+      'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1343,6 +1386,26 @@ CREATE OR REPLACE VIEW gate_public.submission_receipts WITH (security_barrier=tr
  FROM gate.submissions s LEFT JOIN gate.inbox_items i ON i.submission_id=s.id;
 REVOKE ALL ON ALL TABLES IN SCHEMA gate_public FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION gate.public_profile(p_id text)
+RETURNS TABLE(id text,wallet text,"walletKind" text,availability gate.availability,ens text,message text,
+  "enrolledAt" timestamptz,"updatedAt" timestamptz)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT p.id,p.wallet,p.wallet_kind,p.availability,
+   CASE WHEN jsonb_typeof(p.display_cache->'ens')='string' THEN p.display_cache->>'ens' END,
+   CASE WHEN jsonb_typeof(p.display_cache->'message')='string' THEN p.display_cache->>'message' END,
+   p.enrolled_at,p.updated_at FROM gate.profiles p WHERE p.id=p_id
+$$;
+REVOKE ALL ON FUNCTION gate.public_profile(text) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.public_dao_policy(p_profile_id text,p_dao text)
+RETURNS TABLE("profileId" text,dao text,"chainId" text,enabled boolean,"acceptPreVote" boolean,
+  "acceptVoting" boolean,"attentionAmount" text,tags jsonb)
+LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT d.profile_id,d.dao,d.chain_id::text,d.enabled,d.accept_pre_vote,d.accept_voting,d.attention_amount::text,d.public_tags
+ FROM gate.dao_policies d WHERE d.profile_id=p_profile_id AND d.dao=p_dao
+$$;
+REVOKE ALL ON FUNCTION gate.public_dao_policy(text,text) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION gate.public_submission_receipt(p_public_id text)
 RETURNS TABLE(public_id text,state text,updated_at timestamptz,accepted_at timestamptz)
 LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,gate,gate_public AS $$
@@ -1372,6 +1435,8 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb,boolean) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.lock_issuance_profile_policy(text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.public_profile(text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.public_dao_policy(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.public_submission_receipt(text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,boolean,text,boolean,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.transition_notification(text,gate.notification_state,text,text) TO gavel_gate;
@@ -1380,6 +1445,8 @@ DO $$ BEGIN
   GRANT EXECUTE ON FUNCTION gate.fail_notification_attempt(text,text,text,timestamptz) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.reconcile_notification_attempt(text,text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.record_scanner_range(text,bigint,bigint,text,timestamptz,jsonb) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.scanner_range_prereads(text,bigint,bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.unsettled_settlement_observations(bigint,text,integer) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.release_expired_reservation(text,text) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce(text,bigint) TO gavel_gate;
@@ -1456,14 +1523,59 @@ LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public AS $runtime_migr
  FROM public.schema_migrations m WHERE m.version='gate/001_gate-v3'
 $runtime_migration_status$;
 REVOKE ALL ON FUNCTION gate.runtime_migration_status() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.runtime_privilege_audit()
+RETURNS TABLE(requirement text,granted boolean)
+LANGUAGE sql STABLE SET search_path=pg_catalog,gate AS $runtime_privilege_audit$
+ WITH required_schema(schema_name,privilege) AS (VALUES ('gate'::text,'USAGE'::text)),
+ required_table(relation,privilege) AS (VALUES
+   ('gate.auth_nonces','SELECT'),('gate.auth_sessions','SELECT'),
+   ('gate.capacity_reservations','SELECT'),('gate.capacity_reservations','INSERT'),('gate.capacity_reservations','UPDATE'),
+   ('gate.dao_policies','SELECT'),('gate.delivery_settings','SELECT'),
+   ('gate.inbox_items','SELECT'),('gate.inbox_items','INSERT'),('gate.inbox_items','UPDATE'),
+   ('gate.notification_attempts','SELECT'),('gate.notification_attempts','INSERT'),
+   ('gate.profiles','SELECT'),('gate.proposal_snapshots','SELECT'),('gate.proposal_snapshots','INSERT'),
+   ('gate.quotes','SELECT'),('gate.quotes','INSERT'),('gate.quotes','UPDATE'),
+   ('gate.rate_limit_events','SELECT'),('gate.sender_blocks','SELECT'),
+   ('gate.settlement_cursors','SELECT'),('gate.settlement_cursors','INSERT'),('gate.settlement_cursors','UPDATE'),
+   ('gate.settlement_reorg_monitors','SELECT'),('gate.settlement_reorg_monitors','INSERT'),('gate.settlement_reorg_monitors','UPDATE'),
+   ('gate.splitter_deployments','SELECT'),('gate.splitter_deployments','INSERT'),('gate.splitter_deployments','UPDATE'),
+   ('gate.submissions','SELECT'),('gate.submissions','INSERT'),('gate.submissions','UPDATE')
+ ), required_function(signature) AS (VALUES
+   ('gate.insert_auth_nonce(gate.auth_proof_type,gate.auth_purpose,gate.auth_role,text,text,bigint,text,text,text,bigint,bigint)'),
+   ('gate.consume_auth_nonce(text,bigint)'),('gate.lock_profile_auth_nonce(text)'),
+   ('gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint)'),
+   ('gate.set_delivery_setting(text,text,text)'),
+   ('gate.mutate_profile(text,text,text,gate.availability,jsonb,boolean,timestamp with time zone,boolean,text,boolean,jsonb,boolean)'),
+   ('gate.lock_issuance_profile_policy(text,text)'),('gate.public_profile(text)'),('gate.public_dao_policy(text,text)'),
+   ('gate.public_submission_receipt(text)'),
+   ('gate.transition_notification(text,gate.notification_state,text,boolean,text,boolean,integer)'),
+   ('gate.claim_notification_attempts(integer,integer,integer)'),('gate.complete_notification_attempt(text,text,text)'),
+   ('gate.fail_notification_attempt(text,text,text,timestamp with time zone)'),('gate.reconcile_notification_attempt(text,text,text)'),
+   ('gate.record_scanner_range(text,bigint,bigint,text,timestamp with time zone,jsonb)'),
+   ('gate.scanner_range_prereads(text,bigint,bigint)'),('gate.unsettled_settlement_observations(bigint,text,integer)'),
+   ('gate.release_expired_reservation(text,text)'),('gate.runtime_migration_status()'),('gate.runtime_privilege_audit()')
+ )
+ SELECT 'schema:'||schema_name||':'||privilege,has_schema_privilege('gavel_gate',schema_name,privilege)
+ FROM required_schema
+ UNION ALL
+ SELECT 'table:'||relation||':'||privilege,has_table_privilege('gavel_gate',relation,privilege)
+ FROM required_table
+ UNION ALL
+ SELECT 'function:'||signature||':EXECUTE',has_function_privilege('gavel_gate',signature,'EXECUTE')
+ FROM required_function
+$runtime_privilege_audit$;
+REVOKE ALL ON FUNCTION gate.runtime_privilege_audit() FROM PUBLIC;
+
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_gate') THEN
   GRANT EXECUTE ON FUNCTION gate.runtime_migration_status() TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.runtime_privilege_audit() TO gavel_gate;
  END IF;
 END $$;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v4-nouns-candidates',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v4-runtime-privilege-audit',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest
@@ -1477,13 +1589,14 @@ INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest
    'sha256:gate-001-v3-bound-delivery-settings',
    'sha256:gate-001-v3-runtime-readiness',
    'sha256:gate-001-v3-atomic-auth-session',
-   'sha256:gate-001-v4-nouns-candidates'
+   'sha256:gate-001-v4-nouns-candidates',
+   'sha256:gate-001-v4-runtime-privilege-audit'
  );
 DO $$ BEGIN
  IF NOT EXISTS (
    SELECT 1 FROM public.schema_migrations
    WHERE version='gate/001_gate-v3'
-     AND migration_checksum='sha256:gate-001-v4-nouns-candidates'
+     AND migration_checksum='sha256:gate-001-v4-runtime-privilege-audit'
      AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
  ) THEN
   RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';
