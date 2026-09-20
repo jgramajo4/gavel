@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
+import { isSessionForRole, openWalletSession } from '../wallet-session';
 import { MarkdownPitch } from '../components/MarkdownPitch';
 import { formatUsdc } from '../format';
 import {
@@ -8,6 +10,7 @@ import {
   MAX_EVIDENCE_URLS,
   MAX_PITCH_CODE_POINTS,
 } from '../gate-domain';
+import type { Eip1193Provider } from '../wallet';
 import type { DuplicateReceipt, PublicGateProfile, SubmissionReceipt, SubmissionRequest } from '../types';
 
 /**
@@ -65,12 +68,32 @@ function validateDraft(draft: {
 
 export interface SubmissionComposerProps {
   api: GateApi;
+  /** Target voter being lobbied — never the advocate/payer. */
   wallet: string;
+  /** Injected EIP-1193 provider used to obtain a `base_sender` session. */
+  provider: Eip1193Provider;
   onQuote?(receipt: SubmissionReceipt): void;
 }
 
-export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerProps) {
-  const { session } = useSession();
+function sessionUnexpired(expiry: string): boolean {
+  try {
+    return BigInt(expiry) > BigInt(Math.floor(Date.now() / 1000));
+  } catch {
+    return false;
+  }
+}
+
+export function SubmissionComposer({ api, wallet, provider, onQuote }: SubmissionComposerProps) {
+  const { session, setSession, clearSession } = useSession();
+  const { address, connect, noteConnected } = useWalletConnection();
+  const senderSession = isSessionForRole(session, 'base_sender') ? session : null;
+  const expiredSender = Boolean(senderSession && !sessionUnexpired(senderSession.session.expiry));
+  const authenticated = Boolean(
+    senderSession &&
+      !expiredSender &&
+      address &&
+      address.toLowerCase() === senderSession.session.wallet.toLowerCase(),
+  );
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
   const [proposalId, setProposalId] = useState('');
   const [position, setPosition] = useState('');
@@ -96,6 +119,10 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
     };
   }, [api, wallet]);
 
+  useEffect(() => {
+    if (expiredSender) clearSession();
+  }, [expiredSender, clearSession]);
+
   const policy = profile?.policies?.[0];
   const setEvidence = useCallback((index: number, value: string) => {
     setEvidenceUrls((current) => current.map((url, position) => (position === index ? value : url)));
@@ -117,12 +144,36 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
     [proposalId, position, pitch, disclosures, evidenceUrls],
   );
 
+  const authenticate = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const { account, verified } = await openWalletSession({
+        api,
+        provider,
+        role: 'base_sender',
+        account: address,
+      });
+      noteConnected(account);
+      setSession(verified);
+    } catch (cause: unknown) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Wallet sign-in failed. Nothing was signed and no session was created.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [api, provider, address, noteConnected, setSession]);
+
   const submit = useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
       setError(null);
       setNotice(null);
-      if (!session) {
+      if (!authenticated || !senderSession) {
         setError('Connect your wallet and sign in before requesting a quote.');
         return;
       }
@@ -133,11 +184,11 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
       }
       setBusy(true);
       try {
-        const result = await api.createSubmission(session.token, wallet, request);
+        const result = await api.createSubmission(senderSession.token, wallet, request);
         if ((result as DuplicateReceipt).state === 'duplicate') {
           const duplicate = result as DuplicateReceipt;
           // Frozen recovery path: resume the existing quote, never reissue.
-          const resumed = await api.resumeSubmission(session.token, duplicate.existing.resumeUrl);
+          const resumed = await api.resumeSubmission(senderSession.token, duplicate.existing.resumeUrl);
           if (!resumed) {
             setError('This submission already exists, but its quote could not be recovered.');
             return;
@@ -148,6 +199,11 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
         }
         onQuote?.(result as SubmissionReceipt);
       } catch (cause: unknown) {
+        if (cause instanceof GateApiError && cause.status === 401) {
+          clearSession();
+          setError('Your advocate session expired. Sign in with wallet again to request a quote.');
+          return;
+        }
         // The server is authoritative; its wording is shown as-is.
         setError(
           cause instanceof GateApiError
@@ -158,7 +214,7 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
         setBusy(false);
       }
     },
-    [api, session, wallet, request, proposalId, position, pitch, disclosures, evidenceUrls, onQuote],
+    [api, authenticated, senderSession, wallet, request, proposalId, position, pitch, disclosures, evidenceUrls, onQuote, clearSession],
   );
 
   return (
@@ -234,9 +290,19 @@ export function SubmissionComposer({ api, wallet, onQuote }: SubmissionComposerP
           </p>
         ) : null}
 
-        <button type="submit" disabled={busy}>
-          Request quote
-        </button>
+        {authenticated ? (
+          <button type="submit" disabled={busy}>
+            Request quote
+          </button>
+        ) : address ? (
+          <button type="button" disabled={busy} onClick={() => void authenticate()}>
+            {busy ? 'Waiting for your wallet…' : 'Sign in with wallet'}
+          </button>
+        ) : (
+          <button type="button" disabled={busy} onClick={() => void connect()}>
+            {busy ? 'Connecting…' : 'Connect wallet'}
+          </button>
+        )}
       </form>
 
       {/* Formatting is shown exactly as the allowlist will render it. Nothing

@@ -41,8 +41,8 @@ function ProfileRoute({ api }: { api: GateApi }) {
   return <GateProfile api={api} wallet={wallet} />;
 }
 
-function ComposerRoute({ api }: { api: GateApi }) {
-  const { wallet } = useParams();
+function ComposerRoute({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) {
+  const { wallet: voter } = useParams();
   const navigate = useNavigate();
   const onQuote = useCallback(
     (receipt: SubmissionReceipt) => {
@@ -52,8 +52,8 @@ function ComposerRoute({ api }: { api: GateApi }) {
     },
     [navigate],
   );
-  if (!wallet || !WALLET.test(wallet)) return <NotFound />;
-  return <SubmissionComposer api={api} wallet={wallet} onQuote={onQuote} />;
+  if (!voter || !WALLET.test(voter)) return <NotFound />;
+  return <SubmissionComposer api={api} wallet={voter} provider={wallet} onQuote={onQuote} />;
 }
 
 function CheckoutRoute({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) {
@@ -96,7 +96,7 @@ export function App({ api, wallet }: { api: GateApi; wallet: Eip1193Provider }) 
         <Routes>
           <Route path="/" element={<GateDirectory api={api} />} />
           <Route path="/gates/:wallet" element={<ProfileRoute api={api} />} />
-          <Route path="/gates/:wallet/compose" element={<ComposerRoute api={api} />} />
+          <Route path="/gates/:wallet/compose" element={<ComposerRoute api={api} wallet={wallet} />} />
           <Route path="/checkout/:publicId" element={<CheckoutRoute api={api} wallet={wallet} />} />
           <Route path="/inbox" element={<VoterInbox api={api} wallet={wallet} />} />
           <Route path="/enroll" element={<Enrollment api={api} wallet={wallet} />} />

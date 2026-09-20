@@ -200,6 +200,19 @@ export const profileSession: VerifiedSession = {
   session: { ...inboxSession.session, role: 'dao_profile' },
 };
 
+/** A `base_sender` session. The advocate/payer, never the target voter. */
+export const senderSession: VerifiedSession = {
+  token: 's'.repeat(43),
+  session: {
+    wallet: PAYER,
+    role: 'base_sender',
+    chainId: String(TEST_CHAIN_ID),
+    audience: 'gate',
+    issuedAt: '1',
+    expiry: '9999999999',
+  },
+};
+
 /** A Nouns proposal candidate seeking sponsorship: PRE_VOTE, no proposalId. */
 export const candidateInboxItem: InboxItem = {
   id: 'inbox-candidate',
