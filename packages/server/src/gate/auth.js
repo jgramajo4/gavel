@@ -401,15 +401,26 @@ function createAuthService(options = {}) {
     for (const proofId of proofIds) await transaction.consumeNonce(proofId, consumedAt);
   }
 
+  function expectedChainIdForRole(role) {
+    if (role === "base_sender") return String(base.chainId);
+    if (role === "dao_profile" || role === "dao_inbox") return String(dao.chainId);
+    return undefined;
+  }
+
   async function authenticateSession(token, requirements = {}) {
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("session unavailable");
     const row = await repository.getSessionByTokenHash(keccak256(toUtf8Bytes(token)));
     const now = BigInt(positiveSafeInteger(clock(), "clock"));
+    const expectedAudience = requirements.audience ?? audience;
+    const boundRole = requirements.role !== undefined ? requirements.role : row?.role;
+    const expectedChainId = requirements.chainId !== undefined
+      ? String(requirements.chainId)
+      : expectedChainIdForRole(boundRole);
     if (!row || row.revokedAt !== null || now >= BigInt(row.expiry)
         || (requirements.role !== undefined && row.role !== requirements.role)
-        || (requirements.audience !== undefined && row.audience !== requirements.audience)
+        || row.audience !== expectedAudience
         || (requirements.wallet !== undefined && row.wallet !== getAddress(requirements.wallet).toLowerCase())
-        || (requirements.chainId !== undefined && row.chainId !== String(requirements.chainId))) {
+        || (expectedChainId !== undefined && row.chainId !== expectedChainId)) {
       throw new Error("session unavailable");
     }
     const { tokenHash: _tokenHash, revokedAt: _revokedAt, ...session } = row;
