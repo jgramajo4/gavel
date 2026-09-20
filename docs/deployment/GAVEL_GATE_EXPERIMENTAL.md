@@ -34,13 +34,18 @@ chmod 600 .env .env.server.local
 Edit `.env.server.local` and replace every placeholder. For Compose, set:
 
 ```text
-GAVEL_GATE_DATABASE_URL=postgres://gavel_gate:<URL-ENCODED-gate-role-password>@postgres:5432/gavel
+# Production and staging must be different databases. Example names:
+# postgres://gavel_gate:<URL-ENCODED-gate-role-password>@postgres:5432/gavel_gate_production
+# postgres://gavel_gate:<URL-ENCODED-gate-role-password>@postgres:5432/gavel_gate_staging
+GAVEL_GATE_DATABASE_URL=postgres://gavel_gate:<URL-ENCODED-gate-role-password>@postgres:5432/gavel_gate_production
 GAVEL_GATE_INDEX_URL=<reachable canonical index origin>
 GAVEL_GATE_HOST=0.0.0.0
 GAVEL_GATE_PORT=8080
 ```
 
-Use an exact URL-encoded database password. Keep `GAVEL_GATE_NOTIFIER_MODE=disabled` and leave all AgentMail/encryption variables absent unless notification activation is explicitly approved. Disabled mode rejects even empty provider variables, so do not add blank `AGENTMAIL_*` or `GAVEL_GATE_ENCRYPTION_KEY` entries.
+Use an exact URL-encoded database password. Staging and production must use **different** `GAVEL_GATE_DATABASE_URL` values — do not share one Postgres database, and do not delete `gate.splitter_deployments` rows to fake isolation. Follow `docs/deployment/GAVEL_GATE_ENVIRONMENT_ISOLATION.md` in order: split databases, copy legitimate state, verify production data, switch services, then set `GAVEL_GATE_ENFORCE_ENVIRONMENT_ISOLATION=enforced`. Leave it `disabled` (or unset) until that cutover is done.
+
+Keep `GAVEL_GATE_NOTIFIER_MODE=disabled` and leave all AgentMail/encryption variables absent unless notification activation is explicitly approved. Disabled mode rejects even empty provider variables, so do not add blank `AGENTMAIL_*` or `GAVEL_GATE_ENCRYPTION_KEY` entries.
 
 For Base Sepolia, use exactly `GAVEL_GATE_ENVIRONMENT=test`, chain `84532`, the verified test EIP-3009 token, and a nonblank `GAVEL_GATE_TEST_TOKEN_LABEL`. Production accepts only Base `8453` and canonical native USDC.
 

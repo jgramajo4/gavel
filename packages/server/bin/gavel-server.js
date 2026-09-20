@@ -61,6 +61,77 @@ function integer(value, name, fallback, minimum = 1, maximum = 65_535) {
   return result;
 }
 
+function isolationEnforcementFromEnv(env = process.env) {
+  const raw = env.GAVEL_GATE_ENFORCE_ENVIRONMENT_ISOLATION;
+  if (raw === undefined || raw === "") return "disabled";
+  if (raw === "disabled" || raw === "enforced") return raw;
+  throw new TypeError("GAVEL_GATE_ENFORCE_ENVIRONMENT_ISOLATION must be exactly disabled or enforced");
+}
+
+function sameAddress(left, right) {
+  return typeof left === "string" && typeof right === "string" && left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * One Gate database per environment.
+ *
+ * Profiles are not scoped by environment, so a shared database publishes and
+ * overwrites enrollments across staging and production. This guard only reads
+ * immutable splitter-deployment identity. It never deletes those rows.
+ *
+ * Enforcement is explicit. Deploy this code with isolation disabled, split the
+ * databases, switch services, then set GAVEL_GATE_ENFORCE_ENVIRONMENT_ISOLATION
+ * to enforced. Enabling it against a still-shared database will refuse to boot.
+ */
+async function assertEnvironmentIsolation(pool, settlement) {
+  if (!pool || typeof pool.query !== "function") throw new TypeError("database pool is required");
+  const environment = settlement?.environment;
+  const chainId = String(settlement?.chainId ?? "");
+  if (!environment || !chainId) throw new TypeError("settlement environment and chain are required");
+  const enforcement = settlement?.enforcement;
+  if (enforcement !== "disabled" && enforcement !== "enforced") {
+    throw new TypeError("isolation enforcement must be exactly disabled or enforced");
+  }
+  const configuredSplitter = settlement?.splitter;
+  if (enforcement === "enforced" && (typeof configuredSplitter !== "string" || !configuredSplitter)) {
+    throw new TypeError("enforced isolation requires the configured splitter");
+  }
+
+  const rows = (await pool.query(`SELECT config->>'environment' AS environment,chain_id::text AS "chainId",
+    splitter,issuance_active AS "issuanceActive"
+    FROM gate.splitter_deployments ORDER BY 1,2,3`)).rows;
+  const labeled = (value) => (typeof value === "string" && value !== "" ? value : "unlabeled");
+  const foreign = rows.filter((row) => labeled(row.environment) !== environment || row.chainId !== chainId);
+  const inventory = Object.freeze({
+    environment,
+    chainId,
+    enforcement,
+    deployments: rows.length,
+    foreign: foreign.length,
+  });
+  if (enforcement === "disabled") return inventory;
+  if (foreign.length > 0) {
+    const found = foreign.map((row) => `${labeled(row.environment)}/${row.chainId}`).join(", ");
+    throw new Error(`Gate database is shared with another environment: this process is ${environment}/${chainId} `
+      + `but the database also holds ${found}. Gate profiles are not scoped by environment, so these deployments `
+      + "would publish each other's Gates in the public directory and overwrite each other's enrollments. "
+      + "Give each environment its own database before starting.");
+  }
+  if (rows.length > 0) {
+    const known = rows.filter((row) => sameAddress(row.splitter, configuredSplitter));
+    if (known.length === 0) {
+      throw new Error("Gate database has no splitter deployment matching this process. "
+        + "Refuse to start rather than issue quotes against a foreign splitter.");
+    }
+    const active = rows.filter((row) => row.issuanceActive === true);
+    if (active.length > 0 && !active.some((row) => sameAddress(row.splitter, configuredSplitter))) {
+      throw new Error("Gate database issuance is active for a different splitter than this process. "
+        + "Refuse to start rather than issue quotes against a foreign splitter.");
+    }
+  }
+  return Object.freeze({ ...inventory, foreign: 0 });
+}
+
 function serverConfigFromEnv(env = process.env) {
   const settlement = settlementRuntimeConfigFromEnv(env);
   if (!settlement) throw new TypeError("complete Gate settlement configuration is required");
@@ -74,6 +145,7 @@ function serverConfigFromEnv(env = process.env) {
   const corsOrigins = corsOriginsFromEnv(env);
   return Object.freeze({
     settlement,
+    isolationEnforcement: isolationEnforcementFromEnv(env),
     databaseUrl: env.GAVEL_GATE_DATABASE_URL,
     baseRpcUrl: env.GAVEL_GATE_BASE_RPC_URL,
     ethereumRpcUrl: env.GAVEL_GATE_ETHEREUM_RPC_URL,
@@ -218,8 +290,14 @@ async function composeProduction(env) {
   const store = new PostgresGateStore({ connectionString: config.databaseUrl,
     baseCodeReader: ({ wallet }) => baseClient.getCode(wallet) });
   try {
+    await assertEnvironmentIsolation(store.pool, {
+      environment: config.settlement.environment,
+      chainId: config.settlement.chainId,
+      splitter: config.settlement.splitter,
+      enforcement: config.isolationEnforcement,
+    });
     const source = createCanonicalIndexSource({ baseUrl: config.indexUrl, ethereumProvider: ethereumClient.provider });
-  const indexClient = createNounsIndexClient({ source, freshnessMs: config.freshnessMs, observability });
+    const indexClient = createNounsIndexClient({ source, freshnessMs: config.freshnessMs, observability });
   const authService = createAuthService({
     repository: store, audience: config.audience,
     base: { chainId: Number(config.settlement.chainId), verifier: config.baseVerifier },
@@ -349,4 +427,13 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { assertDatabaseReady, bounded, createCanonicalIndexSource, createRpcClient, serverConfigFromEnv, startGateServer };
+module.exports = {
+  assertDatabaseReady,
+  assertEnvironmentIsolation,
+  bounded,
+  createCanonicalIndexSource,
+  createRpcClient,
+  isolationEnforcementFromEnv,
+  serverConfigFromEnv,
+  startGateServer,
+};
