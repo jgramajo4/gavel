@@ -123,6 +123,55 @@ async function assertDatabaseReady(pool) {
   return Object.freeze({ role: row.currentUser, migration: "gate/001_gate-v3" });
 }
 
+/**
+ * Refuses a Gate database that is shared with another environment.
+ *
+ * `gate.profiles` carries no environment, deployment, or settlement-chain
+ * column, and the directory read filters on DAO and availability alone:
+ *
+ *   FROM gate.profiles p LEFT JOIN gate.dao_policies d ON d.profile_id=p.id
+ *   WHERE (d.dao=$1) AND (p.availability=$2)
+ *
+ * So every enrollment in a database is visible to every API process pointed at
+ * it, whatever chain or environment that process is configured for. `wallet` is
+ * additionally UNIQUE, so two environments do not merely see each other's
+ * Gates — they share one mutable row per wallet, and the later enrollment wins.
+ *
+ * One database per environment is therefore a load-bearing assumption of the
+ * schema rather than a deployment preference, and nothing enforced it. This
+ * does, at startup, before the API can serve a directory.
+ *
+ * Splitter rotation is untouched: several deployments may coexist, and the
+ * experimental rotation runbook requires exactly that while the old splitter
+ * drains. What is refused is a *foreign* one — production and test sharing a
+ * database. Environment and chain are already 1:1 (`settlementRuntimeConfigFromEnv`
+ * pins production to 8453 and test to 84532), and both are checked so the
+ * refusal can name what it found.
+ *
+ * This changes no ownership or authentication semantics: it reads one table and
+ * decides whether to boot. Who may write a profile is still the `dao_profile`
+ * session wallet with a matching `GateEnrollment` signature, unchanged.
+ */
+async function assertEnvironmentIsolation(pool, settlement) {
+  if (!pool || typeof pool.query !== "function") throw new TypeError("database pool is required");
+  const environment = settlement?.environment;
+  const chainId = String(settlement?.chainId ?? "");
+  if (!environment || !chainId) throw new TypeError("settlement environment and chain are required");
+
+  const rows = (await pool.query(`SELECT DISTINCT config->>'environment' AS environment,chain_id::text AS "chainId"
+    FROM gate.splitter_deployments ORDER BY 1,2`)).rows;
+  const foreign = rows.filter((row) => row.environment !== environment || row.chainId !== chainId);
+  if (foreign.length === 0) return Object.freeze({ environment, chainId, deployments: rows.length });
+
+  // Deployment environments and chain IDs are configuration, not secrets, so
+  // naming them is what makes this failure fixable instead of mysterious.
+  const found = foreign.map((row) => `${row.environment ?? "unlabeled"}/${row.chainId}`).join(", ");
+  throw new Error(`Gate database is shared with another environment: this process is ${environment}/${chainId} `
+    + `but the database also holds ${found}. Gate profiles are not scoped by environment, so these deployments `
+    + "would publish each other's Gates in the public directory and overwrite each other's enrollments. "
+    + "Give each environment its own database before starting.");
+}
+
 async function fetchJson(fetchImpl, url, timeoutMs = 2_000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -217,6 +266,9 @@ async function composeProduction(env) {
   const store = new PostgresGateStore({ connectionString: config.databaseUrl,
     baseCodeReader: ({ wallet }) => baseClient.getCode(wallet) });
   try {
+    // Before anything else is composed, prove this database belongs to this
+    // environment alone. See assertEnvironmentIsolation.
+    await assertEnvironmentIsolation(store.pool, config.settlement);
     const source = createCanonicalIndexSource({ baseUrl: config.indexUrl, ethereumProvider: ethereumClient.provider });
   const indexClient = createNounsIndexClient({ source, freshnessMs: config.freshnessMs, observability });
   const authService = createAuthService({
@@ -343,4 +395,5 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { assertDatabaseReady, bounded, createCanonicalIndexSource, createRpcClient, serverConfigFromEnv, startGateServer };
+module.exports = { assertDatabaseReady, assertEnvironmentIsolation, bounded, createCanonicalIndexSource,
+  createRpcClient, serverConfigFromEnv, startGateServer };
