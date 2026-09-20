@@ -15,6 +15,7 @@ test("CI makes PostgreSQL 16 Gate integration mandatory with a disposable databa
   assert.match(workflow, /node --test --test-concurrency=1/);
   assert.match(workflow, /gate-store-postgres\.test\.js/);
   assert.match(workflow, /durable-persistence\.test\.js/);
+  assert.match(workflow, /auth-session-environment\.test\.js/);
   assert.match(workflow, /status=\$\?/);
   assert.match(workflow, /\[ "\$status" -ne 0 \]/);
   assert.match(workflow, /# skipped \[1-9\]/);
