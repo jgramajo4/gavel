@@ -77,14 +77,32 @@ function publicPolicy(policy) {
     tags: Array.isArray(policy.tags) ? policy.tags.filter((tag) => typeof tag === "string") : [],
   };
 }
-function publicProfile(profile, policy, power) {
+/**
+ * The `ens` label this projection publishes for a wallet.
+ *
+ * A verified reverse resolution wins whenever one could be performed, including
+ * a verified miss: `unnamed` publishes `null` rather than letting a wallet's
+ * own self-declared `publicDisplay.ens` stand in as an identity it never
+ * proved. The stored display value survives only where no resolution happened
+ * at all — no resolver configured, or the RPC was unreachable — which keeps a
+ * deployment without a mainnet endpoint behaving exactly as it did before.
+ */
+function displayEns(profile, resolvedEns) {
+  if (resolvedEns?.status === "named") return { ens: resolvedEns.name };
+  if (resolvedEns?.status === "unnamed") return { ens: null };
+  return typeof profile.display?.ens === "string" || profile.display?.ens === null
+    ? { ens: profile.display.ens }
+    : {};
+}
+
+function publicProfile(profile, policy, power, resolvedEns) {
   const accepting = profile.availability === "accepting_now"
     && policy?.dao === "nouns" && policy.enabled === true
     && (policy.acceptPreVote === true || policy.acceptVoting === true)
     && profile.acceptingSubmissions === true;
   const result = {
     wallet: address(profile.wallet, "profile wallet"),
-    ...(typeof profile.display?.ens === "string" || profile.display?.ens === null ? { ens: profile.display.ens } : {}),
+    ...displayEns(profile, resolvedEns),
     availability: profile.availability,
     acceptingSubmissions: accepting,
     ...(typeof profile.display?.message === "string" || profile.display?.message === null ? { message: profile.display.message } : {}),
@@ -97,21 +115,36 @@ function publicProfile(profile, policy, power) {
 }
 
 function createProfileService({ repository, authService, indexClient, baseChainId, encryptDestination,
-  clock = () => new Date() } = {}) {
+  ensResolver = null, clock = () => new Date() } = {}) {
   if (!repository || typeof repository.withProfileTransaction !== "function") throw new TypeError("repository.withProfileTransaction is required");
   if (!authService || typeof authService.verifyProfileProofs !== "function" || typeof authService.consumeProfileProofs !== "function") {
     throw new TypeError("authService profile proof methods are required");
   }
   if (!indexClient || typeof indexClient.getVotingPower !== "function") throw new TypeError("indexClient.getVotingPower is required");
+  if (ensResolver !== null && typeof ensResolver?.resolve !== "function") {
+    throw new TypeError("ensResolver must expose resolve()");
+  }
   const configuredBaseChainId = String(baseChainId ?? "");
   if (!UINT.test(configuredBaseChainId) || BigInt(configuredBaseChainId) < 1n) {
     throw new TypeError("baseChainId must be an explicit positive chain ID");
   }
 
+  /**
+   * ENS is decoration, so a resolver that misbehaves must not fail a read. The
+   * resolver caches, which is what keeps a 50-row directory page to at most 50
+   * lookups per TTL rather than one per request.
+   */
+  async function resolveEns(wallet) {
+    if (!ensResolver) return null;
+    try { return await ensResolver.resolve(wallet); }
+    catch { return null; }
+  }
+
   async function decorate(profile, suppliedPolicy) {
-    const [policy, power] = await Promise.all([
+    const [policy, power, resolvedEns] = await Promise.all([
       suppliedPolicy || repository.getPolicy(profile.id, "nouns"),
       indexClient.getVotingPower(profile.wallet),
+      resolveEns(profile.wallet),
     ]);
     const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true
       && (policy.acceptPreVote === true || policy.acceptVoting === true);
@@ -121,14 +154,14 @@ function createProfileService({ repository, authService, indexClient, baseChainI
       try { acceptingSubmissions = await repository.isProfileAccepting(profile.id, "nouns") === true; }
       catch { acceptingSubmissions = false; }
     }
-    return publicProfile({ ...profile, acceptingSubmissions }, policy, power);
+    return publicProfile({ ...profile, acceptingSubmissions }, policy, power, resolvedEns);
   }
 
   return Object.freeze({
     withDestinationEncryption(boundEncryptDestination) {
       if (typeof boundEncryptDestination !== "function") throw new TypeError("destination encryption is required");
       return createProfileService({ repository, authService, indexClient, baseChainId: configuredBaseChainId,
-        encryptDestination: boundEncryptDestination, clock });
+        encryptDestination: boundEncryptDestination, ensResolver, clock });
     },
 
     async listPublicProfiles({ dao = "nouns", availability = "accepting_now", minVotingPower, sort = "recent" } = {}) {
@@ -147,12 +180,13 @@ function createProfileService({ repository, authService, indexClient, baseChainI
         if (profiles.length > DIRECTORY_LIMIT) throw new TypeError("repository.listProfiles exceeded its requested limit");
         const page = (await Promise.all(profiles.map(async (profile, index) => {
           if (profile.availability !== "accepting_now") return null;
-          const [policy, power, acceptingSubmissions] = await Promise.all([
+          const [policy, power, acceptingSubmissions, resolvedEns] = await Promise.all([
             repository.getPolicy(profile.id, "nouns"),
             indexClient.getVotingPower(profile.wallet),
             typeof repository.isProfileAccepting === "function"
               ? repository.isProfileAccepting(profile.id, "nouns").catch(() => false)
               : false,
+            resolveEns(profile.wallet),
           ]);
           assertDecimal(power.amount, "governance power");
           const hasVotingPolicy = policy?.dao === "nouns" && policy.enabled === true
@@ -161,7 +195,7 @@ function createProfileService({ repository, authService, indexClient, baseChainI
               || (minVotingPower !== undefined && BigInt(power.amount) < BigInt(minVotingPower))) return null;
           return {
             profile,
-            result: publicProfile({ ...profile, acceptingSubmissions: true }, policy, power),
+            result: publicProfile({ ...profile, acceptingSubmissions: true }, policy, power, resolvedEns),
             power: BigInt(power.amount),
             sequence: scanned + index,
           };

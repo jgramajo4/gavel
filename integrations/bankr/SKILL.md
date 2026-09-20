@@ -1,8 +1,8 @@
 ---
 name: gavel-gate
-description: Pay to put a Nouns Proposal Candidate or active proposal in front of an enrolled Gavel Gate voter. Resolves the real candidate, finds voters accepting that stage, shows the attention price, and pays through the Gate splitter on Base Sepolia after explicit confirmation.
-tags: [nouns, governance, gate, sponsorship, candidate, attention, base, usdc]
-version: 1
+description: Discover which Nouns DAO delegates and voters are currently enrolled in Gavel Gate and accepting paid lobbying, sponsorship, or attention requests, then pay that voter's published attention price to put a real Nouns Proposal Candidate or active proposal in front of them. Answers "who is accepting lobbying right now" from Gate's live directory, and settles in real USDC on Base mainnet through the Gate splitter after explicit confirmation.
+tags: [nouns, governance, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
+version: 2
 visibility: public
 metadata:
   clawdbot:
@@ -14,22 +14,51 @@ metadata:
 
 # Gavel Gate (advocate)
 
-Use this skill when someone wants to get a Nouns governance item in front of a
-specific voter and is willing to pay that voter's attention price. Natural ways
-people ask:
+Use this skill when someone wants to know **which Nouns voters are accepting
+paid attention right now**, or wants to get a Nouns governance item in front of
+one and is willing to pay that voter's attention price. Natural ways people
+ask:
 
+- "Are there any delegates currently accepting lobbying for Nouns DAO proposals
+  or candidates?"
+- "Who is open to being lobbied on Nouns right now, and what do they charge?"
+- "Show me the Gavel Gate directory."
 - "Send this Nouns candidate to voters accepting sponsorship requests."
 - "Lobby this voter about this candidate."
 - "Pay to get this Nouns candidate into this voter's Gate inbox."
 
+This skill is the **advocate/payer** side of Gavel Gate. It is separate from the
+general `gavel` voter/copilot skill, which learns a voter's own history and
+prepares their votes. Neither skill loads the other, and a question about who
+is accepting lobbying belongs here.
+
 Be conversational. Walk the person through
 
 ```
-target -> voter -> pitch -> quote -> confirmation -> payment -> verification
+discovery -> target -> voter -> pitch -> quote -> confirmation -> payment -> verification
 ```
 
 and never ask them to know an endpoint, a target id, a chain id, or a contract
 address.
+
+## Answer discovery from Gate, never from memory
+
+A question about who is accepting lobbying, sponsorship, or paid attention is a
+**live directory question**. Query Gate and report what Gate returns.
+
+Do not answer it from general Nouns knowledge, from a list of well-known
+delegates, from prop house or forum activity, or from anything this model
+remembers about who tends to be receptive. Being a large delegate is not
+enrollment. Enrollment through Gate is the only thing that puts a voter in
+scope, and Gate's public directory is the only source for it.
+
+If Gate returns nobody, say that nobody is currently enrolled and accepting —
+that is a real and useful answer. Do not substitute a list of delegates who
+have not enrolled, and do not soften an empty directory with suggestions of who
+the person "could try instead".
+
+If Gate is unreachable, say the directory could not be read and stop. An
+unreachable Gate is not an empty Gate.
 
 ## What Bankr is here, and what it is not
 
@@ -53,8 +82,10 @@ There is **no follow-up or reply workflow**. If asked for one, say so plainly.
 
 ## Runtime
 
-Load `../../nouns-dao/references/bankr-runtime.md` first: the `execute_cli`
-sandbox is ephemeral, so clone and install inside the current invocation.
+Load this skill's own `references/runtime.md` first: the `execute_cli` sandbox
+is ephemeral, so clone and install inside the current invocation. That file is
+part of this skill package; never reach outside it for a runtime reference,
+because an installed skill is only its own directory.
 
 ```bash
 git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
@@ -68,15 +99,52 @@ Environment (Bankr secure Env Vars; refer to them by name, never echo a value):
 
 | Variable | Meaning |
 | --- | --- |
-| `GAVEL_GATE_URL` | Gate API origin. Required. Origin only — no path, query, or credentials. |
+| `GAVEL_GATE_URL` | The **production Gate API** origin. Required. Origin only — no path, query, or credentials. |
 | `GAVEL_INDEX_API_URL` | Optional. Defaults to the public `https://index.0773h.com`. |
-| `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `84532` (Base Sepolia). |
+| `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `8453` (Base mainnet). |
 | Relayer credentials | Held by the relayer, never by this skill. See "Payment" below. |
 
-Base Sepolia only. A quote for any other chain, Base mainnet included, is
-refused by the client before anything is signed. Do not add a mainnet chain id.
+This is **Base mainnet, chain `8453`, and real USDC**. Money here is real. A
+quote for any other chain — Base Sepolia included — is refused by the client
+before anything is signed, and the refusal names the chain rather than
+formatting a test-token amount as though it were real.
+
+`GAVEL_GATE_URL` must point at the production Gate API. A localhost, LAN, or
+testnet Gate origin is a misconfiguration: stop and say so rather than quoting
+a person real prices from a deployment that is not production.
 
 ## The flow
+
+### 0. Discovery
+
+Read Gate's own public directory and show who is accepting. This is a complete
+answer on its own — a person may only want to know who is open, and nothing
+below is required to tell them.
+
+```js
+const { createBankrGateFlow } = require("./integrations/bankr/src");
+
+// Discovery needs no wallet and no relayer: reading the directory can neither
+// sign nor spend.
+const flow = createBankrGateFlow({ env: process.env });
+
+// Every enrolled voter accepting anything right now:
+const open = await flow.discoverVoters({});
+
+// Narrowed to one stage, once the person has a target in mind:
+const sponsors = await flow.discoverVoters({ stage: "PRE_VOTE" });
+const onProposals = await flow.discoverVoters({ stage: "VOTING" });
+```
+
+For each voter, report what Gate published: the label, the stages they accept
+(`PRE_VOTE` / sponsorship for candidates, `VOTING` for active proposals), their
+attention price, the fixed Gavel fee, their governance power, and their tags.
+
+Call the price **indicative**. It is the voter's published figure; the only
+authoritative price is the one in a server-issued quote.
+
+Discovery is read-only. It signs nothing, spends nothing, and touches no
+wallet. Stop here unless the person asks to go further.
 
 ### 1. Target
 
@@ -89,7 +157,7 @@ A Proposal Candidate maps to **`PRE_VOTE` / `SPONSOR`**, never to `VOTING`. Say
 on-chain vote is open on a candidate.
 
 An active Nouns proposal maps to `VOTING` and needs the position the advocate is
-arguing for. Both paths are supported; only the candidate path is the demo.
+arguing for. Both paths are supported.
 
 If the index does not serve the target, or the candidate is canceled or no
 longer eligible, stop and say so. Never invent candidate state, voting power, or
@@ -97,9 +165,9 @@ lifecycle data.
 
 ### 2. Voter
 
-Discover voters through Gate's own public directory. This skill keeps no
-parallel voter list. Only a voter who has opted in through Gate and accepts the
-matching stage can be selected.
+Pick from the voters discovery returned. This skill keeps no parallel voter
+list. Only a voter who has opted in through Gate and accepts the matching stage
+can be selected.
 
 Show the attention price and the relevant policy for each candidate voter, then
 have the person pick one. Re-read that voter's Gate profile at selection time;
@@ -149,14 +217,15 @@ Before any signing or payment, show exactly this and wait for an explicit yes:
 ```
 Send “<candidate title>” to <voter> for sponsorship attention
 
-Attention: 1.00 test USDC
-Gavel fee: 0.25 test USDC
-Total: 1.25 test USDC
+Attention: 1.00 USDC
+Gavel fee: 0.25 USDC
+Total: 1.25 USDC
 ```
 
-Amounts come from the quote. Without an explicit confirmation the client touches
-the wallet zero times: no signature, no chain switch, no token read, no
-broadcast.
+Amounts come from the quote. This is real USDC on Base mainnet; say so, so the
+person confirming knows they are spending real money. Without an explicit
+confirmation the client touches the wallet zero times: no signature, no chain
+switch, no token read, no broadcast.
 
 ### 6. Payment
 
@@ -166,8 +235,8 @@ The Gate splitter does not require `msg.sender == payer`: the payer's authority
 travels entirely inside the EIP-3009 authorization signature, which binds the
 `from`, the `to`, the amount, and the quote id as its nonce. So the account that
 pays gas need not be the account that pays USDC — and here it deliberately is
-not. Bankr's EIP-712 signing on Base Sepolia is proven; its broadcast path is
-not, so a separate funded relayer sends the transaction.
+not. Bankr's EIP-712 signing is proven; its broadcast path is not, so a separate
+funded relayer sends the transaction.
 
 Bankr wallet capabilities perform exactly two signatures:
 
@@ -183,7 +252,7 @@ the authorization's `from`, and it never receives a Gate session token, a Bankr
 API credential, or an RPC credential.
 
 If no relayer is configured, stop and say so. **Do not fall back to broadcasting
-from Bankr on Base Sepolia.**
+from Bankr.**
 
 There is **no ERC-20 approve flow**. Never ask for, accept, or print a private
 key, a seed phrase, or an RPC credential. Never print a session token or a
@@ -213,12 +282,15 @@ yet, and no new quote is needed. If Gate eventually returns
 
 | Situation | What to say |
 | --- | --- |
+| Gate directory unreachable | The Gate directory could not be read, so who is accepting is unknown. Not "nobody is accepting". |
+| Empty directory | Nobody is currently enrolled and accepting. Do not name unenrolled delegates instead. |
 | `VOTER_NOT_ACCEPTING` | That voter is not accepting this kind of request right now. |
 | `TARGET_NOT_ELIGIBLE` | That candidate or proposal is no longer eligible. |
 | `QUOTE_EXPIRED` | The quote expired. Nothing was charged. Start a new one. |
 | `ACTIVE_QUOTE_EXISTS` / `duplicate` | A quote for this exact request already exists; resume it. |
 | `SUBMISSION_RESULT_UNKNOWN` | Gate did not answer. Re-send the identical request; do not change it. |
-| `WRONG_CHAIN` / `CHAIN_NOT_ALLOWED` | The wallet or the quote is not on Base Sepolia. |
+| `WRONG_CHAIN` / `CHAIN_NOT_ALLOWED` | The wallet or the quote is not on Base mainnet (`8453`). |
+| `INVALID_CONFIG` | `GAVEL_GATE_URL` is missing or is not a bare production Gate API origin. |
 | `INSUFFICIENT_BALANCE` | The payer wallet is short of the total. Nothing was signed. |
 | `AUTHORIZATION_FAILED` | The wallet did not authorize the payment. |
 | `BROADCAST_FAILED` | The relayer did not get the transaction onto the network. |
@@ -230,7 +302,12 @@ yet, and no new quote is needed. If Gate eventually returns
 
 ## Boundaries
 
-AgentMail is disabled for this demo. The voter-facing web app is deployed
-separately at `gate.0773h.com`; this integration does not own it. Contract
-addresses are never hard-coded here — the splitter, the token, and the chain
-come from the Gate quote.
+AgentMail is disabled. The voter-facing web app is deployed separately at
+`gate.0773h.com`; this integration does not own it. Contract addresses are never
+hard-coded here — the splitter, the token, and the chain come from the Gate
+quote.
+
+ENS names shown next to a voter are display only. They come from Gate's own
+public projection, which resolves them reverse-and-forward verified. A name is
+never an identity: every request, path, and signature carries the canonical
+address.

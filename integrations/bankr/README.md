@@ -101,14 +101,16 @@ and each step is a call into Gate's own surfaces:
   returning the authoritative `accepted` means the request reached the voter's
   private Gate inbox.
 
-Base Sepolia only. `GAVEL_GATE_CHAIN_IDS` defaults to `84532` and the client
-refuses a quote for any other chain before anything is signed. Splitter, token,
-and chain are read from the Gate quote and are never hard-coded here.
+Base mainnet, real USDC. `GAVEL_GATE_CHAIN_IDS` defaults to `8453` and the
+client refuses a quote for any other chain — Base Sepolia included — before
+anything is signed, naming the chain rather than formatting a test-token amount
+as though it were real. Splitter, token, and chain are read from the Gate quote
+and are never hard-coded here.
 
-Configure `GAVEL_GATE_URL` (Gate API origin) and, optionally,
+Configure `GAVEL_GATE_URL` (the production Gate API origin) and, optionally,
 `GAVEL_INDEX_API_URL`. Refer to these by name; never echo a value. The
 voter-facing web app is deployed separately at `gate.0773h.com` and is not owned
-by this integration. AgentMail is disabled for this demo.
+by this integration. AgentMail is disabled.
 
 Run the focused suite with:
 

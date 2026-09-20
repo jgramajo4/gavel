@@ -26,7 +26,7 @@ test("the tx hash is submitted to Gate as a settlement HINT only", async () => {
     },
   ]);
   const result = await submitSettlementHint({
-    gateApi: api, token: TOKEN, publicId: PUBLIC_ID, txHash: TX_HASH, chainId: "84532",
+    gateApi: api, token: TOKEN, publicId: PUBLIC_ID, txHash: TX_HASH, chainId: "8453",
   });
 
   assert.equal(result.hint, true);
@@ -35,7 +35,7 @@ test("the tx hash is submitted to Gate as a settlement HINT only", async () => {
   assert.equal(result.state, "pending_settlement");
   assert.match(result.message, /independently verifying/);
 
-  assert.deepEqual(JSON.parse(calls[0].body), { txHash: TX_HASH, chainId: "84532" });
+  assert.deepEqual(JSON.parse(calls[0].body), { txHash: TX_HASH, chainId: "8453" });
   assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
 });
 
@@ -114,7 +114,7 @@ test("an expired quote reported by the settlement endpoint surfaces as EXPIRED",
     },
   ]);
   await assert.rejects(
-    submitSettlementHint({ gateApi: api, token: TOKEN, publicId: PUBLIC_ID, txHash: TX_HASH, chainId: "84532" }),
+    submitSettlementHint({ gateApi: api, token: TOKEN, publicId: PUBLIC_ID, txHash: TX_HASH, chainId: "8453" }),
     (error) => error.code === "EXPIRED" && error.state === "expired",
   );
 });

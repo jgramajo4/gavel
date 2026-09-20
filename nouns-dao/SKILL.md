@@ -28,6 +28,20 @@ prepare a vote for review, cast a confirmed vote, or delegate voting power.
 Load `references/supported-daos.md` whenever selecting a DAO, interpreting its
 choices, or preparing a non-Nouns transaction.
 
+## Do not use this skill when
+
+Paid governance attention is a **separate skill**, `gavel-gate` (the Gavel Gate
+advocate). Anything about which delegates or voters are enrolled in Gavel Gate
+and accepting lobbying, sponsorship, or paid attention — who is accepting right
+now, what they charge, browsing the Gate directory, or paying to put a
+candidate or proposal in front of one — belongs there, not here.
+
+That question is answered from Gate's live directory. This skill has no Gate
+directory, so do not answer it from general Nouns knowledge or from a list of
+well-known delegates. Say the Gavel Gate advocate skill handles it and stop.
+The two skills stay separate: neither loads the other, and this one never
+reaches into the advocate's payment flow.
+
 ## Non-negotiable boundaries
 
 1. Historical onchain behavior is evidence. Never edit it to match a correction.

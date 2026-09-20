@@ -16,8 +16,8 @@ test("Gate and index origins are required and credential-free", () => {
   }
 });
 
-test("Base Sepolia is the only chain allowed by default", () => {
-  assert.deepEqual([...resolveConfig({ GAVEL_GATE_URL: "https://gate.example" }).allowedChainIds], [84532]);
+test("Base mainnet is the only chain allowed by default", () => {
+  assert.deepEqual([...resolveConfig({ GAVEL_GATE_URL: "https://gate.example" }).allowedChainIds], [8453]);
 });
 
 test("no contract address, token, fee, or price is configurable here", () => {

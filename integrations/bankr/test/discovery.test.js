@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 
 const { createGateApi } = require("../src/gate-api");
 const { assertVoterAccepts, discoverVoters, projectVoter, selectVoter } = require("../src/discovery");
-const { BASE_SEPOLIA, VOTER, createFetchStub, gateProfile } = require("./helpers");
+const { BASE_MAINNET, VOTER, createFetchStub, gateProfile } = require("./helpers");
 
 function gateApiFor(routes) {
   const { fetchImpl, calls } = createFetchStub(routes);
@@ -16,7 +16,7 @@ test("discovery reads Gate's own public directory, not a parallel voter list", a
   const { api, calls } = gateApiFor([
     { match: (url) => url.includes("/v1/gates?"), body: { items: [gateProfile()] } },
   ]);
-  const voters = await discoverVoters(api, { stage: "PRE_VOTE", chainId: BASE_SEPOLIA });
+  const voters = await discoverVoters(api, { stage: "PRE_VOTE", chainId: BASE_MAINNET });
 
   assert.equal(voters.length, 1);
   assert.equal(voters[0].wallet, VOTER.toLowerCase());
@@ -27,12 +27,12 @@ test("discovery reads Gate's own public directory, not a parallel voter list", a
 
 test("discovery shows the attention price and the relevant policy", async () => {
   const { api } = gateApiFor([{ match: () => true, body: { items: [gateProfile()] } }]);
-  const [voter] = await discoverVoters(api, { stage: "PRE_VOTE", chainId: BASE_SEPOLIA });
+  const [voter] = await discoverVoters(api, { stage: "PRE_VOTE", chainId: BASE_MAINNET });
 
   assert.equal(voter.attentionAmount, "1000000");
   assert.equal(voter.gavelFeeAmount, "250000");
   assert.equal(voter.indicativeTotalAmount, "1250000");
-  assert.equal(voter.indicativePrice, "1.00 test USDC attention + 0.25 test USDC Gavel fee");
+  assert.equal(voter.indicativePrice, "1.00 USDC attention + 0.25 USDC Gavel fee");
   assert.deepEqual([...voter.acceptedStages], ["PRE_VOTE"]);
   assert.deepEqual([...voter.supportedStages], ["PRE_VOTE", "VOTING"]);
   assert.deepEqual([...voter.tags], ["builder-grants"]);
@@ -59,7 +59,7 @@ test("selecting a voter re-reads that voter's Gate profile", async () => {
   const { api, calls } = gateApiFor([
     { match: (url) => url.includes(`/v1/gates/${VOTER.toLowerCase()}`), body: gateProfile() },
   ]);
-  const voter = await selectVoter(api, VOTER.toLowerCase(), { stage: "PRE_VOTE", chainId: BASE_SEPOLIA });
+  const voter = await selectVoter(api, VOTER.toLowerCase(), { stage: "PRE_VOTE", chainId: BASE_MAINNET });
 
   assert.equal(voter.wallet, VOTER.toLowerCase());
   const lower = VOTER.toLowerCase();

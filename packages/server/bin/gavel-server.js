@@ -3,6 +3,7 @@
 
 const { Contract, Interface, JsonRpcProvider, toBeHex } = require("ethers");
 const { createAuthService } = require("../src/gate/auth");
+const { createEnsNameResolver } = require("../src/gate/ens");
 const { createInboxService } = require("../src/gate/inbox-service");
 const { createNounsIndexClient } = require("../src/gate/index-client");
 const { createGateObservability } = require("../src/gate/observability");
@@ -225,8 +226,13 @@ async function composeProduction(env) {
     dao: { chainId: 1, verifier: config.daoVerifier, dao: "nouns" },
     chainVerifiers: { 1: contractVerifier(ethereumClient), [config.settlement.chainId]: contractVerifier(baseClient) },
   });
+  // ENS reverse resolution for the public projection, over the mainnet
+  // provider this process already holds. Display only: a name never becomes a
+  // route, a request body, or quote material, and an unreachable endpoint
+  // degrades to the shortened address rather than failing a read.
+  const ensResolver = createEnsNameResolver({ provider: ethereumClient.provider });
   const profileService = createProfileService({ repository: store, authService, indexClient,
-    baseChainId: config.settlement.chainId });
+    baseChainId: config.settlement.chainId, ensResolver });
   const deployment = await store.getDeployment({ chainId: config.settlement.chainId, splitter: config.settlement.splitter });
   if (!deployment) throw new Error("authoritative Gate deployment is missing");
   const quoteSigner = createQuoteSignerFromEnv(env, { chainId: config.settlement.chainId, splitter: config.settlement.splitter });

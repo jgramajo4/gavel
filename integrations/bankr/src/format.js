@@ -4,15 +4,16 @@ const { BankrGateError } = require("./errors");
 
 const USDC_DECIMALS = 6;
 
-// Base Sepolia is the only chain this integration is built for. Base mainnet is
-// listed so an accidental mainnet quote is NAMED in the refusal rather than
-// silently formatted as if it were fine.
+// Base mainnet is the chain this integration settles on: real USDC, real
+// money. Base Sepolia stays listed so a quote that is still pointed at the
+// testnet is NAMED in the refusal — and so a test-token amount can never be
+// formatted as if it were the real thing — rather than passing silently.
 const CHAIN_LABELS = Object.freeze({
-  84532: { name: "Base Sepolia", token: "test USDC" },
   8453: { name: "Base", token: "USDC" },
+  84532: { name: "Base Sepolia", token: "test USDC" },
 });
 
-const DEFAULT_ALLOWED_CHAIN_IDS = Object.freeze([84532]);
+const DEFAULT_ALLOWED_CHAIN_IDS = Object.freeze([8453]);
 
 function chainLabel(chainId) {
   return CHAIN_LABELS[Number(chainId)] || { name: `chain ${String(chainId)}`, token: "USDC" };
