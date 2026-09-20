@@ -285,6 +285,7 @@ test("HTTP quote and inbox routes reject cross-environment bearer tokens and ign
 });
 
 const fs = require("node:fs");
+const path = require("node:path");
 const { Pool } = require("pg");
 const { PostgresGateStore } = require("../src/gate/store");
 
