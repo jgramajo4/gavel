@@ -274,6 +274,61 @@ test("a session that is not an exact base_sender payer cannot buy a quote", asyn
   assert.equal((await unavailableRpc.store.counts()).submissions, 0);
 });
 
+test("an EIP-7702 delegated EOA is a payer; any other non-empty code is not", async () => {
+  const DELEGATE = "0x2b4c7f5a9e3d1086bc4f2a7e9d0516c3a8b7e4d2";
+  // The exact 23-byte indicator an EIP-7702 authorization writes: 0xef0100
+  // followed by the 20-byte delegate address, and nothing else.
+  const delegated = `0xef0100${DELEGATE.slice(2)}`;
+  assert.equal((delegated.length - 2) / 2, 23);
+
+  for (const code of ["0x", delegated, delegated.toUpperCase().replace("0X", "0x")]) {
+    const reads = [];
+    const gate = await harness({
+      service: { basePayerCodeReader: async ({ wallet, chainId }) => { reads.push({ wallet, chainId }); return code; } },
+    });
+    const result = await gate.submit();
+    assert.equal(result.state, "payment_required");
+    assert.equal(result.quote.message.payer, getAddress(PAYER));
+
+    // Classification costs exactly one code read, of the PAYER, on the
+    // settlement chain. The delegation target is never resolved: the same key
+    // can re-point it at will, so it says nothing about who must sign.
+    assert.equal(reads.length, 1);
+    assert.equal(getAddress(reads[0].wallet), getAddress(PAYER));
+    assert.equal(String(reads[0].chainId), "8453");
+    assert.equal(reads.some((read) => getAddress(read.wallet) === getAddress(DELEGATE)), false);
+  }
+
+  // Everything else with code is still a contract wallet, including bytecode
+  // that is 23 bytes long, that is the bare prefix, that is one byte short or
+  // one byte long, and that only resembles the indicator.
+  const refused = [
+    "0x60006000600060006000600060006000600060006000f1", // 23 bytes, arbitrary
+    "0x608060405234801561001057600080fd5b50",           // ordinary contract bytecode
+    "0xef0100",                                          // prefix with no target
+    `0xef0100${DELEGATE.slice(2)}00`,                    // 24 bytes
+    `0xef0100${DELEGATE.slice(4)}`,                      // 22 bytes
+    `0xef0101${DELEGATE.slice(2)}`,                      // wrong version byte
+    `0xef0000${DELEGATE.slice(2)}`,                      // wrong magic
+    `0xf70100${DELEGATE.slice(2)}`,                      // wrong first byte
+    `0x00ef0100${DELEGATE.slice(2)}`,                    // indicator not at offset 0
+  ];
+  for (const code of refused) {
+    const gate = await harness({ service: { basePayerCodeReader: async () => code } });
+    const error = await rejection(gate.submit());
+    assert.equal(error.code, "NOT_ACCEPTING", `expected ${code} to be refused`);
+    assert.equal(error.statusCode, 403);
+    assert.equal((await gate.store.counts()).submissions, 0);
+  }
+
+  // A code read that is not hex at all still fails closed as unavailable,
+  // never as an accepted EOA.
+  for (const code of ["0xef010", "0xzz", "", null, "ef0100"]) {
+    const gate = await harness({ service: { basePayerCodeReader: async () => code } });
+    assert.equal((await rejection(gate.submit())).statusCode, 503);
+  }
+});
+
 test("blocked senders and exhausted quote rate limits issue no quote", async () => {
   const blocked = await harness({
     service: { senderPolicy: { async assertAllowed({ sender }) {

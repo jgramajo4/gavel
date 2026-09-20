@@ -285,6 +285,33 @@ test("an authorization for a different quote or a different signer is refused", 
   assert.equal(relay.sent.length, 0);
 });
 
+test("a delegated payer's authorization must still recover to the payer, never to its delegate", async () => {
+  // A payer accepted as an EIP-7702 delegated EOA changes nothing here: the
+  // EIP-3009 leg is still plain ECDSA and must recover to the payer address.
+  // The delegate — whatever code the payer currently points at — cannot sign
+  // for it, and no ERC-1271 fallback exists on this path.
+  const { service, relay } = await harness();
+  const delegateWallet = new Wallet(`0x${"33".repeat(32)}`);
+  assert.notEqual(getAddress(delegateWallet.address), PAYER);
+
+  await assert.rejects(
+    service.relaySettlement({
+      session: SESSION,
+      publicId: PUBLIC_ID,
+      request: relayRequest(await authorizationSignature({ wallet: delegateWallet })),
+    }),
+    (error) => error.statusCode === 400 && /does not recover to this quote's payer/.test(error.message),
+  );
+  assert.equal(relay.sent.length, 0);
+
+  // The payer's own key, over the same quote, still settles.
+  const receipt = await service.relaySettlement({
+    session: SESSION, publicId: PUBLIC_ID, request: relayRequest(await authorizationSignature()),
+  });
+  assert.match(receipt.txHash, /^0x[0-9a-f]{64}$/);
+  assert.equal(decodeSettleCall(relay.sent[0].data).authorization.from, PAYER);
+});
+
 test("a relayer that IS the payer is refused", async () => {
   const { service, relay } = await harness({ relayer: { address: PAYER } });
   await assert.rejects(

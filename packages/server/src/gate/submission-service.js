@@ -19,6 +19,11 @@ const NOUNS_DAO = "nouns";
 const DECODER_VERSION = SUPPORTED_DECODER_VERSIONS[0];
 const PUBLIC_ID = /^[A-Za-z0-9_-]{22}$/;
 const NOT_ACCEPTING_MESSAGE = "Not currently accepting new submissions";
+// EIP-7702 delegation indicator: the exactly-23-byte `0xef0100 || address` that
+// a SET_CODE_TX_TYPE authorization writes into an EOA's code slot. Anchored and
+// length-exact on purpose: nothing longer, shorter, or differently prefixed is
+// a delegated EOA.
+const EIP_7702_DELEGATION = /^0xef0100[0-9a-f]{40}$/;
 const INELIGIBLE_MESSAGE = "Submission is not currently eligible";
 
 function reject(state, code, statusCode, message) {
@@ -194,8 +199,22 @@ function createSubmissionService({
     }
   }
 
-  // MVP payers must be EOAs: the Base native-USDC EIP-3009 v,r,s path has no
-  // contract-wallet equivalent. Missing or unreadable code fails closed.
+  // MVP payers must be able to sign the Base native-USDC EIP-3009 authorization
+  // themselves: that v,r,s path has no contract-wallet equivalent, so a payer
+  // whose authority is code is refused.
+  //
+  // Empty code is the traditional EOA. An EIP-7702 delegated EOA is the other
+  // one: its code slot holds only the 23-byte `0xef0100 || address` pointer,
+  // the account keeps its ECDSA key as its sole authority, and USDC still
+  // recovers `receiveWithAuthorization` to that key — so it is accepted too.
+  // The delegate is deliberately NOT resolved: the same key can re-point or
+  // clear it in one transaction, so what it currently points at is not a
+  // property of the payer and proves nothing about who must sign. Reading it
+  // would only add an RPC hop and a TOCTOU window.
+  //
+  // Every other non-empty code is a contract wallet and is still refused;
+  // ECDSA recovery to the payer stays the settlement-side requirement.
+  // Missing or unreadable code fails closed.
   async function assertPayerIsEoa(payer) {
     let code;
     try {
@@ -204,7 +223,9 @@ function createSubmissionService({
       throw unavailable();
     }
     if (typeof code !== "string" || !/^0x([0-9a-fA-F]{2})*$/.test(code)) throw unavailable();
-    if (code !== "0x") throw notAccepting();
+    const normalized = code.toLowerCase();
+    if (normalized === "0x" || EIP_7702_DELEGATION.test(normalized)) return;
+    throw notAccepting();
   }
 
   function issuanceFacts(snapshot) {
