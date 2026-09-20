@@ -26,7 +26,7 @@ function challenge(overrides = {}) {
   return {
     proofType: "WalletSession",
     primaryType: "WalletSession",
-    domain: { name: "GavelGate", version: "1", chainId: 84532, verifyingContract: BASE_VERIFIER },
+    domain: { name: "GavelGate", version: "1", chainId: 8453, verifyingContract: BASE_VERIFIER },
     types: {
       WalletSession: [
         { name: "wallet", type: "address" },
@@ -49,7 +49,7 @@ function challenge(overrides = {}) {
 function gateFor({ challengeBody = challenge(), verifyBody, verifyStatus = 200 } = {}) {
   const verified = verifyBody ?? {
     token: "T".repeat(43),
-    session: { wallet: PAYER.toLowerCase(), role: "base_sender", chainId: "84532", audience: AUDIENCE,
+    session: { wallet: PAYER.toLowerCase(), role: "base_sender", chainId: "8453", audience: AUDIENCE,
       issuedAt: "1800000000", expiry: "1800000900" },
   };
   const { fetchImpl, calls } = createFetchStub([

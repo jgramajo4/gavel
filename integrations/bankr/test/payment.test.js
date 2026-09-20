@@ -11,7 +11,7 @@ const {
 const { parseIssuedQuote } = require("../src/quote");
 const { REQUIRED_CAPABILITIES, createEip1193Wallet, serializeTypedData } = require("../src/wallet");
 const {
-  BASE_SEPOLIA, PAYER, RELAYER, SPLITTER, TOKEN, TOKEN_NAME, TOKEN_VERSION, VOTER, createRelayerStub, createWalletStub,
+  BASE_MAINNET, PAYER, RELAYER, SPLITTER, TOKEN, TOKEN_NAME, TOKEN_VERSION, VOTER, createRelayerStub, createWalletStub,
   issuedQuote,
 } = require("./helpers");
 
@@ -45,9 +45,11 @@ test("an expired quote never reaches the wallet", async () => {
 
 test("a quote for a chain outside the allow-list never reaches the wallet", async () => {
   const { wallet, calls } = createWalletStub();
-  const mainnet = parseIssuedQuote(issuedQuote({ domain: { chainId: 8453 } }));
+  // A quote left pointed at Base Sepolia is the realistic mistake now that the
+  // allow-list is Base mainnet, and it must die before the wallet is touched.
+  const sepolia = parseIssuedQuote(issuedQuote({ domain: { chainId: 84532 } }));
   await assert.rejects(
-    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: mainnet, confirmed: true, now }),
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: sepolia, confirmed: true, now }),
     (error) => error.code === "CHAIN_NOT_ALLOWED",
   );
   assert.equal(calls.signTypedData.length, 0);
@@ -56,7 +58,7 @@ test("a quote for a chain outside the allow-list never reaches the wallet", asyn
 test("a wallet on the wrong chain is switched to the quote's chain", async () => {
   const { wallet, calls } = createWalletStub({ chainId: 11_155_111 });
   await payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now });
-  assert.deepEqual(calls.switchChain, [BASE_SEPOLIA]);
+  assert.deepEqual(calls.switchChain, [BASE_MAINNET]);
 });
 
 test("a wallet that cannot switch chains refuses rather than paying on the wrong chain", async () => {
@@ -72,16 +74,16 @@ test("an insufficient token balance refuses before any signature", async () => {
   const { wallet, calls } = createWalletStub({ balance: 1_000_000n });
   await assert.rejects(
     payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now }),
-    (error) => error.code === "INSUFFICIENT_BALANCE" && /1\.00 test USDC/.test(error.message),
+    (error) => error.code === "INSUFFICIENT_BALANCE" && /1\.00 USDC/.test(error.message),
   );
   assert.equal(calls.signTypedData.length, 0);
 });
 
 test("the token's EIP-712 domain is proven against its own DOMAIN_SEPARATOR", async () => {
   const { wallet } = createWalletStub();
-  const domain = await readTokenDomain(wallet, TOKEN, BASE_SEPOLIA);
+  const domain = await readTokenDomain(wallet, TOKEN, BASE_MAINNET);
   assert.deepEqual(domain, {
-    name: TOKEN_NAME, version: TOKEN_VERSION, chainId: BASE_SEPOLIA, verifyingContract: TOKEN,
+    name: TOKEN_NAME, version: TOKEN_VERSION, chainId: BASE_MAINNET, verifyingContract: TOKEN,
   });
 
   const lying = createWalletStub().wallet;
@@ -91,7 +93,7 @@ test("the token's EIP-712 domain is proven against its own DOMAIN_SEPARATOR", as
     return request.data.startsWith("0x3644e515") ? `0x${"ff".repeat(32)}` : result;
   };
   await assert.rejects(
-    readTokenDomain(lying, TOKEN, BASE_SEPOLIA),
+    readTokenDomain(lying, TOKEN, BASE_MAINNET),
     (error) => error.code === "TOKEN_DOMAIN_MISMATCH",
   );
 });
@@ -119,7 +121,7 @@ test("the authorization signing request is ReceiveWithAuthorization on the token
   assert.equal(authorizationRequest.primaryType, "ReceiveWithAuthorization");
   assert.deepEqual(authorizationRequest.types, RECEIVE_WITH_AUTHORIZATION_TYPES);
   assert.deepEqual(authorizationRequest.domain, {
-    name: TOKEN_NAME, version: TOKEN_VERSION, chainId: BASE_SEPOLIA, verifyingContract: TOKEN,
+    name: TOKEN_NAME, version: TOKEN_VERSION, chainId: BASE_MAINNET, verifyingContract: TOKEN,
   });
   assert.deepEqual({ ...authorizationRequest.message }, { ...buildAuthorization(quote) });
 
@@ -172,7 +174,7 @@ test("the settle transaction is built from the quote and relayed to the splitter
   assert.equal(decoded[2].value.toString(), "1250000");
   assert.equal(decoded[2].nonce, quote.message.quoteId);
   assert.equal(result.txHash, `0x${"ab".repeat(32)}`);
-  assert.equal(result.chainId, String(BASE_SEPOLIA));
+  assert.equal(result.chainId, String(BASE_MAINNET));
 });
 
 test("a broadcast transaction hash is explicitly NOT acceptance", async () => {
@@ -249,7 +251,7 @@ test("the token domain is read and proven, never assumed", async () => {
   // report anything, and this path proves whatever it reports.
   for (const [name, version] of [["USDC", "2"], ["USD Coin", "2"], ["Some Test USDC", "1"]]) {
     const { wallet } = createWalletStub({ tokenName: name, tokenVersion: version });
-    const domain = await readTokenDomain(wallet, TOKEN, BASE_SEPOLIA);
+    const domain = await readTokenDomain(wallet, TOKEN, BASE_MAINNET);
     assert.equal(domain.name, name);
     assert.equal(domain.version, version);
   }
@@ -275,7 +277,7 @@ test("encodeSettleCall normalizes a 0/1 recovery id without changing the signatu
 
 test("the EIP-1193 adapter adds only the EIP712Domain type entry", () => {
   const payload = {
-    domain: { name: "GavelGate", version: "1", chainId: 84532, verifyingContract: TOKEN },
+    domain: { name: "GavelGate", version: "1", chainId: 8453, verifyingContract: TOKEN },
     types: { WalletSession: [{ name: "wallet", type: "address" }] },
     primaryType: "WalletSession",
     message: { wallet: PAYER },
@@ -293,7 +295,7 @@ test("the EIP-1193 adapter never requests a private key", async () => {
     async request({ method, params }) {
       methods.push(method);
       if (method === "eth_requestAccounts") return [PAYER];
-      if (method === "eth_chainId") return "0x14a34";
+      if (method === "eth_chainId") return "0x2105";
       if (method === "eth_signTypedData_v4") {
         assert.equal(typeof params[1], "string");
         return `0x${"cd".repeat(65)}`;
@@ -303,7 +305,7 @@ test("the EIP-1193 adapter never requests a private key", async () => {
   };
   const wallet = createEip1193Wallet(provider);
   assert.equal(await wallet.getAddress(), PAYER);
-  assert.equal(await wallet.getChainId(), BASE_SEPOLIA);
+  assert.equal(await wallet.getChainId(), BASE_MAINNET);
   await wallet.signTypedData({
     account: PAYER,
     domain: { name: "n", version: "1", chainId: 1, verifyingContract: TOKEN },

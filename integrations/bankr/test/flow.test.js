@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 
 const { createBankrGateFlow, sendAttentionRequest } = require("../src/flow");
 const {
-  BASE_SEPOLIA, PAYER, RELAYER, VOTER, candidateRow, candidateTargetIdFixture, createFetchStub, createRelayerStub,
+  BASE_MAINNET, PAYER, RELAYER, VOTER, candidateRow, candidateTargetIdFixture, createFetchStub, createRelayerStub,
   createWalletStub, gateProfile, issuedQuote,
 } = require("./helpers");
 
@@ -20,7 +20,7 @@ function walletSessionChallenge() {
   return {
     proofType: "WalletSession",
     primaryType: "WalletSession",
-    domain: { name: "GavelGate", version: "1", chainId: BASE_SEPOLIA, verifyingContract: `0x${"b4".repeat(20)}` },
+    domain: { name: "GavelGate", version: "1", chainId: BASE_MAINNET, verifyingContract: `0x${"b4".repeat(20)}` },
     types: {
       WalletSession: [
         { name: "wallet", type: "address" },
@@ -54,7 +54,7 @@ function stubWorld({ statuses = ["pending_settlement", "accepted"], submissionSt
       match: (url) => url.endsWith("/v1/gate/auth/verify"),
       body: {
         token: "T".repeat(43),
-        session: { wallet: PAYER.toLowerCase(), role: "base_sender", chainId: String(BASE_SEPOLIA), audience: AUDIENCE,
+        session: { wallet: PAYER.toLowerCase(), role: "base_sender", chainId: String(BASE_MAINNET), audience: AUDIENCE,
           issuedAt: "1800000000", expiry: "1800000900" },
       },
     },
@@ -92,7 +92,7 @@ function flowFor(world, walletStub = createWalletStub(), relayerStub = createRel
         gateUrl: "https://gate.test",
         indexUrl: "https://index.test",
         dao: "nouns",
-        allowedChainIds: [BASE_SEPOLIA],
+        allowedChainIds: [BASE_MAINNET],
         requestTimeoutMs: 5_000,
       },
       now: () => 1_800_000_000_000,
@@ -134,9 +134,9 @@ test("the full demo flow runs target -> voter -> pitch -> quote -> confirmation 
     "authorizing", "authorized", "broadcasting", "broadcast", "settlement_hint_recorded",
   ]);
   assert.equal(confirmations.length, 1);
-  assert.equal(confirmations[0].lines[2], "Attention: 1.00 test USDC");
-  assert.equal(confirmations[0].lines[3], "Gavel fee: 0.25 test USDC");
-  assert.equal(confirmations[0].lines[4], "Total: 1.25 test USDC");
+  assert.equal(confirmations[0].lines[2], "Attention: 1.00 USDC");
+  assert.equal(confirmations[0].lines[3], "Gavel fee: 0.25 USDC");
+  assert.equal(confirmations[0].lines[4], "Total: 1.25 USDC");
   // Bankr signed; a separate relayer broadcast.
   assert.equal(typeof walletStub.wallet.sendTransaction, "undefined");
   assert.equal(result.payment.relayer, RELAYER);

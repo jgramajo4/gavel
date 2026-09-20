@@ -9,7 +9,7 @@ const { assertPreparedTransaction, broadcastSettlement } = require("../src/relay
 const { SETTLE_SELECTOR, encodeSettleCall } = require("../src/splitter");
 const { parseIssuedQuote } = require("../src/quote");
 const {
-  BASE_SEPOLIA, PAYER, RELAYER, SPLITTER, createRelayerStub, createWalletStub, issuedQuote,
+  BASE_MAINNET, PAYER, RELAYER, SPLITTER, createRelayerStub, createWalletStub, issuedQuote,
 } = require("./helpers");
 
 const NOW_MS = 1_800_000_000_000;
@@ -199,5 +199,5 @@ test("the relayer is only reachable through the prepared-transaction guard", asy
   assert.equal(relayerStub.calls.sendTransaction.length, 0);
 
   const ok = await broadcastSettlement({ relayer: relayerStub.relayer, prepared, quote, nowSeconds: NOW_SECONDS });
-  assert.equal(ok.chainId, String(BASE_SEPOLIA));
+  assert.equal(ok.chainId, String(BASE_MAINNET));
 });

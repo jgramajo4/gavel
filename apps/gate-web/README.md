@@ -45,14 +45,27 @@ replaces a canonical address in a path, a request body, or a signed payload.
 
 Resolution order:
 
-1. `PublicGateProfile.ens` — the server's indexed display field. When it is
-   present the browser resolves nothing.
+1. `PublicGateProfile.ens` — the server's resolved display field. The Gate API
+   performs the reverse + forward lookup itself over
+   `GAVEL_GATE_ETHEREUM_RPC_URL`, so every Gate in the directory and on a
+   profile arrives already named and the browser resolves nothing. A server
+   that resolved and found no primary name sends `ens: null`, which is an
+   answer, not a gap: the browser does not go looking for a name behind it.
 2. `VITE_ENS_RPC_URL` — an optional mainnet JSON-RPC endpoint for reverse
-   lookups of addresses the server has no name for (the connected wallet, for
-   example). It ships in the bundle, so it must be an endpoint the operator is
-   willing to publish; it must never carry a secret key. Unset means no
-   frontend resolution and no network call at all.
+   lookups of addresses the projection never covers, which after the change
+   above is the connected wallet in the header and nothing else. It ships in
+   the bundle, so it must be an endpoint the operator is willing to publish; it
+   must never carry a secret key. Unset means no frontend resolution and no
+   network call at all.
 3. Otherwise the address renders shortened.
+
+A **Safe** resolves through exactly the same `<address>.addr.reverse` node as
+an EOA, so nothing here special-cases one. What a Safe usually lacks is the
+record: setting a primary name takes a transaction *from the Safe*, and setting
+only the forward `name -> address` record leaves the reverse lookup empty. A
+Safe in that state is correctly shown as a shortened address, and the fix is to
+set its primary name on mainnet — not to let it publish a name it has not
+proved it holds.
 
 Lookups go through `ethers`' `lookupAddress`, which performs the forward check
 as well as the reverse record, and the result is then held to a conservative

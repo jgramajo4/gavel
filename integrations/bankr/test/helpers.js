@@ -5,6 +5,7 @@ const {
 } = require("ethers");
 const { GAVEL_FEE_AMOUNT, QUOTE_VERSION, hashSubmission } = require("@gavel/gate");
 
+const BASE_MAINNET = 8453;
 const BASE_SEPOLIA = 84532;
 const SPLITTER = getAddress("0x00000000000000000000000000000000000005ea");
 const TOKEN = getAddress("0x000000000000000000000000000000000000c0de");
@@ -28,7 +29,7 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
 const TOKEN_NAME = "USDC";
 const TOKEN_VERSION = "2";
 
-function tokenDomainSeparator({ chainId = BASE_SEPOLIA, token = TOKEN, name = TOKEN_NAME, version = TOKEN_VERSION } = {}) {
+function tokenDomainSeparator({ chainId = BASE_MAINNET, token = TOKEN, name = TOKEN_NAME, version = TOKEN_VERSION } = {}) {
   return keccak256(AbiCoder.defaultAbiCoder().encode(
     ["bytes32", "bytes32", "bytes32", "uint256", "address"],
     [
@@ -100,7 +101,7 @@ function issuedQuote(overrides = {}) {
   const domain = {
     name: "GavelGateSplitter",
     version: "1",
-    chainId: BASE_SEPOLIA,
+    chainId: BASE_MAINNET,
     verifyingContract: SPLITTER,
     ...(overrides.domain || {}),
   };
@@ -197,7 +198,7 @@ function createFetchStub(routes) {
  * broadcasts.
  */
 function createWalletStub({
-  chainId = BASE_SEPOLIA,
+  chainId = BASE_MAINNET,
   balance = 10_000_000n,
   account = PAYER,
   failSign = false,
@@ -243,6 +244,7 @@ function createWalletStub({
 }
 
 module.exports = {
+  BASE_MAINNET,
   BASE_SEPOLIA,
   CANDIDATE_PROPOSER,
   CANDIDATE_SLUG,
