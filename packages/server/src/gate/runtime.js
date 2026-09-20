@@ -4,6 +4,8 @@ const { Interface, TypedDataEncoder, keccak256 } = require("ethers");
 const { createBaseSettlementAdapter } = require("./base-settlement-adapter");
 const { createGateHttpServer } = require("./http");
 const { createNotificationWorker } = require("./notification-worker");
+const { createGateRelayService } = require("./relay-service");
+const { createGateRelayerFromEnv } = require("./relay-signer");
 const { createAgentMailSender, createDeliverySettingsCipher, createEmailNotifier } = require("./notifiers/email");
 const { createSettlementService } = require("./settlement-service");
 
@@ -23,6 +25,9 @@ const NOTIFIER_CONFIG_KEYS = Object.freeze([
   "GAVEL_GATE_NOTIFIER_MODE", "GAVEL_GATE_ENCRYPTION_KEY", "AGENTMAIL_API_KEY",
   "AGENTMAIL_FROM_INBOX", "AGENTMAIL_API_URL",
 ]);
+// The remote relay is opt-in and all-or-nothing: either both keys are present
+// and valid, or this deployment serves no relay route at all.
+const RELAY_CONFIG_KEYS = Object.freeze(["GAVEL_GATE_RELAYER_KEY", "GAVEL_GATE_RELAYER_ADDRESS"]);
 const SETTLEMENT_CONFIG_KEYS = Object.freeze([
   "GAVEL_GATE_ENVIRONMENT",
   "GAVEL_GATE_SPLITTER",
@@ -277,6 +282,11 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
 async function createGateServerRuntime(options = {}) {
   const env = options.env ?? process.env;
   const config = settlementRuntimeConfigFromEnv(env);
+  // A relay key with no settlement runtime would be a funded wallet with no
+  // authoritative deployment to validate against. Fail closed at startup.
+  if (!config && RELAY_CONFIG_KEYS.some((key) => env[key] !== undefined && env[key] !== "")) {
+    throw new TypeError("Gate relay configuration requires a configured settlement runtime");
+  }
   const notifierConfig = notifierRuntimeConfigFromEnv(env);
   if (notifierConfig.mode === "agentmail" && !config) {
     throw new TypeError("AgentMail notifier mode requires configured settlement runtime");
@@ -290,6 +300,7 @@ async function createGateServerRuntime(options = {}) {
   const factories = {
     createBaseSettlementAdapter,
     createSettlementService,
+    createGateRelayService,
     createGateHttpServer,
     ...options.factories,
   };
@@ -307,6 +318,7 @@ async function createGateServerRuntime(options = {}) {
 
   let adapter = null;
   let settlementService = null;
+  let relayService = null;
   let notificationWorker = null;
   let notificationProvider = options.notificationProvider;
   let profileService = options.profileService;
@@ -366,6 +378,31 @@ async function createGateServerRuntime(options = {}) {
       observedJob("scan", settlementService.scanOnce),
       observedJob("reconcile", settlementService.reconcileSubmitted),
       observedJob("monitor", settlementService.monitorOnce));
+    // The remote relay, when this deployment is the one holding the funded
+    // gas-only wallet. It is mounted only with a configured relayer AND a
+    // submission service to look the owner-bound quote up in: it can never
+    // broadcast anything Gate did not sign itself.
+    const relayer = options.relayer !== undefined
+      ? options.relayer
+      : createGateRelayerFromEnv(env, { provider: options.baseClient?.provider, chainId: config.chainId });
+    // `options.submissionService` is already proven to match the authoritative
+    // deployment above, so the relay resolves owner-bound quotes through the
+    // same service that issued them.
+    if (relayer) {
+      relayService = factories.createGateRelayService({
+        relayer,
+        submissionService: options.submissionService,
+        deployment: {
+          chainId: config.chainId,
+          splitter: deployment.splitter,
+          token: deployment.token,
+          quoteSigner: deployment.signer,
+        },
+        // The token's OWN EIP-712 name and version, as attested against its
+        // on-chain DOMAIN_SEPARATOR at startup. Never guessed.
+        tokenDomain: { name: attestation.tokenName, version: attestation.tokenVersion },
+      });
+    }
     if (notifierConfig.mode === "agentmail") {
       const { encryptDestination, resolveDestination: decryptDestination } = createDeliverySettingsCipher({
         encodedKey: notifierConfig.encryptionKey,
@@ -415,6 +452,7 @@ async function createGateServerRuntime(options = {}) {
     ...(!config || options.submissionService === undefined ? {} : { submissionService: options.submissionService }),
     ...(options.inboxService === undefined ? {} : { inboxService: options.inboxService }),
     ...(settlementService ? { settlementService } : {}),
+    ...(relayService ? { relayService } : {}),
     ...(observability ? { observability } : {}),
     ...(options.corsOrigins === undefined ? {} : { corsOrigins: options.corsOrigins }),
   };
@@ -453,6 +491,7 @@ async function createGateServerRuntime(options = {}) {
     config,
     adapter,
     settlementService,
+    relayService,
     notificationWorker,
     notificationProvider,
     runOnce: () => Promise.all(jobs.map(invoke)),
@@ -461,5 +500,5 @@ async function createGateServerRuntime(options = {}) {
   });
 }
 
-module.exports = { createGateServerRuntime, notifierRuntimeConfigFromEnv, readOnchainDeployment,
+module.exports = { RELAY_CONFIG_KEYS, createGateServerRuntime, notifierRuntimeConfigFromEnv, readOnchainDeployment,
   settlementRuntimeConfigFromEnv };

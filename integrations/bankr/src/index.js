@@ -22,6 +22,7 @@ module.exports = {
   ...require("./wallet"),
   ...require("./splitter"),
   ...require("./relayer"),
+  ...require("./remote-relay"),
   ...require("./payment"),
   ...require("./settlement"),
   ...require("./flow"),

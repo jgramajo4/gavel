@@ -204,15 +204,32 @@ async function authorizePayment({
  * Bankr does not broadcast. The Gate splitter does not require
  * `msg.sender == payer`, so the relayer pays gas while the payer's USDC
  * authority stays entirely inside the EIP-3009 signature.
+ *
+ * The funded account is either in process (`relayer`) or on the Gate server
+ * (`remoteRelay`). An in-process relayer wins when both are supplied, because a
+ * caller that went to the trouble of providing one meant it. With neither, this
+ * fails by name — `RELAYER_UNAVAILABLE` — and never falls back to broadcasting
+ * from Bankr.
  */
-async function broadcastPayment({ relayer, prepared, quote, onPhase = () => {}, now = () => Date.now() } = {}) {
+async function broadcastPayment({
+  relayer,
+  remoteRelay,
+  session,
+  publicId,
+  prepared,
+  quote,
+  onPhase = () => {},
+  now = () => Date.now(),
+} = {}) {
+  const nowSeconds = Math.floor(Number(now()) / 1000);
   onPhase("broadcasting");
-  const result = await broadcastSettlement({
-    relayer,
-    prepared,
-    quote,
-    nowSeconds: Math.floor(Number(now()) / 1000),
-  });
+  let result;
+  if (!relayer && remoteRelay) {
+    if (!session?.token) throw new BankrGateError("UNAUTHORIZED", "Authenticate the payer wallet first.");
+    result = await remoteRelay.relay({ token: session.token, publicId, prepared, quote, nowSeconds });
+  } else {
+    result = await broadcastSettlement({ relayer, prepared, quote, nowSeconds });
+  }
   onPhase("broadcast");
   return result;
 }
@@ -226,6 +243,9 @@ async function broadcastPayment({ relayer, prepared, quote, onPhase = () => {}, 
 async function payQuote({
   wallet,
   relayer,
+  remoteRelay,
+  session,
+  publicId,
   quote,
   confirmed,
   onPhase = () => {},
@@ -233,7 +253,7 @@ async function payQuote({
   allowedChainIds = DEFAULT_ALLOWED_CHAIN_IDS,
 } = {}) {
   const prepared = await authorizePayment({ wallet, quote, confirmed, onPhase, now, allowedChainIds });
-  return broadcastPayment({ relayer, prepared, quote, onPhase, now });
+  return broadcastPayment({ relayer, remoteRelay, session, publicId, prepared, quote, onPhase, now });
 }
 
 module.exports = {

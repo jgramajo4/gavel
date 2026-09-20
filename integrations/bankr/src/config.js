@@ -5,6 +5,17 @@ const { DEFAULT_ALLOWED_CHAIN_IDS } = require("./format");
 
 const DEFAULT_INDEX_URL = "https://index.0773h.com";
 
+// Hostnames that can never be a production Gate relay. A relay origin carries
+// the Gate session token and receives a payment authorization, so a typo that
+// points it at a laptop, a LAN box, or a reserved documentation name is a
+// configuration failure, not a fallback.
+const RESERVED_RELAY_SUFFIXES = Object.freeze([
+  ".local", ".localhost", ".test", ".invalid", ".example", ".internal", ".home.arpa", ".onion",
+]);
+const RESERVED_RELAY_HOSTS = Object.freeze([
+  "localhost", "example.com", "example.net", "example.org",
+]);
+
 /**
  * Rejects an endpoint that carries credentials or a path.
  *
@@ -32,6 +43,35 @@ function canonicalOrigin(value, name) {
   return parsed.origin;
 }
 
+/**
+ * Rejects a relay origin that is not a production HTTPS endpoint.
+ *
+ * Beyond the shared origin rules, a relay must be an HTTPS DNS name. An IP
+ * literal is refused outright, which is what closes loopback and every RFC 1918
+ * LAN range at once, and the reserved test/documentation names above are
+ * refused by suffix. There is no permissive mode: a relay that cannot be
+ * reached over TLS is simply not configured.
+ */
+function canonicalRelayOrigin(value, name) {
+  const origin = canonicalOrigin(value, name);
+  const { protocol, hostname } = new URL(origin);
+  if (protocol !== "https:") {
+    throw new BankrGateError("INVALID_CONFIG", `${name} must be an HTTPS origin.`);
+  }
+  const host = hostname.toLowerCase();
+  // An IPv6 literal arrives bracketed; an IPv4 literal is four dotted numbers.
+  const isIpLiteral = host.startsWith("[") || /^[0-9]+(\.[0-9]+){3}$/.test(host);
+  if (isIpLiteral || !host.includes(".") || RESERVED_RELAY_HOSTS.includes(host)
+      || RESERVED_RELAY_SUFFIXES.some((suffix) => host.endsWith(suffix))
+      || RESERVED_RELAY_HOSTS.some((reserved) => host.endsWith(`.${reserved}`))) {
+    throw new BankrGateError(
+      "INVALID_CONFIG",
+      `${name} must be a public HTTPS hostname, not an IP address, a loopback, a LAN, or a reserved test name.`,
+    );
+  }
+  return origin;
+}
+
 function chainIds(value) {
   if (value === undefined || value === null || value === "") return [...DEFAULT_ALLOWED_CHAIN_IDS];
   const list = (Array.isArray(value) ? value : String(value).split(","))
@@ -56,13 +96,27 @@ function resolveConfig(env = process.env, overrides = {}) {
     overrides.indexUrl ?? env.GAVEL_INDEX_API_URL ?? DEFAULT_INDEX_URL,
     "GAVEL_INDEX_API_URL",
   );
+  // Opt-in. Absent, the client has no remote relay and says so by name rather
+  // than falling back to broadcasting from Bankr.
+  const relayerSource = overrides.relayerUrl ?? env.GAVEL_GATE_RELAYER_URL;
+  const relayerUrl = relayerSource === undefined || relayerSource === null || relayerSource === ""
+    ? null
+    : canonicalRelayOrigin(relayerSource, "GAVEL_GATE_RELAYER_URL");
   return Object.freeze({
     gateUrl,
     indexUrl,
+    relayerUrl,
     dao: "nouns",
     allowedChainIds: Object.freeze(chainIds(overrides.allowedChainIds ?? env.GAVEL_GATE_CHAIN_IDS)),
     requestTimeoutMs: Number(overrides.requestTimeoutMs ?? env.GAVEL_GATE_TIMEOUT_MS ?? 10_000),
   });
 }
 
-module.exports = { DEFAULT_INDEX_URL, canonicalOrigin, resolveConfig };
+module.exports = {
+  DEFAULT_INDEX_URL,
+  RESERVED_RELAY_HOSTS,
+  RESERVED_RELAY_SUFFIXES,
+  canonicalOrigin,
+  canonicalRelayOrigin,
+  resolveConfig,
+};

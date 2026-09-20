@@ -3,6 +3,7 @@ const { SubmissionPolicyError } = require("@gavel/gate");
 const { ProfileRequestError } = require("./profile-service");
 const { IndexUnavailableError } = require("./index-client");
 const { SettlementRequestError } = require("./settlement-service");
+const { RelayRequestError } = require("./relay-service");
 
 const DEFAULT_MAX_BODY_BYTES = 256 * 1024;
 const DEFAULT_CHALLENGE_LIMIT = 20;
@@ -77,8 +78,8 @@ function bearerToken(request) {
   return match[1];
 }
 
-function createGateHttpServer({ authService, profileService, submissionService, settlementService, inboxService,
-  observability, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter(),
+function createGateHttpServer({ authService, profileService, submissionService, settlementService, relayService,
+  inboxService, observability, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, challengeLimiter = createChallengeLimiter(),
   corsOrigins = [] } = {}) {
   if (!authService || typeof authService.issueChallenge !== "function" || typeof authService.verifyProof !== "function"
       || typeof authService.authenticateSession !== "function") throw new TypeError("complete authService is required");
@@ -93,6 +94,9 @@ function createGateHttpServer({ authService, profileService, submissionService, 
   }
   if (settlementService !== undefined && typeof settlementService.submitTxHash !== "function") {
     throw new TypeError("complete settlementService is required");
+  }
+  if (relayService !== undefined && typeof relayService.relaySettlement !== "function") {
+    throw new TypeError("complete relayService is required");
   }
   if (inboxService !== undefined && (typeof inboxService.listInbox !== "function"
       || typeof inboxService.getInbox !== "function" || typeof inboxService.archiveInbox !== "function")) {
@@ -248,6 +252,23 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         if (receipt.newlyPending === true) count("gate_settlement_pending_total");
         return sendJson(response, 202, receipt);
       }
+      // The narrow remote relay. It accepts a submission id and the payer's
+      // EIP-3009 signature and NOTHING else: no destination, no calldata, no
+      // value. Gate rebuilds the settlement from the quote it signed itself,
+      // re-runs the prepared-settlement guard over it, and only then lets a
+      // gas-only relayer wallet broadcast. A transaction hash it returns is a
+      // hint; Gate's scanner still verifies the settlement independently.
+      const relay = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/relay$/.exec(path);
+      if (relayService && request.method === "POST" && relay) {
+        const token = bearerToken(request);
+        let session;
+        try { session = await authService.authenticateSession(token, { role: "base_sender" }); }
+        catch { throw new ProfileRequestError("authentication required", 401, "UNAUTHORIZED"); }
+        const body = await readJson(request, maxBodyBytes);
+        const receipt = await relayService.relaySettlement({ session, publicId: relay[1], request: body });
+        count("gate_relay_broadcast_total");
+        return sendJson(response, 200, receipt);
+      }
       // Resume is owner-bound: identity comes only from the session, never from
       // the path, query string, or body. A non-owner gets a plain 404.
       const resume = /^\/v1\/submissions\/([A-Za-z0-9_-]{22})\/resume$/.exec(path);
@@ -291,12 +312,14 @@ function createGateHttpServer({ authService, profileService, submissionService, 
           state: error.state, error: { code: error.code, message: error.message },
         });
       }
-      const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError || error instanceof SettlementRequestError;
+      const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError
+        || error instanceof SettlementRequestError || error instanceof RelayRequestError;
       const statusCode = known ? error.statusCode : 500;
       const code = known ? error.code : "INTERNAL_ERROR";
       const message = known ? error.message : "Internal server error";
       const body = { error: { code, message } };
       if (error instanceof SettlementRequestError && error.state) body.state = error.state;
+      if (error instanceof RelayRequestError && error.state) body.state = error.state;
       if (error instanceof SettlementRequestError && error.updatedAt) body.updatedAt = error.updatedAt;
       return sendJson(response, statusCode, body);
     }

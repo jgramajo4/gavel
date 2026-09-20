@@ -1,8 +1,9 @@
 "use strict";
 
 const { getAddress } = require("ethers");
+const { PREPARED_SETTLEMENT_FIELDS, assertPreparedSettlement } = require("@gavel/gate");
 const { BankrGateError } = require("./errors");
-const { SETTLE_SELECTOR, decodeSettleCall } = require("./splitter");
+const { asBankrError } = require("./splitter");
 const { assertTxHash } = require("./wallet");
 
 /**
@@ -14,9 +15,15 @@ const { assertTxHash } = require("./wallet");
  * that pays gas need not be — and here deliberately is NOT — the account that
  * pays USDC.
  *
- * That split exists because Bankr's signing path on Base Sepolia is proven and
- * its broadcast path is not. Bankr signs; a funded relayer broadcasts the exact
- * prepared transaction and nothing else.
+ * That split exists because Bankr's signing path is proven and its broadcast
+ * path is not. Bankr signs; a funded relayer on Base mainnet broadcasts the
+ * exact prepared transaction and nothing else.
+ *
+ * There are two shapes a relayer can take, and both are this narrow:
+ *
+ *   - an in-process relayer object, used here;
+ *   - the Gate server's remote relay endpoint, used through `remote-relay.js`,
+ *     where the funded wallet lives server-side and Bankr never holds a key.
  *
  * The interface is intentionally narrow. There is no arbitrary-call
  * abstraction: a relayer receives one already-prepared splitter settlement and
@@ -33,8 +40,11 @@ const REQUIRED_RELAYER_CAPABILITIES = Object.freeze(["getAddress", "sendTransact
 
 const PREPARED_TX_FIELDS = Object.freeze(["to", "data", "value"]);
 
-function rejected(message) {
-  return new BankrGateError("PREPARED_TX_REJECTED", message);
+// The field list is the shared guard's, restated here so a drift fails at load
+// rather than at broadcast.
+if (PREPARED_TX_FIELDS.length !== PREPARED_SETTLEMENT_FIELDS.length
+    || PREPARED_TX_FIELDS.some((field, index) => field !== PREPARED_SETTLEMENT_FIELDS[index])) {
+  throw new Error("the Bankr prepared-transaction fields have drifted from the canonical Gate fields");
 }
 
 function assertRelayerCapabilities(relayer) {
@@ -42,90 +52,60 @@ function assertRelayerCapabilities(relayer) {
   if (missing.length) {
     throw new BankrGateError(
       "RELAYER_UNAVAILABLE",
-      `A funded Base Sepolia relayer is required and this one cannot ${missing.join(", ")}. `
-      + "Bankr signs the payment; it does not broadcast it.",
+      `A funded Base mainnet relayer is required and this one cannot ${missing.join(", ")}. `
+      + "Bankr signs the payment; it does not broadcast it. "
+      + "Configure GAVEL_GATE_RELAYER_URL to use the Gate server's remote relay instead.",
     );
   }
   return relayer;
-}
-
-function isZeroValue(value) {
-  if (value === undefined || value === null) return false;
-  try {
-    return BigInt(value) === 0n;
-  } catch {
-    return false;
-  }
 }
 
 /**
  * Re-derives and re-checks a prepared transaction against the authoritative
  * quote, immediately before it is broadcast.
  *
- * This runs a second time at broadcast even though `authorizePayment` built the
- * object, because the relayer boundary is the last point at which a substituted
- * target, a mutated calldata, or a smuggled ETH value could still be caught.
- * Nothing here trusts the caller's description of the transaction: every value
- * is decoded back out of the calldata that will actually execute.
+ * The checks themselves live in `@gavel/gate` so the Gate server's remote relay
+ * applies exactly the same ones server-side before it spends gas. This wrapper
+ * only restates a refusal in this client's error type.
  */
 function assertPreparedTransaction(prepared, quote, nowSeconds) {
-  if (!prepared || typeof prepared !== "object" || Array.isArray(prepared)) {
-    throw rejected("A prepared settlement transaction is required.");
-  }
-  const extras = Object.keys(prepared).filter((field) => !PREPARED_TX_FIELDS.includes(field));
-  if (extras.length) throw rejected(`A prepared settlement carries only to, data, and value; got ${extras[0]}.`);
-
-  // 1. The destination is the authoritative splitter from the signed quote's
-  //    EIP-712 domain, never a configured or caller-supplied address.
-  let to;
   try {
-    to = getAddress(String(prepared.to));
-  } catch {
-    throw rejected("The prepared transaction has no usable destination.");
+    return assertPreparedSettlement(prepared, quote, nowSeconds);
+  } catch (error) {
+    throw asBankrError(error);
   }
-  const splitter = getAddress(quote.domain.verifyingContract);
-  if (to !== splitter) throw rejected("The prepared transaction does not target the Gate splitter this quote names.");
+}
 
-  // 2. The selector is exactly the splitter's `settle`.
-  if (typeof prepared.data !== "string" || !prepared.data.startsWith(SETTLE_SELECTOR)) {
-    throw rejected("The prepared transaction is not a Gate splitter settlement.");
+/**
+ * Refuses a relayer that is the payer.
+ *
+ * The payer's USDC authority is the EIP-3009 signature; a relayer only pays
+ * gas. Collapsing the two accounts would put the funded wallet back inside the
+ * payment path, which is the thing this split exists to prevent.
+ */
+function assertRelayerIsNotPayer(relayerAddress, quote) {
+  const relayer = getAddress(relayerAddress);
+  if (relayer === getAddress(quote.message.payer)) {
+    throw new BankrGateError(
+      "RELAYER_IS_PAYER",
+      "The relayer must be a separate funded account, not the payer wallet.",
+    );
   }
+  return relayer;
+}
 
-  // 3. No ETH moves. Settlement is USDC through EIP-3009 only.
-  if (!isZeroValue(prepared.value)) throw rejected("A Gate settlement never sends ETH.");
-
-  // 4. The calldata decodes back to this exact quote.
-  const decoded = decodeSettleCall(prepared.data);
-  const payer = getAddress(quote.message.payer);
-  const mismatches = [
-    [decoded.quote.quoteId, String(quote.message.quoteId).toLowerCase(), "quote id"],
-    [decoded.quote.payer, payer, "payer"],
-    [decoded.quote.voter, getAddress(quote.message.voter), "voter"],
-    [decoded.quote.attentionAmount, quote.message.attentionAmount, "attention amount"],
-    [decoded.quote.gavelFeeAmount, quote.message.gavelFeeAmount, "Gavel fee"],
-    [decoded.quote.submissionHash, String(quote.message.submissionHash).toLowerCase(), "submission hash"],
-    [decoded.quote.token, getAddress(quote.message.token), "token"],
-    [decoded.quote.expiry, quote.message.expiry, "expiry"],
-    [decoded.quote.quoteVersion, quote.message.quoteVersion, "quote version"],
-    [decoded.quoteSignature, quote.signature, "Gate quote signature"],
-    // 5. The authorization pays FROM the Bankr payer TO the splitter, for the
-    //    quote total. A relayer can never become the `from`.
-    [decoded.authorization.from, payer, "authorization payer"],
-    [decoded.authorization.to, splitter, "authorization recipient"],
-    [decoded.authorization.value, quote.totalAmount, "authorization amount"],
-    [decoded.authorization.nonce, String(quote.message.quoteId).toLowerCase(), "authorization nonce"],
-    [decoded.authorization.validBefore, quote.message.expiry, "authorization expiry"],
-  ].filter(([actual, expected]) => actual !== expected);
-  if (mismatches.length) {
-    throw rejected(`The prepared settlement does not match this quote's ${mismatches[0][2]}.`);
-  }
-
-  // 6. An expired quote is dead on arrival: the splitter reverts on it, so
-  //    broadcasting would only burn gas.
-  if (nowSeconds !== undefined && BigInt(quote.message.expiry) <= BigInt(Math.floor(Number(nowSeconds)))) {
-    throw new BankrGateError("QUOTE_EXPIRED", "This quote expired before it was broadcast. Nothing was sent.");
-  }
-  return Object.freeze({ to, data: prepared.data, value: "0x0" });
+/** The receipt shape every broadcast path returns, local or remote. */
+function broadcastReceipt({ txHash, quote, relayer, remote = false }) {
+  return Object.freeze({
+    txHash,
+    chainId: String(quote.chainId),
+    relayer,
+    payer: getAddress(quote.message.payer),
+    broadcast: true,
+    remote,
+    // A relayer receipt is never acceptance. Only Gate accepts.
+    accepted: false,
+  });
 }
 
 /**
@@ -142,13 +122,7 @@ async function broadcastSettlement({ relayer, prepared, quote, nowSeconds } = {}
   assertRelayerCapabilities(relayer);
   const safe = assertPreparedTransaction(prepared, quote, nowSeconds);
 
-  const relayerAddress = getAddress(await relayer.getAddress());
-  if (relayerAddress === getAddress(quote.message.payer)) {
-    throw new BankrGateError(
-      "RELAYER_IS_PAYER",
-      "The relayer must be a separate funded account, not the payer wallet.",
-    );
-  }
+  const relayerAddress = assertRelayerIsNotPayer(await relayer.getAddress(), quote);
 
   let txHash;
   try {
@@ -161,15 +135,7 @@ async function broadcastSettlement({ relayer, prepared, quote, nowSeconds } = {}
       { cause: error },
     );
   }
-  return Object.freeze({
-    txHash,
-    chainId: String(quote.chainId),
-    relayer: relayerAddress,
-    payer: getAddress(quote.message.payer),
-    broadcast: true,
-    // A relayer receipt is never acceptance. Only Gate accepts.
-    accepted: false,
-  });
+  return broadcastReceipt({ txHash, quote, relayer: relayerAddress });
 }
 
 module.exports = {
@@ -177,5 +143,7 @@ module.exports = {
   REQUIRED_RELAYER_CAPABILITIES,
   assertPreparedTransaction,
   assertRelayerCapabilities,
+  assertRelayerIsNotPayer,
+  broadcastReceipt,
   broadcastSettlement,
 };

@@ -44,6 +44,8 @@ const GATE_ERROR_COPY = Object.freeze({
   REQUEST_TOO_LARGE: "This request is larger than Gate accepts.",
   EXPIRED: "This quote expired before it was paid.",
   INVALID_SETTLEMENT: "Gate rejected this settlement hint.",
+  INVALID_RELAY: "Gate rejected this relay request. Nothing was broadcast.",
+  NOT_PAYABLE: "Gate has already moved past this quote; there is nothing to broadcast.",
   INVALID_AUTH_CHALLENGE: "Gate rejected this authentication challenge request.",
   INVALID_AUTH_PROOF: "Gate rejected this wallet session proof.",
 });
