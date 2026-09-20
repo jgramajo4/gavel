@@ -21,6 +21,7 @@ const enrollment = require('./enrollment');
 const nounsGateAdapter = require('./nouns-gate-adapter');
 const nounsCandidate = require('./nouns-candidate');
 const settlement = require('./settlement');
+const preparedSettlement = require('./prepared-settlement');
 
 module.exports = {
   ...constants,
@@ -30,6 +31,7 @@ module.exports = {
   ...nounsGateAdapter,
   ...nounsCandidate,
   ...settlement,
+  ...preparedSettlement,
   SUBMISSION_HASH_DOMAIN_TAG: submissionHash.SUBMISSION_HASH_DOMAIN_TAG,
   createDaoPolicySchema: schema.createDaoPolicySchema,
   validateDaoPolicy: schema.validateDaoPolicy,

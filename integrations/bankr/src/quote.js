@@ -75,9 +75,9 @@ function parseIssuedQuote(quote) {
  * Refuses a quote this integration must not sign for.
  *
  * Expiry is checked before anything touches the wallet, so an expired quote
- * costs zero wallet interactions. The chain allow-list is what keeps this
- * hackathon flow on Base Sepolia: a quote for any other chain — Base mainnet
- * included — is refused rather than paid.
+ * costs zero wallet interactions. The chain allow-list is what keeps this flow
+ * on Base mainnet: a quote for any other chain — Base Sepolia included — is
+ * refused rather than paid.
  */
 function assertPayableQuote(quote, nowSeconds, { allowedChainIds = DEFAULT_ALLOWED_CHAIN_IDS } = {}) {
   const allowed = [...allowedChainIds].map(Number);

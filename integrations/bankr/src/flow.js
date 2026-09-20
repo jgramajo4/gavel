@@ -13,6 +13,7 @@ const { resolveTarget } = require("./targets");
 const { resolveConfig } = require("./config");
 const { assertWalletCapabilities } = require("./wallet");
 const { assertRelayerCapabilities } = require("./relayer");
+const { createRemoteRelay } = require("./remote-relay");
 
 /**
  * The Bankr advocate flow, as discrete steps.
@@ -30,6 +31,7 @@ function createBankrGateFlow({
   indexApi,
   wallet,
   relayer,
+  remoteRelay,
   config,
   env = process.env,
   fetchImpl,
@@ -49,12 +51,20 @@ function createBankrGateFlow({
   });
   if (wallet) assertWalletCapabilities(wallet);
   if (relayer) assertRelayerCapabilities(relayer);
+  // The funded account is either in process or on the Gate server. A Bankr
+  // sandbox is ephemeral and holds no key, so the remote relay is the normal
+  // production path; an in-process relayer stays supported and takes priority.
+  const relay = remoteRelay || (resolved.relayerUrl
+    ? createRemoteRelay({ relayUrl: resolved.relayerUrl, fetchImpl, timeoutMs: resolved.requestTimeoutMs })
+    : null);
   const displayChainId = resolved.allowedChainIds[0];
 
   return Object.freeze({
     config: resolved,
     gateApi: gate,
     indexApi: index,
+    /** Where the gas gets paid: "local", "remote", or null when neither exists. */
+    relayMode: relayer ? "local" : (relay ? "remote" : null),
 
     /** 1. Resolve a REAL Nouns candidate or proposal through canonical data. */
     resolveTarget(input) {
@@ -124,16 +134,24 @@ function createBankrGateFlow({
       });
     },
 
-    /** 6b. A separate funded relayer broadcasts that exact prepared transaction. */
-    broadcast({ prepared, quote, onPhase }) {
-      return broadcastPayment({ relayer, prepared, quote, onPhase, now });
+    /**
+     * 6b. A separate funded relayer broadcasts that exact prepared transaction.
+     *
+     * `session` and `publicId` are required only on the remote path, where Gate
+     * resolves the quote from its OWN owner-bound record of this submission.
+     */
+    broadcast({ prepared, quote, session, publicId, onPhase }) {
+      return broadcastPayment({ relayer, remoteRelay: relay, session, publicId, prepared, quote, onPhase, now });
     },
 
     /** 6. Authorize then broadcast. A broadcast is never success. */
-    pay({ quote, confirmed, onPhase }) {
+    pay({ quote, confirmed, session, publicId, onPhase }) {
       return payQuote({
         wallet,
         relayer,
+        remoteRelay: relay,
+        session,
+        publicId,
         quote,
         confirmed,
         onPhase,
@@ -202,7 +220,13 @@ async function sendAttentionRequest({
     );
   }
 
-  const payment = await flow.pay({ quote: receipt.quote, confirmed: true, onPhase: (phase) => onPhase(phase, {}) });
+  const payment = await flow.pay({
+    quote: receipt.quote,
+    confirmed: true,
+    session,
+    publicId: receipt.publicId,
+    onPhase: (phase) => onPhase(phase, {}),
+  });
   const hint = await flow.submitSettlementHint({ session, publicId: receipt.publicId, payment });
   onPhase("settlement_hint_recorded", { txHash: payment.txHash });
 

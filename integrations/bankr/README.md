@@ -96,6 +96,12 @@ and each step is a call into Gate's own surfaces:
   relayer broadcasts the exact prepared `settle` transaction. The splitter does
   not require `msg.sender == payer`, so the gas payer and the USDC payer are
   different accounts. There is no ERC-20 approve flow and no private key is read;
+- that relayer is either in process or remote. A Bankr sandbox holds no funded
+  key, so with `GAVEL_GATE_RELAYER_URL` set the client sends Gate the
+  authorization signature alone and Gate — which signed the quote — rebuilds the
+  settlement from its own record, re-runs the same guard, and broadcasts with a
+  gas-only wallet that never holds USDC. No target, calldata, or value crosses
+  that boundary in either direction, so it cannot become a transaction relay;
 - the broadcast transaction hash goes to Gate as a settlement HINT. Neither a
   mined transaction nor a successful relayer receipt is acceptance: only Gate
   returning the authoritative `accepted` means the request reached the voter's

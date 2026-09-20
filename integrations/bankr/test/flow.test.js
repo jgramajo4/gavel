@@ -399,3 +399,177 @@ test("a voter who stopped accepting blocks the flow before any Gate session is o
   );
   assert.equal(walletStub.calls.signTypedData.length, 0);
 });
+
+// --- remote relay ------------------------------------------------------------
+
+const RELAY_ORIGIN = "https://relay.0773h.com";
+const RELAY_TX = `0x${"ab".repeat(32)}`;
+
+/** The stub world plus the Gate relay route, recorded like every other call. */
+function relayWorld({ status = 200, body } = {}) {
+  const base = stubWorld();
+  const inner = base.fetchImpl;
+  const relayCalls = [];
+  return {
+    calls: base.calls,
+    relayCalls,
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).endsWith(`/v1/submissions/${PUBLIC_ID}/relay`)) {
+        base.calls.push({ url: String(url), method: options.method, headers: options.headers, body: options.body });
+        relayCalls.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) });
+        const payload = body ?? { txHash: RELAY_TX, chainId: String(BASE_MAINNET), relayer: RELAYER };
+        return { status, async text() { return JSON.stringify(payload); } };
+      }
+      return inner(url, options);
+    },
+  };
+}
+
+function remoteFlowFor(world, { relayerUrl = RELAY_ORIGIN } = {}) {
+  const walletStub = createWalletStub();
+  return {
+    walletStub,
+    flow: createBankrGateFlow({
+      wallet: walletStub.wallet,
+      // No in-process relayer: a Bankr sandbox holds no funded key.
+      fetchImpl: world.fetchImpl,
+      config: {
+        gateUrl: "https://gate.0773h.com",
+        indexUrl: "https://index.0773h.com",
+        ...(relayerUrl ? { relayerUrl } : {}),
+        dao: "nouns",
+        allowedChainIds: [BASE_MAINNET],
+        requestTimeoutMs: 5_000,
+      },
+      now: () => 1_800_000_000_000,
+      sleep: async () => {},
+    }),
+  };
+}
+
+test("RELAYER_UNAVAILABLE is gone once a remote relay is configured", async () => {
+  const world = relayWorld();
+  const { flow, walletStub } = remoteFlowFor(world);
+  assert.equal(flow.relayMode, "remote");
+
+  const phases = [];
+  const result = await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "This candidate funds a Nouns builder grant. Please sponsor it.",
+    confirm: async () => true,
+    onPhase: (phase) => phases.push(phase),
+    poll: { attempts: 5 },
+  });
+
+  assert.equal(result.delivered, true);
+  assert.equal(result.payment.txHash, RELAY_TX);
+  assert.equal(result.payment.remote, true);
+  assert.equal(result.payment.relayer, RELAYER);
+  assert.equal(result.payment.payer, PAYER);
+  assert.equal(result.payment.accepted, false);
+  assert.ok(phases.includes("broadcasting") && phases.includes("broadcast"));
+
+  // Exactly one relay call, carrying one signature and no transaction fields.
+  assert.equal(world.relayCalls.length, 1);
+  assert.deepEqual(Object.keys(world.relayCalls[0].body), ["authorization"]);
+  assert.deepEqual(Object.keys(world.relayCalls[0].body.authorization), ["signature"]);
+  assert.equal(world.relayCalls[0].headers.authorization, `Bearer ${"T".repeat(43)}`);
+
+  // Bankr signed twice — the WalletSession proof and the EIP-3009
+  // authorization — and broadcast nothing itself.
+  assert.equal(walletStub.calls.signTypedData.length, 2);
+  assert.equal(typeof walletStub.wallet.sendTransaction, "undefined");
+});
+
+test("without a relayer and without a relay origin, payment still fails by name", async () => {
+  const world = relayWorld();
+  const { flow, walletStub } = remoteFlowFor(world, { relayerUrl: null });
+  assert.equal(flow.relayMode, null);
+
+  await assert.rejects(
+    sendAttentionRequest({
+      flow,
+      target: { targetId: candidateTargetIdFixture() },
+      voterWallet: VOTER.toLowerCase(),
+      pitch: "Please sponsor this candidate.",
+      confirm: async () => true,
+      poll: { attempts: 5 },
+    }),
+    (error) => error.code === "RELAYER_UNAVAILABLE" && /does not broadcast/.test(error.message),
+  );
+  assert.equal(world.relayCalls.length, 0);
+  // The authorization was signed, and nothing was broadcast by Bankr.
+  assert.equal(walletStub.calls.signTypedData.length, 2);
+});
+
+test("an in-process relayer still takes priority over a configured relay origin", async () => {
+  const world = relayWorld();
+  const relayerStub = createRelayerStub();
+  const walletStub = createWalletStub();
+  const flow = createBankrGateFlow({
+    wallet: walletStub.wallet,
+    relayer: relayerStub.relayer,
+    fetchImpl: world.fetchImpl,
+    config: {
+      gateUrl: "https://gate.0773h.com",
+      indexUrl: "https://index.0773h.com",
+      relayerUrl: RELAY_ORIGIN,
+      dao: "nouns",
+      allowedChainIds: [BASE_MAINNET],
+      requestTimeoutMs: 5_000,
+    },
+    now: () => 1_800_000_000_000,
+    sleep: async () => {},
+  });
+  assert.equal(flow.relayMode, "local");
+
+  const result = await sendAttentionRequest({
+    flow,
+    target: { targetId: candidateTargetIdFixture() },
+    voterWallet: VOTER.toLowerCase(),
+    pitch: "Please sponsor this candidate.",
+    confirm: async () => true,
+    poll: { attempts: 5 },
+  });
+  assert.equal(relayerStub.calls.sendTransaction.length, 1);
+  assert.equal(world.relayCalls.length, 0);
+  assert.equal(result.payment.remote, false);
+});
+
+test("a refused remote relay leaves the quote resumable and nothing accepted", async () => {
+  const world = relayWorld({ status: 409, body: { state: "pending_settlement", error: { code: "NOT_PAYABLE", message: "nothing to broadcast" } } });
+  const { flow } = remoteFlowFor(world);
+  await assert.rejects(
+    sendAttentionRequest({
+      flow,
+      target: { targetId: candidateTargetIdFixture() },
+      voterWallet: VOTER.toLowerCase(),
+      pitch: "Please sponsor this candidate.",
+      confirm: async () => true,
+      poll: { attempts: 5 },
+    }),
+    (error) => error.code === "NOT_PAYABLE" && error.state === "pending_settlement",
+  );
+  // No settlement hint was recorded for a settlement that never happened.
+  assert.equal(world.calls.filter((call) => call.url.endsWith("/settlement")).length, 0);
+});
+
+test("the remote relay is never handed the payer's confirmation-free path", async () => {
+  const world = relayWorld();
+  const { flow, walletStub } = remoteFlowFor(world);
+  await assert.rejects(
+    sendAttentionRequest({
+      flow,
+      target: { targetId: candidateTargetIdFixture() },
+      voterWallet: VOTER.toLowerCase(),
+      pitch: "Please sponsor this candidate.",
+      confirm: async () => false,
+    }),
+    (error) => error.code === "CONFIRMATION_REQUIRED",
+  );
+  assert.equal(world.relayCalls.length, 0);
+  // One signature only: the WalletSession proof. Nothing was authorized.
+  assert.equal(walletStub.calls.signTypedData.length, 1);
+});

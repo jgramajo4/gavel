@@ -702,3 +702,97 @@ test("canonical runtime observes actual worker return values without changing th
   assert.deepEqual(await runtime.runOnce(), [3, results.scan, results.reconcile, results.monitor]);
   assert.deepEqual(observed, [["expire", 3], ["scan", results.scan], ["reconcile", results.reconcile], ["monitor", results.monitor]]);
 });
+
+// --- remote relay ------------------------------------------------------------
+
+const { Wallet } = require("ethers");
+
+const RELAYER_KEY = `0x${"3".repeat(64)}`;
+const RELAYER_ADDRESS = new Wallet(RELAYER_KEY).address;
+const relayEnv = (overrides = {}) => ({
+  GAVEL_GATE_RELAYER_KEY: RELAYER_KEY,
+  GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS,
+  ...overrides,
+});
+
+const relayFactories = (overrides = {}) => ({
+  createBaseSettlementAdapter: () => ({ adapter: true }),
+  createSettlementService: () => ({
+    async scanOnce() {}, async reconcileSubmitted() {}, async monitorOnce() {},
+  }),
+  ...overrides,
+});
+
+function relayServices() {
+  const input = services();
+  // A raw relayer key broadcasts through the Base provider this process
+  // already holds; it never opens an endpoint of its own.
+  input.baseClient = { ...input.baseClient, provider: { getTransactionCount: async () => 0 } };
+  return input;
+}
+
+test("no relay configuration means no relay service and no relay route", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const options = [];
+  const runtime = await createGateServerRuntime({
+    ...relayServices(),
+    env: productionEnv(),
+    factories: relayFactories({ createGateHttpServer(input) { options.push(input); return { server: true }; } }),
+  });
+  assert.equal(runtime.relayService, null);
+  assert.equal(Object.hasOwn(options[0], "relayService"), false);
+});
+
+test("a configured relayer composes the relay service from the attested deployment", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const calls = [];
+  const relayService = { relaySettlement: async () => ({}) };
+  const input = relayServices();
+  const runtime = await createGateServerRuntime({
+    ...input,
+    env: { ...productionEnv(), ...relayEnv() },
+    factories: relayFactories({
+      createGateRelayService(options) { calls.push(["relay", options]); return relayService; },
+      createGateHttpServer(options) { calls.push(["http", options]); return { server: true }; },
+    }),
+  });
+
+  assert.equal(runtime.relayService, relayService);
+  const [, relayOptions] = calls.find(([kind]) => kind === "relay");
+  assert.equal(relayOptions.relayer.address, RELAYER_ADDRESS);
+  assert.equal(relayOptions.submissionService, input.submissionService);
+  assert.deepEqual(relayOptions.deployment, {
+    chainId: "8453", splitter: SPLITTER, token: CANONICAL_BASE_USDC.toLowerCase(), quoteSigner: SIGNER,
+  });
+  // The token domain is the ATTESTED one, never a guess.
+  assert.deepEqual(relayOptions.tokenDomain, { name: "USD Coin", version: "2" });
+  const [, httpOptions] = calls.find(([kind]) => kind === "http");
+  assert.equal(httpOptions.relayService, relayService);
+});
+
+test("relay configuration fails closed on a partial pair, a mismatch, and a missing settlement runtime", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const failures = [
+    [relayEnv({ GAVEL_GATE_RELAYER_ADDRESS: undefined }), /GAVEL_GATE_RELAYER_ADDRESS/],
+    [relayEnv({ GAVEL_GATE_RELAYER_KEY: undefined }), /GAVEL_GATE_RELAYER_KEY/],
+    [relayEnv({ GAVEL_GATE_RELAYER_KEY: "not-a-key" }), /32-byte hex private key/],
+    [relayEnv({ GAVEL_GATE_RELAYER_ADDRESS: `0x${"9".repeat(40)}` }), /does not match/],
+  ];
+  for (const [env, pattern] of failures) {
+    await assert.rejects(
+      createGateServerRuntime({ ...relayServices(), env: { ...productionEnv(), ...env }, factories: relayFactories() }),
+      pattern,
+      JSON.stringify(Object.keys(env)),
+    );
+  }
+
+  // A funded wallet with no authoritative deployment to validate against.
+  await assert.rejects(
+    createGateServerRuntime({
+      ...relayServices(),
+      env: { GAVEL_GATE_NOTIFIER_MODE: "disabled", ...relayEnv() },
+      factories: relayFactories(),
+    }),
+    /requires a configured settlement runtime/,
+  );
+});

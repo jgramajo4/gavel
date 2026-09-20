@@ -102,6 +102,7 @@ Environment (Bankr secure Env Vars; refer to them by name, never echo a value):
 | `GAVEL_GATE_URL` | The **production Gate API** origin. Required. Origin only — no path, query, or credentials. |
 | `GAVEL_INDEX_API_URL` | Optional. Defaults to the public `https://index.0773h.com`. |
 | `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `8453` (Base mainnet). |
+| `GAVEL_GATE_RELAYER_URL` | The Gate **remote relay** origin. Origin only, HTTPS, public hostname. Without it there is no way to broadcast from this sandbox. |
 | Relayer credentials | Held by the relayer, never by this skill. See "Payment" below. |
 
 This is **Base mainnet, chain `8453`, and real USDC**. Money here is real. A
@@ -251,7 +252,25 @@ else: it cannot substitute a target, mutate calldata, add ETH value, or become
 the authorization's `from`, and it never receives a Gate session token, a Bankr
 API credential, or an RPC credential.
 
-If no relayer is configured, stop and say so. **Do not fall back to broadcasting
+A Bankr sandbox is ephemeral and holds no funded key, so the relayer is normally
+**remote**: set `GAVEL_GATE_RELAYER_URL` and the client sends Gate the signature
+and nothing else —
+
+```
+POST {GAVEL_GATE_RELAYER_URL}/v1/submissions/{publicId}/relay
+Authorization: Bearer <the Gate session this payer already holds>
+
+{ "authorization": { "signature": "0x…" } }
+```
+
+— and Gate, which signed the quote, rebuilds the settlement from its own record,
+re-runs the same checks server-side, and broadcasts with its gas-only wallet.
+No `to`, no `data`, and no `value` is sent or accepted, so the relay cannot be
+used to submit any other transaction. The reply is `{ txHash, chainId, relayer }`
+and nothing more.
+
+If no relayer is configured — neither an in-process one nor
+`GAVEL_GATE_RELAYER_URL` — stop and say so. **Do not fall back to broadcasting
 from Bankr.**
 
 There is **no ERC-20 approve flow**. Never ask for, accept, or print a private
@@ -294,7 +313,9 @@ yet, and no new quote is needed. If Gate eventually returns
 | `INSUFFICIENT_BALANCE` | The payer wallet is short of the total. Nothing was signed. |
 | `AUTHORIZATION_FAILED` | The wallet did not authorize the payment. |
 | `BROADCAST_FAILED` | The relayer did not get the transaction onto the network. |
-| `RELAYER_UNAVAILABLE` | No funded relayer is configured. Bankr signs; it does not broadcast. |
+| `RELAYER_UNAVAILABLE` | No funded relayer is configured and `GAVEL_GATE_RELAYER_URL` is unset. Bankr signs; it does not broadcast. |
+| `NOT_PAYABLE` | Gate has already moved past this quote; nothing was broadcast. Read the state it reports. |
+| `TRANSPORT_FAILED` | The Gate or relay request did not complete. The outcome is **unknown**: check the submission's status; do not pay again. |
 | `RELAYER_IS_PAYER` | The relayer must be a separate account from the payer wallet. |
 | `PREPARED_TX_REJECTED` | The transaction handed to the relayer does not match the quote. |
 | `pending_settlement` | Broadcast succeeded; Gate is still verifying. Not delivered. |

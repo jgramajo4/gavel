@@ -27,6 +27,7 @@ const {
 | `wallet.js` | The Bankr SIGNING capability surface and the EIP-1193 adapter. |
 | `splitter.js` | Splitter ABI, `settle` encoding, and calldata decoding. |
 | `relayer.js` | The narrow broadcaster boundary and its pre-broadcast assertions. |
+| `remote-relay.js` | The Gate remote relay client, for a sandbox with no funded key. |
 | `payment.js` | `authorizePayment` (sign + prepare) and `broadcastPayment` (relay). |
 | `settlement.js` | Settlement hint, authoritative status polling, state copy. |
 | `flow.js` | The ordered advocate flow and `sendAttentionRequest`. |
@@ -53,6 +54,12 @@ Relayer       --broadcasts--> splitter.settle()     (pays gas; is NOT the payer)
 ```
 
 Bankr signs; it never broadcasts. There is no broadcast fallback.
+
+The relayer is either in process or **remote**. A Bankr sandbox is ephemeral and
+holds no funded key, so the funded wallet normally lives on the Gate server and
+the client reaches it through `remote-relay.js`. An in-process relayer, when one
+is supplied, takes priority; with neither, payment fails by name with
+`RELAYER_UNAVAILABLE`.
 
 ## Wallet capability surface (signing only)
 
@@ -94,6 +101,36 @@ transaction from the authoritative quote and refuses unless all of these hold:
 - the prepared object carries no field beyond `to`, `data`, and `value`;
 - the relayer address is not the payer.
 
+## Remote relay
+
+```
+POST {GAVEL_GATE_RELAYER_URL}/v1/submissions/{publicId}/relay
+Authorization: Bearer <Gate base_sender session>
+
+{ "authorization": { "signature": "0x<65 bytes>" } }   ->  200 { txHash, chainId, relayer }
+```
+
+The request body is the entire wire contract. There is no `to`, no `data`, and
+no `value`: Gate resolves the quote from its OWN owner-bound record of this
+submission, rebuilds the `settle` calldata from it, re-runs the same
+`assertPreparedSettlement` guard server-side, and only then hands its gas-only
+wallet `{ to, data, value: 0 }`. A body carrying a transaction field is refused
+by name, not ignored, so the relay cannot become a general transaction relay.
+
+Before sending, the client still runs the full guard locally and reads the
+signature back out of the calldata the guard approved — which is what proves the
+signature it sends belongs to this quote and no other.
+
+`GAVEL_GATE_RELAYER_URL` is origin-only and must be a public HTTPS hostname. An
+IP literal, a loopback, a LAN address, plain HTTP, a path, a query, credentials,
+or a reserved test name (`.local`, `.test`, `.internal`, `example.com`, ...) is
+a configuration failure, not a fallback: the client refuses to build a relay
+with one.
+
+On a transport failure the outcome is **UNKNOWN** - the relay may have broadcast
+before the connection dropped. Read the submission's Gate status; never sign a
+second payment.
+
 `createEip1193Wallet(provider)` adapts a standard provider. The only
 adaptation is adding the `EIP712Domain` type entry `eth_signTypedData_v4`
 requires — the domain, the ordered types, the primary type, and every message
@@ -107,7 +144,9 @@ There is no method that reads, derives, exports, or accepts a private key.
 ```js
 const flow = createBankrGateFlow({
   wallet: createEip1193Wallet(provider),   // signs
-  relayer,                                  // broadcasts; separate funded account
+  // Broadcasting: either an in-process `relayer` object, or
+  // GAVEL_GATE_RELAYER_URL in the environment for Gate's remote relay. Both are
+  // separate funded accounts; neither is ever the payer.
   env: process.env,
 });
 

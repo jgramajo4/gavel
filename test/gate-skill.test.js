@@ -182,9 +182,13 @@ test("the error table names real client codes, and covers the ones that matter",
 
   // Gate's own vocabulary, which the advocate reports verbatim: lifecycle
   // states and server-side rejections. They are not client error codes, so
-  // they are not expected to appear in this package's source.
+  // they are not expected to appear in this package's source. The rejection
+  // codes are read from the client's own copy table rather than restated here,
+  // so a new Gate code cannot be documented without also being translated.
+  const { GATE_ERROR_COPY } = require(path.join(skillDir, "src", "errors.js"));
   const gateVocabulary = new Set([
-    "pending_settlement", "rejected_by_policy", "duplicate", "ACTIVE_QUOTE_EXISTS",
+    "pending_settlement", "rejected_by_policy", "duplicate",
+    ...Object.keys(GATE_ERROR_COPY),
   ]);
   // Only the error table, not the environment table above it.
   const errorTable = skill.slice(skill.indexOf("## Errors to handle plainly"));
