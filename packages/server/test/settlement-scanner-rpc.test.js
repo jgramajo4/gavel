@@ -29,8 +29,10 @@ function harness({ from = 1_000n, through = 1_010n, settlements = [], noiseLogsP
   const chain = createSyntheticChain({ fromBlock: BigInt(from) - 1n, head: BigInt(through) + 1n,
     splitter: SPLITTER, settlements, noiseLogsPerBlock, noiseTxPerBlock: 2, seed });
   const counting = createCountingClient(chain, { splitter: SPLITTER, overrides, ...clientOptions });
+  // The bloom audit samples randomly, so it is off by default here: the call-count assertions
+  // below measure the pure discovery path. Tests that exercise the audit opt in explicitly.
   const adapter = createBaseSettlementAdapter({ client: counting.client, chainId: 8453, splitter: SPLITTER,
-    maxBlockRange: 100_000, rpcTimeoutMs: 60_000, ...options });
+    maxBlockRange: 100_000, rpcTimeoutMs: 60_000, bloomAuditRate: 0, ...options });
   return { chain, counting, adapter, scan: () => adapter.scanRange({ fromBlock: BigInt(from), throughBlock: BigInt(through) }) };
 }
 
@@ -436,4 +438,109 @@ test("a log pinned to an orphaned sibling block is dropped, not accepted and not
   assert.equal(result.candidates.length, 1);
   assert.equal(result.candidates[0].receiptBlock, "1005");
   assert.equal(result.rpcStats.nonCanonicalLogs, 1);
+});
+
+test("the bloom audit reads a bounded sample of skipped blocks and is capped", async () => {
+  const h = harness({ from: 1_000n, through: 1_099n, options: { bloomAuditRate: 0.1, bloomAuditCap: 64 } });
+  const result = await h.scan();
+
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.rpcStats.auditedBlocks, 10);
+  // Two receipt RPCs per audited block, plus one header re-read for its transaction set.
+  assert.equal(h.counting.calls("eth_getBlockReceipts"), 10);
+  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 10);
+  assert.equal(h.counting.calls("eth_getBlockByNumber"), expectedHeaderCalls(100) + 10);
+
+  const capped = harness({ from: 1_000n, through: 1_999n, options: { bloomAuditRate: 1, bloomAuditCap: 8 } });
+  const cappedResult = await capped.scan();
+  assert.equal(cappedResult.rpcStats.auditedBlocks, 8);
+  assert.equal(capped.counting.calls("eth_getBlockReceipts"), 8);
+
+  const disabled = harness({ from: 1_000n, through: 1_099n, options: { bloomAuditRate: 0 } });
+  const disabledResult = await disabled.scan();
+  assert.equal(disabledResult.rpcStats.auditedBlocks, 0);
+  assert.equal(disabled.counting.calls("eth_getBlockReceipts"), 0);
+
+  assert.throws(() => createBaseSettlementAdapter({ client: h.counting.client, chainId: 8453,
+    splitter: SPLITTER, bloomAuditRate: 1.5 }), /bloomAuditRate must be from 0 to 1/);
+});
+
+test("the bloom audit fails closed when a bloom-negative block's receipts hold a settlement", async () => {
+  // A provider whose bloom index is corrupted hides the log from the bloom gate AND from
+  // eth_getLogs, because go-ethereum's filter selects candidate blocks by those same blooms.
+  // Auditing every skipped block catches exactly that, and refuses to checkpoint the range.
+  const h = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
+    options: { bloomAuditRate: 1 },
+    overrides: {
+      async getLogs() { return []; },
+      async getBlockHeader(number) {
+        const header = await createCountingClient(h.chain).client.getBlockHeader(number);
+        return Number(number) === 1_020 ? { ...header, logsBloom: `0x${"00".repeat(256)}` } : header;
+      },
+    } });
+
+  await assert.rejects(h.scan(), /canonical receipts contradict a bloom-negative block header/i);
+
+  // With the audit disabled the same corrupted provider yields a silent no-match range, which
+  // is precisely the residual risk the audit exists to bound.
+  const unaudited = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
+    options: { bloomAuditRate: 0 },
+    overrides: {
+      async getLogs() { return []; },
+      async getBlockHeader(number) {
+        const header = await createCountingClient(unaudited.chain).client.getBlockHeader(number);
+        return Number(number) === 1_020 ? { ...header, logsBloom: `0x${"00".repeat(256)}` } : header;
+      },
+    } });
+  const silent = await unaudited.scan();
+  assert.equal(silent.candidates.length, 0);
+});
+
+test("anomaly block numbers leave the adapter as decimal, not raw QUANTITY hex", async () => {
+  // eth_getBlockReceipts returns hex block numbers; observations are persisted as numeric(78,0),
+  // so an un-normalized "0x3ed" would fail the store check and stall the scanner on checkpoint.
+  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6", { status: 0 })] });
+  const result = await h.scan();
+
+  assert.equal(result.anomalies.length, 1);
+  assert.match(String(result.anomalies[0].blockNumber), /^\d{1,78}$/);
+  assert.equal(result.anomalies[0].blockNumber, "1005");
+  assert.equal(result.anomalies[0].blockHash, h.chain.blocks.get("1005").hash);
+  assert.equal(result.anomalies[0].blockTimestamp.valueOf(), h.chain.blocks.get("1005").timestamp * 1_000);
+});
+
+test("a degraded eth_getLogs provider is bounded by a query budget instead of halving forever", async () => {
+  let queries = 0;
+  const h = harness({ from: 1_000n, through: 1_999n,
+    overrides: { async getLogs() { queries += 1; throw new Error("query returned more than 10000 results"); } } });
+
+  await assert.rejects(h.scan(), /exceeded its query budget|log discovery failed/);
+  // Without the budget this would halve to single-block queries: ~2,000 sequential calls.
+  assert.ok(queries <= 64, `expected the halving to stay within budget, issued ${queries}`);
+});
+
+test("scan RPC stats are not polluted by concurrent monitor or reconcile work", async () => {
+  // reconcileSubmitted and monitorOnce run on their own timers against the SAME adapter. Their
+  // RPC calls must not be attributed to an in-flight scan's call-shape telemetry.
+  const h = harness({ from: 1_000n, through: 1_099n, settlements: [settlement(1_050n, "6")] });
+  const block = h.chain.blocks.get("1050");
+  const monitor = { quoteId: H("6"), receiptBlock: "1050", receiptBlockHash: block.hash,
+    txHash: block.receipts.at(-1).transactionHash, logIndex: block.receipts.at(-1).logs[0].index };
+
+  const [scanned] = await Promise.all([
+    h.scan(),
+    // Hammer the adapter's other entry points while the scan is in flight.
+    (async () => {
+      for (let round = 0; round < 5; round += 1) await h.adapter.revalidateMonitor(monitor);
+    })(),
+  ]);
+
+  // The scan's own shape is exact and unchanged despite the concurrent monitor traffic.
+  assert.equal(scanned.rpcStats.headerCalls, expectedHeaderCalls(100));
+  assert.equal(scanned.rpcStats.getLogsCalls, 1);
+  assert.equal(scanned.rpcStats.receiptCalls, 2);
+  assert.equal(scanned.rpcStats.rpcCalls, expectedHeaderCalls(100) + 1 + 2 + 1);
+  // The client counted the monitor traffic too, so the concurrency really did overlap.
+  assert.ok(h.counting.total > scanned.rpcStats.rpcCalls,
+    "expected concurrent monitor calls to be counted by the client but not by the scan");
 });

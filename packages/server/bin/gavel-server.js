@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { Contract, Interface, JsonRpcProvider, toBeHex } = require("ethers");
+const { Contract, Interface, JsonRpcProvider, toQuantity } = require("ethers");
 const { createAuthService } = require("../src/gate/auth");
 const { createEnsNameResolver } = require("../src/gate/ens");
 const { createInboxService } = require("../src/gate/inbox-service");
@@ -247,8 +247,12 @@ function createCanonicalIndexSource({ baseUrl, ethereumProvider, fetchImpl = glo
   });
 }
 
-function createRpcClient(url, chainId, providerOverride) {
-  const provider = providerOverride || new JsonRpcProvider(url, Number(chainId), { staticNetwork: true });
+function createRpcClient(url, chainId, providerOverride, { batchMaxCount } = {}) {
+  // batchMaxCount is exposed because the scanner issues header reads concurrently and relies on
+  // JsonRpcProvider coalescing them into JSON-RPC batches. Providers that reject batched payloads
+  // or cap them below the scanner's concurrency need it lowered (1 disables batching entirely).
+  const provider = providerOverride || new JsonRpcProvider(url, Number(chainId),
+    { staticNetwork: true, ...(batchMaxCount === undefined ? {} : { batchMaxCount }) });
   return Object.freeze({
     provider,
     getChainId: async () => BigInt(await provider.send("eth_chainId", [])).toString(),
@@ -257,11 +261,13 @@ function createRpcClient(url, chainId, providerOverride) {
     // Raw header read: it carries logsBloom (which ethers' Block does not expose) and the
     // block's transaction hash set, so the scanner gets every field it needs in one call.
     // Concurrent sends are coalesced into JSON-RPC batches by JsonRpcProvider.
-    getBlockHeader: (number) => provider.send("eth_getBlockByNumber", [toBeHex(number), false]),
+    // toQuantity, not toBeHex: JSON-RPC QUANTITY forbids leading zeros and go-ethereum rejects
+    // them outright, while toBeHex pads to whole bytes ("0x02255100" for a 7-nibble height).
+    getBlockHeader: (number) => provider.send("eth_getBlockByNumber", [toQuantity(number), false]),
     getLogs: ({ fromBlock, toBlock, address, topics }) => provider.send("eth_getLogs",
       [{ fromBlock, toBlock, address, topics }]),
-    getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toBeHex(number)]),
-    getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toBeHex(number)]),
+    getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toQuantity(number)]),
+    getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toQuantity(number)]),
     getTransactionReceipt: (hash) => provider.getTransactionReceipt(hash),
     getTransaction: (hash) => provider.getTransaction(hash),
     getCode: (target) => provider.getCode(target),
@@ -291,7 +297,8 @@ function contractVerifier(client) {
 async function composeProduction(env) {
   const config = serverConfigFromEnv(env);
   const observability = createGateObservability();
-  const baseClient = createRpcClient(config.baseRpcUrl, config.settlement.chainId);
+  const baseClient = createRpcClient(config.baseRpcUrl, config.settlement.chainId, undefined,
+    { batchMaxCount: config.settlement.rpcBatchMaxCount });
   const ethereumClient = createRpcClient(config.ethereumRpcUrl, "1");
   const store = new PostgresGateStore({ connectionString: config.databaseUrl,
     baseCodeReader: ({ wallet }) => baseClient.getCode(wallet) });

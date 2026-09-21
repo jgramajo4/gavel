@@ -5,7 +5,8 @@ const {
   decodeQuoteSettledLog,
   safeHead,
 } = require("@gavel/gate");
-const { isLogsBloom, logsBloomMayContainEvent } = require("./logs-bloom");
+const { AsyncLocalStorage } = require("node:async_hooks");
+const { isLogsBloom, createLogsBloomMatcher } = require("./logs-bloom");
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -18,8 +19,15 @@ const DEFAULT_MAX_LOG_RANGE = 1_000;
 // into JSON-RPC batches, which turns this bound into "one HTTP round trip per wave".
 const DEFAULT_HEADER_CONCURRENCY = 64;
 const MAX_HEADER_CONCURRENCY = 256;
+// Fraction of bloom-negative blocks read in full anyway, to detect a provider whose bloom
+// index disagrees with its own receipts. 0 disables the audit; 1 restores the old cost.
+const DEFAULT_BLOOM_AUDIT_RATE = 0.01;
+const DEFAULT_BLOOM_AUDIT_CAP = 64;
+// Signals that specifically mean "this eth_getLogs span is too wide", so halving is the remedy.
+// Deliberately excludes rate-limit shapes ("rate limit exceeded", Infura's -32005, bare 429):
+// splitting a throttled query multiplies the requests aimed at a provider already throttling us.
 const RANGE_LIMIT_HINT =
-  /range|too many results|more than \d+ results|limit exceeded|query timeout|exceeds? the limit|block range|response size|-32005/i;
+  /too many results|more than \d+ results|query timeout|block range|response size|log response size/i;
 
 function positive(value, name, fallback) {
   const result = value === undefined ? fallback : Number(value);
@@ -93,6 +101,12 @@ function logFingerprint(log) {
     String(log.data).toLowerCase(), log.topics.map((topic) => String(topic).toLowerCase()),
   ]);
 }
+// Receipt logs arrive as raw JSON-RPC QUANTITY hex. Observations are persisted as numeric(78,0),
+// so a block number must be normalized to decimal before it leaves the adapter.
+function anomalyBlock(log, fallback) {
+  try { return quantity(log?.blockNumber, "log block number").toString(); }
+  catch { return BigInt(fallback).toString(); }
+}
 function isRangeLimitError(error) {
   const message = `${error?.message || ""} ${error?.error?.message || ""} ${error?.code || ""}`;
   return RANGE_LIMIT_HINT.test(message);
@@ -119,21 +133,28 @@ async function mapBounded(items, limit, worker) {
 function settlementConfigFromEnv(env = process.env) {
   const confirmationDepth = positive(env.GAVEL_GATE_CONFIRMATION_DEPTH, "GAVEL_GATE_CONFIRMATION_DEPTH", DEFAULT_CONFIRMATION_DEPTH);
   if (confirmationDepth !== 1) throw new TypeError("GAVEL_GATE_CONFIRMATION_DEPTH must be exactly 1 for the MVP");
+  const maxBlockRange = positive(env.GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE,
+    "GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE", DEFAULT_MAX_BLOCK_RANGE);
+  const headerConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
+    "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", DEFAULT_HEADER_CONCURRENCY);
+  if (headerConcurrency > MAX_HEADER_CONCURRENCY) {
+    throw new TypeError(`GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY must not exceed ${MAX_HEADER_CONCURRENCY}`);
+  }
   return Object.freeze({
     confirmationDepth,
     overlap: positive(env.GAVEL_GATE_REORG_OVERLAP_BLOCKS, "GAVEL_GATE_REORG_OVERLAP_BLOCKS", DEFAULT_SCANNER_OVERLAP),
-    maxBlockRange: positive(env.GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE,
-      "GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE", DEFAULT_MAX_BLOCK_RANGE),
-    maxLogRange: positive(env.GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE,
-      "GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE", DEFAULT_MAX_LOG_RANGE),
-    headerConcurrency: positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
-      "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", DEFAULT_HEADER_CONCURRENCY),
+    maxBlockRange,
+    // Same clamp as settlementRuntimeConfigFromEnv: a scan never spans more than maxBlockRange.
+    maxLogRange: Math.min(positive(env.GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE,
+      "GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE", DEFAULT_MAX_LOG_RANGE), maxBlockRange),
+    headerConcurrency,
   });
 }
 
 function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDepth = DEFAULT_CONFIRMATION_DEPTH,
   overlap = DEFAULT_SCANNER_OVERLAP, maxBlockRange = DEFAULT_MAX_BLOCK_RANGE, maxLogRange = DEFAULT_MAX_LOG_RANGE,
-  headerConcurrency = DEFAULT_HEADER_CONCURRENCY, rpcTimeoutMs = 10_000,
+  headerConcurrency = DEFAULT_HEADER_CONCURRENCY, bloomAuditRate = DEFAULT_BLOOM_AUDIT_RATE,
+  bloomAuditCap = DEFAULT_BLOOM_AUDIT_CAP, rpcTimeoutMs = 10_000,
   clock = () => new Date() } = {}) {
   for (const method of ["getChainId", "getBlockNumber", "getBlockHeader", "getLogs", "getBlockTransactionCount",
     "getBlockReceipts", "getTransactionReceipt", "getTransaction"]) {
@@ -150,14 +171,29 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   const logRangeLimit = positive(maxLogRange, "maxLogRange", DEFAULT_MAX_LOG_RANGE);
   const headerLanes = positive(headerConcurrency, "headerConcurrency", DEFAULT_HEADER_CONCURRENCY);
   if (headerLanes > MAX_HEADER_CONCURRENCY) throw new TypeError(`headerConcurrency must not exceed ${MAX_HEADER_CONCURRENCY}`);
+  const auditRate = Number(bloomAuditRate);
+  if (!Number.isFinite(auditRate) || auditRate < 0 || auditRate > 1) {
+    throw new TypeError("bloomAuditRate must be from 0 to 1");
+  }
+  const auditCap = Number(bloomAuditCap);
+  if (!Number.isSafeInteger(auditCap) || auditCap < 0) throw new TypeError("bloomAuditCap must be a non-negative integer");
   const rpcLimit = positive(rpcTimeoutMs, "rpcTimeoutMs", 10_000);
   if (rpcLimit > 60_000) throw new TypeError("rpcTimeoutMs must not exceed 60000");
   if (rangeLimit <= trailing) throw new TypeError("maxBlockRange must be greater than overlap");
 
+  // The splitter address and the event topic are fixed for the adapter's lifetime, so their
+  // bloom bit positions are derived once instead of keccak-hashed per scanned block.
+  const bloomMatcher = createLogsBloomMatcher([configuredSplitter, configuredTopic]);
+
   // Central RPC counter: every adapter RPC goes through rpcCall, so per-scan call shape is
-  // measured at one place rather than sprinkled through the discovery code.
-  let meter;
-  function measure(name) { if (meter) meter[name] = (meter[name] || 0) + 1; }
+  // measured at one place. The counter is held in async-local storage rather than a closure
+  // variable, because reconcileSubmitted and monitorOnce run on their own timers against this
+  // same adapter and would otherwise have their calls attributed to an in-flight scan.
+  const meters = new AsyncLocalStorage();
+  function measure(name) {
+    const meter = meters.getStore();
+    if (meter) meter[name] = (meter[name] || 0) + 1;
+  }
 
   async function rpcCall(name, operation) {
     measure(name);
@@ -181,7 +217,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   // One eth_getBlockByNumber(number, false) per canonical block. It carries every field the
   // checkpoint invariant needs (hash, parentHash, timestamp), the transaction hash set, and
   // the logsBloom that proves whether the block can hold a QuoteSettled log at all.
-  async function canonicalBlock(number) {
+  async function canonicalBlock(number, { retainTransactions = false } = {}) {
     const header = await rpcCall("getBlock", () => client.getBlockHeader(Number(number)));
     if (!header || quantity(header.number, "canonical block number") !== BigInt(number)) {
       throw new Error("canonical block unavailable");
@@ -196,21 +232,41 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     if (new Set(transactionHashes).size !== transactionHashes.length) {
       throw new Error("canonical block transaction set is incomplete");
     }
+    // The transaction hash set is validated for every block but retained only where it is
+    // used — cross-checking a bloom-positive block's receipts. Holding it for every block in
+    // a 5,000-block range is tens of megabytes of hex strings nothing ever reads.
+    const mayHoldSettlement = bloomMatcher(header.logsBloom);
     return { blockNumber: BigInt(number).toString(), blockHash: hash(header.hash, "block hash"),
       parentHash: hash(header.parentHash, "block parent hash"),
       blockTimestamp: timestamp(Number(quantity(header.timestamp, "block timestamp"))),
-      logsBloom: header.logsBloom.toLowerCase(), transactionHashes };
+      mayHoldSettlement, ...(mayHoldSettlement || retainTransactions ? { transactionHashes } : {}) };
   }
 
-  // The shape persisted by recordScannerRange. Kept byte-identical to the pre-optimization
-  // payload so stored scanner_result metadata and replay comparisons do not change.
+  // The four fields recordScannerRange validates and persists. The pre-optimization scanRange
+  // also carried transactionHashes on each block; both stores normalize to these four before
+  // building p_metadata, so stored scanner_result and generation-replay comparisons are
+  // unchanged either way. Emitting exactly them keeps that independent of store behaviour.
   function checkpointShape(block) {
     return { blockNumber: block.blockNumber, blockHash: block.blockHash, parentHash: block.parentHash,
       blockTimestamp: block.blockTimestamp };
   }
 
-  function mayHoldSettlement(block) {
-    return logsBloomMayContainEvent(block.logsBloom, configuredSplitter, configuredTopic);
+  function mayHoldSettlement(block) { return block.mayHoldSettlement === true; }
+
+  async function canonicalBlockWithTransactions(block) {
+    const reread = await canonicalBlock(block.blockNumber, { retainTransactions: true });
+    if (reread.blockHash !== block.blockHash) throw new Error("canonical boundary changed during scan");
+    return reread;
+  }
+
+  // Sample without replacement, capped so a wide range cannot turn the audit into the old cost.
+  function sampleForAudit(blocks) {
+    if (auditRate <= 0 || blocks.length === 0) return [];
+    const target = Math.min(auditCap, Math.max(1, Math.round(blocks.length * auditRate)));
+    if (target >= blocks.length) return [...blocks];
+    const chosen = new Set();
+    while (chosen.size < target) chosen.add(Math.floor(Math.random() * blocks.length));
+    return [...chosen].sort((left, right) => left - right).map((index) => blocks[index]);
   }
 
   // Strict eth_getLogs discovery: exact splitter, exact QuoteSettled topic0, exact span.
@@ -219,7 +275,13 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   async function discoverLogs(from, through) {
     const found = [];
     const seen = new Map();
+    const idealChunks = Number((through - from) / BigInt(logRangeLimit)) + 1;
+    // Halving is bounded: legitimate adaptation needs a few extra queries, a provider that
+    // rejects everything would otherwise issue ~2 queries per block before giving up.
+    let budget = Math.max(64, idealChunks * 8);
     async function query(start, end) {
+      if (budget <= 0) throw new Error("settlement log discovery exceeded its query budget");
+      budget -= 1;
       let logs;
       try {
         logs = await rpcCall("getLogs", () => client.getLogs({
@@ -276,7 +338,9 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
 
   // Full canonical receipt enumeration for one block: unchanged from the pre-optimization
   // scanner, and still the ONLY source of accepted settlement evidence.
-  async function canonicalMatchingLogs(block) {
+  async function canonicalMatchingLogs(source) {
+    // Audited bloom-negative blocks did not retain their transaction set; re-read the header.
+    const block = source.transactionHashes ? source : await canonicalBlockWithTransactions(source);
     const transactionCount = Number(await rpcCall("getBlockTransactionCount",
       () => client.getBlockTransactionCount(Number(block.blockNumber))));
     if (!Number.isSafeInteger(transactionCount) || transactionCount < 0) {
@@ -351,12 +415,14 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     };
   }
 
-  async function scanRange({ fromBlock, throughBlock } = {}) {
+  async function scanRange(window = {}) {
     const stats = {};
-    const previousMeter = meter;
-    meter = stats;
+    return meters.run(stats, () => runScan(window, stats));
+  }
+
+  async function runScan({ fromBlock, throughBlock } = {}, stats) {
     const started = process.hrtime.bigint();
-    try {
+    {
       await assertChain();
       const from = BigInt(fromBlock); const through = BigInt(throughBlock);
       if (from < 0n || through < from) throw new TypeError("invalid scan range");
@@ -404,9 +470,10 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
       //    so their no-match coverage rests on the same canonical header evidence as before and
       //    never on an empty eth_getLogs answer.
       const relevantBlocks = canonicalBlocks.filter(mayHoldSettlement);
-      const logsWithReceipts = [];
-      let discoveryOmissions = 0;
-      for (const block of relevantBlocks) {
+      // Receipt reads are concurrent too, so the round-trip win does not evaporate on a dense
+      // range where the bloom admits many blocks. Results are collected by request index, so
+      // logsWithReceipts stays in ascending block order regardless of completion order.
+      const perBlock = await mapBounded(relevantBlocks, headerLanes, async (block) => {
         const matches = await canonicalMatchingLogs(block);
         // The receipt set is authoritative in both directions that matter. A log eth_getLogs
         // reported that the receipts do not contain is an injection and fails closed; a log the
@@ -420,8 +487,23 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
             throw new Error("settlement log discovery is inconsistent with canonical receipts");
           }
         }
-        discoveryOmissions += canonicalIdentities.size - discoveredIdentities.size;
-        logsWithReceipts.push(...matches);
+        return { matches, omissions: canonicalIdentities.size - discoveredIdentities.size };
+      });
+      const logsWithReceipts = perBlock.flatMap((entry) => entry.matches);
+      const discoveryOmissions = perBlock.reduce((total, entry) => total + entry.omissions, 0);
+
+      // 4b. Bloom audit. A bloom-negative block is skipped on the strength of its header's own
+      //     logsBloom, and eth_getLogs cannot corroborate it: go-ethereum's log filter selects
+      //     candidate blocks using those same header blooms, so a provider serving a corrupted
+      //     bloom index would hide a log from BOTH answers. A bounded random sample of skipped
+      //     blocks is therefore read in full, turning a silent wrong release into a loud abort.
+      const skipped = canonicalBlocks.filter((block) => !mayHoldSettlement(block));
+      const audited = sampleForAudit(skipped);
+      for (const block of await mapBounded(audited, headerLanes, async (block) => ({
+        block, matches: await canonicalMatchingLogs(block) }))) {
+        if (block.matches.length > 0) {
+          throw new Error("canonical receipts contradict a bloom-negative block header");
+        }
       }
 
       const candidates = []; const anomalies = [];
@@ -431,8 +513,8 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
           if (!(error instanceof InvalidSettlementEvidence)) throw error;
           anomalies.push({ code: "INVALID_SETTLEMENT_EVIDENCE", txHash: HASH.test(log?.transactionHash || "") ? log.transactionHash.toLowerCase() : `0x${"0".repeat(64)}`,
           logIndex: Number.isSafeInteger(Number(log?.index ?? log?.logIndex)) && Number(log?.index ?? log?.logIndex) >= 0 ? Number(log.index ?? log.logIndex) : 0,
-          blockNumber: String(log?.blockNumber ?? from), blockHash: HASH.test(log?.blockHash || "") ? log.blockHash.toLowerCase() : byNumber.get(String(log?.blockNumber))?.blockHash,
-          blockTimestamp: byNumber.get(String(log?.blockNumber))?.blockTimestamp ?? canonicalBlocks[0].blockTimestamp });
+          blockNumber: anomalyBlock(log, from), blockHash: HASH.test(log?.blockHash || "") ? log.blockHash.toLowerCase() : byNumber.get(anomalyBlock(log, from))?.blockHash,
+          blockTimestamp: byNumber.get(anomalyBlock(log, from))?.blockTimestamp ?? canonicalBlocks[0].blockTimestamp });
         }
       }
 
@@ -463,10 +545,11 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
           discoveredLogs: discovered.length,
           discoveryOmissions,
           nonCanonicalLogs,
+          auditedBlocks: audited.length,
           elapsedMs: Math.round(elapsedMs),
         }),
       };
-    } finally { meter = previousMeter; }
+    }
   }
 
   async function inspectTransaction(txHash) {
@@ -511,6 +594,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
 
   return Object.freeze({ chainId: configuredChain, splitter: configuredSplitter, confirmationDepth: depth, overlap: trailing,
     maxBlockRange: rangeLimit, maxLogRange: logRangeLimit, headerConcurrency: headerLanes,
+    bloomAuditRate: auditRate, bloomAuditCap: auditCap,
     getCanonicalHead, getSafeHead, scanRange, inspectTransaction, revalidateMonitor });
 }
 

@@ -41,4 +41,24 @@ function logsBloomMayContainEvent(bloom, address, topic) {
   return logsBloomMayContain(bloom, address) && logsBloomMayContain(bloom, topic);
 }
 
-module.exports = { bloomBits, isLogsBloom, logsBloomMayContain, logsBloomMayContainEvent };
+/**
+ * Pre-derive the bit positions for a fixed set of items (a splitter address and an event
+ * topic never change across a scan), so a 5,000-block range costs two keccak hashes rather
+ * than two per block.
+ *
+ * @param {string[]} items 0x-prefixed bloom items, all of which must be present to match.
+ * @returns {(bloom: string) => boolean}
+ */
+function createLogsBloomMatcher(items) {
+  const bits = items.flatMap((item) => {
+    if (typeof item !== "string" || !ITEM_HEX.test(item)) throw new TypeError("bloom item must be non-empty bytes");
+    return bloomBits(item);
+  }).map(BigInt);
+  return function mayContain(bloom) {
+    if (!isLogsBloom(bloom)) throw new TypeError("logsBloom must be 256 bytes");
+    const filter = BigInt(bloom);
+    return bits.every((bit) => ((filter >> bit) & 1n) === 1n);
+  };
+}
+
+module.exports = { bloomBits, isLogsBloom, logsBloomMayContain, logsBloomMayContainEvent, createLogsBloomMatcher };

@@ -257,6 +257,17 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   const headerConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
     "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", 64);
   if (headerConcurrency > 256) throw new TypeError("GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY must not exceed 256");
+  // JSON-RPC batch width. Providers that reject or cap batches need this lowered to match;
+  // 1 disables batching and restores one HTTP round trip per call.
+  const rpcBatchMaxCount = positive(env.GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT,
+    "GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT", 100);
+  if (rpcBatchMaxCount > 1_000) throw new TypeError("GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT must not exceed 1000");
+  // Fraction of bloom-negative blocks read in full anyway, so a provider whose bloom index
+  // disagrees with its own receipts is detected rather than silently trusted.
+  const bloomAuditRate = Number(env.GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE ?? 0.01);
+  if (!Number.isFinite(bloomAuditRate) || bloomAuditRate < 0 || bloomAuditRate > 1) {
+    throw new TypeError("GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE must be from 0 to 1");
+  }
   const notificationLeaseMs = positive(env.GAVEL_GATE_NOTIFICATION_LEASE_MS,
     "GAVEL_GATE_NOTIFICATION_LEASE_MS", 5 * 60_000);
   if (notificationLeaseMs > 3_600_000) throw new TypeError("GAVEL_GATE_NOTIFICATION_LEASE_MS must not exceed 3600000");
@@ -283,6 +294,8 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
     maxBlockRange,
     maxLogRange,
     headerConcurrency,
+    rpcBatchMaxCount,
+    bloomAuditRate,
     pollIntervalMs: positive(env.GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS, "GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS", 5_000),
     rpcTimeoutMs,
     notificationLeaseMs,
@@ -372,6 +385,7 @@ async function createGateServerRuntime(options = {}) {
       maxBlockRange: config.maxBlockRange,
       maxLogRange: config.maxLogRange,
       headerConcurrency: config.headerConcurrency,
+      bloomAuditRate: config.bloomAuditRate,
       rpcTimeoutMs: config.rpcTimeoutMs,
     });
     settlementService = factories.createSettlementService({

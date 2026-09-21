@@ -136,6 +136,19 @@ function rawLog(log) {
   };
 }
 
+// Receipts come back from a raw provider.send, so every numeric field is QUANTITY hex, exactly
+// as eth_getBlockReceipts / eth_getTransactionReceipt encode it. Returning decimals here would
+// hide encoding bugs in code that stringifies these fields.
+function rawReceipt(receipt) {
+  return {
+    status: receipt.status ? "0x1" : "0x0",
+    transactionHash: receipt.transactionHash,
+    blockNumber: hexQuantity(receipt.blockNumber),
+    blockHash: receipt.blockHash,
+    logs: receipt.logs.map(rawLog),
+  };
+}
+
 function rawHeader(block) {
   return {
     number: hexQuantity(block.number), hash: block.hash, parentHash: block.parentHash,
@@ -182,12 +195,12 @@ function createCountingClient(chain, { chainId = 8453, splitter = chain.splitter
       }
       return found;
     },
-    async getBlockTransactionCount(number) { count("eth_getBlockTransactionCountByNumber"); return block(number).transactions.length; },
-    async getBlockReceipts(number) { count("eth_getBlockReceipts"); return block(number).receipts.map((receipt) => ({ ...receipt })); },
+    async getBlockTransactionCount(number) { count("eth_getBlockTransactionCountByNumber"); return hexQuantity(block(number).transactions.length); },
+    async getBlockReceipts(number) { count("eth_getBlockReceipts"); return block(number).receipts.map(rawReceipt); },
     async getTransactionReceipt(hash) {
       count("eth_getTransactionReceipt");
       const receipt = chain.receiptsByTx.get(String(hash).toLowerCase());
-      return receipt ? { ...receipt } : null;
+      return receipt ? rawReceipt(receipt) : null;
     },
     async getTransaction(hash) { count("eth_getTransactionByHash"); return chain.receiptsByTx.has(String(hash).toLowerCase()) ? { hash } : null; },
     ...overrides,

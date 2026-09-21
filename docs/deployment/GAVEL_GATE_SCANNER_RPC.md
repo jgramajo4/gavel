@@ -53,12 +53,43 @@ A block header's `logsBloom` is the union of its receipt blooms, and every log c
 its address and each of its topics. The filter has false positives but **never** false
 negatives. So:
 
-- **bloom-negative block** — proven to hold no `QuoteSettled` log from the splitter, using the
-  same canonical header evidence the checkpoint already rests on. No receipt read.
+- **bloom-negative block** — no `QuoteSettled` log from the splitter, on the strength of the
+  same canonical header the checkpoint already rests on. No receipt read.
 - **bloom-positive block** — full canonical receipt enumeration, byte for byte the
   pre-optimization path. The receipt set is authoritative.
 
-`eth_getLogs` is an accelerator and an integrity probe, never evidence:
+### The residual trust delta — read this before tuning the audit to zero
+
+Be precise about what "never false negatives" buys. That is a property of the **real** header
+bloom. Nothing here verifies `keccak256(rlp(header)) == header.hash`, so the `logsBloom` the
+scanner reads is **provider-asserted**, not proven. The pre-optimization scanner never read this
+field: it enumerated every block's receipts, so a provider's bloom index could not hide anything.
+
+`eth_getLogs` does **not** independently corroborate the bloom. go-ethereum's log filter selects
+candidate blocks using those same header blooms (`filters.Filter` → `bloomFilter(header.Bloom, …)`,
+and the bloombits index is built from them), so a provider serving a corrupted bloom hides a log
+from the bloom gate **and** from `eth_getLogs`, consistently and silently. The cross-check at
+"canonical block header contradicts settlement log discovery" only catches a provider that
+corrupts the bloom while leaving its log index intact.
+
+That is a real reduction in evidence strength against a faulty or hostile RPC, and it is the one
+place this change is not semantically equivalent to its predecessor. Two things bound it:
+
+1. **The bloom audit.** A bounded random sample of bloom-negative blocks is read in full anyway
+   (`GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE`, default 1%, capped at 64 blocks per scan). A
+   sampled block whose receipts contain a `QuoteSettled` log aborts the scan — no checkpoint, no
+   release. This gives probabilistic detection of a corrupted bloom index, **not a proof**: a
+   single wrong block has only a sampling chance of being caught, while systemic corruption is
+   caught quickly.
+2. **Operator signal.** `gate_scanner_log_discovery_omissions_total` and
+   `gate_scanner_non_canonical_logs_total` are the early warning that a provider's log index
+   disagrees with its own receipts. A sustained non-zero rate on either warrants investigation.
+
+Deployments that treat the RPC provider as untrusted should raise the audit rate (1.0 restores
+the pre-optimization guarantee at the pre-optimization cost) or cross-check against a second
+independent provider.
+
+`eth_getLogs` itself is an accelerator and an integrity probe, never evidence:
 
 - a discovered log the receipts do **not** contain → fails closed (injection)
 - a discovered log in a bloom-negative block → fails closed (the header contradicts the index)
@@ -69,7 +100,11 @@ negatives. So:
 That last case is the one that matters for `record_scanner_range`'s release predicate: a lossy
 log index cannot manufacture canonical no-match coverage.
 
-Worst case (every block bloom-positive) degrades to the previous call shape rather than breaking.
+**Worst case.** If every block is bloom-positive the cost is `3N + chunks + 3`, i.e. the previous
+`3N + 3` plus the log queries — marginally *worse* than the code it replaces, not equal to it. A
+provider that range-errors on every span would multiply the log queries, so the halving is capped
+by an explicit per-scan query budget (`max(64, 8 × chunks)`); beyond it the scan fails closed
+rather than degrading further.
 
 ## Measured
 
@@ -99,10 +134,21 @@ Even at 16% fallback the scan stays well under the 6,003-call baseline for that 
 | --- | --- | --- |
 | `GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE` | 1000 | starting `eth_getLogs` span; clamped to `MAX_BLOCK_RANGE`. Lower it for providers with tight log caps. |
 | `GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY` | 64 | in-flight header reads; max 256. Lower it for rate-limited providers, raise it to fill a larger provider batch. |
+| `GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` | 100 | JSON-RPC batch width. **Must be ≥ header concurrency to get the round-trip win.** Set it to `1` for a provider that rejects batched payloads. |
+| `GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE` | 0.01 | fraction of bloom-negative blocks read in full anyway; `0` disables the audit, `1` restores the pre-optimization guarantee and cost. |
 
-A span a provider rejects for width or result count is halved recursively until it is accepted;
-a chunk is never skipped. Errors that are not range limits abort the scan without retrying, and
-the worker retries the whole range on its next tick.
+A span a provider rejects **for width or result count** is halved recursively until it is accepted;
+a chunk is never skipped, and the total number of log queries per scan is bounded. Rate-limit
+shapes are deliberately **not** treated as range errors — splitting a throttled query would
+multiply requests at a provider that is already throttling. Errors that are not range limits abort
+the scan without retrying, and the worker retries the whole range on its next tick.
+
+### Known follow-up, not addressed here
+
+The worker scheduler retries a failed `scanOnce` every `pollIntervalMs` with no backoff or jitter
+(`runtime.js`). Sequential RPC used to throttle that accidentally; concurrent reads remove the
+brake. Adding exponential backoff to the job scheduler is worth doing but sits outside the
+scanner/adapter and is deliberately left out of this change.
 
 ## Client contract
 
@@ -110,6 +156,15 @@ the worker retries the whole range on its next tick.
 because ethers' `Block` does not expose `logsBloom`) and `getLogs(filter)`. The adapter fails
 fast at construction if either is missing, and fails closed mid-scan if a header arrives without
 a well-formed 256-byte `logsBloom` — it never silently falls back to trusting `eth_getLogs`.
+
+Block tags are encoded with `toQuantity`, not `toBeHex`: JSON-RPC `QUANTITY` forbids leading
+zeros and go-ethereum rejects them, while `toBeHex` pads to whole bytes (`0x02255100` for a
+7-nibble Base height).
+
+Batching is a plain ethers `JsonRpcProvider` behaviour (`batchStallTime` 10 ms, `batchMaxCount`
+100), with no negotiation and no fallback. A provider that rejects batched payloads or caps them
+below the header concurrency will fail every scan identically until
+`GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` is lowered.
 
 ## Rollback
 

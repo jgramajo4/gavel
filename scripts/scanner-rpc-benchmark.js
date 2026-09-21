@@ -34,7 +34,7 @@ async function scenario(name, { blocks, settlements, noiseLogsPerBlock, adapterO
     settlements, noiseLogsPerBlock, noiseTxPerBlock: 2 });
   const counting = createCountingClient(chain, { splitter: SPLITTER });
   const adapter = createBaseSettlementAdapter({ client: counting.client, chainId: 8453, splitter: SPLITTER,
-    maxBlockRange: Math.max(blocks, 5_000), rpcTimeoutMs: 60_000, ...adapterOptions });
+    maxBlockRange: Math.max(blocks, 5_000), rpcTimeoutMs: 60_000, bloomAuditRate: 0, ...adapterOptions });
   const started = process.hrtime.bigint();
   const result = await adapter.scanRange({ fromBlock: from, throughBlock: through });
   const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
@@ -52,8 +52,29 @@ async function scenario(name, { blocks, settlements, noiseLogsPerBlock, adapterO
   };
 }
 
+// The bloom gate's value depends entirely on how many log items a block carries: the filter is
+// M3:2048, so after n insertions the set-bit fraction is ~1-e^(-3n/2048) and a 2-item query needs
+// 6 bits. Reporting a single noise level would hide that, so --sweep measures the curve.
+async function sweep(blocks) {
+  process.stdout.write(`\nbloom fallback sweep over a ${blocks}-block sparse range `
+    + `(pre-optimization cost for reference: ${3 * blocks + 3} calls)\n`);
+  process.stdout.write(`${"logs/block".padEnd(12)}${"bloom items".padEnd(14)}`
+    + `${"bloom-positive".padEnd(16)}${"total calls".padEnd(14)}vs before\n`);
+  for (const perTx of [6, 25, 50, 100, 150, 250, 400]) {
+    const result = await scenario("sweep", { blocks, settlements: [], noiseLogsPerBlock: perTx });
+    const logsPerBlock = perTx * 2;
+    const positive = result.rpcStats ? result.rpcStats.relevantBlocks : 0;
+    process.stdout.write(`${String(logsPerBlock).padEnd(12)}`
+      + `${String(logsPerBlock * 3).padEnd(14)}`
+      + `${`${positive} (${((positive / blocks) * 100).toFixed(1)}%)`.padEnd(16)}`
+      + `${String(result.totalRpcCalls).padEnd(14)}`
+      + `${((3 * blocks + 3) / result.totalRpcCalls).toFixed(2)}x better\n`);
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (process.argv.includes("--sweep")) { await sweep(args.blocks); return; }
   const big = args.blocks;
   const results = [];
   results.push(await scenario("A. sparse/empty range", { blocks: big, settlements: [], noiseLogsPerBlock: args.noiseLogsPerBlock }));

@@ -236,7 +236,10 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     const rpcTelemetry = {};
     for (const [field, value] of [["rpcCalls", rpc.rpcCalls], ["getLogsCalls", rpc.getLogsCalls],
       ["headerCalls", rpc.headerCalls], ["receiptCalls", rpc.receiptCalls], ["relevantLogs", rpc.relevantLogs],
-      ["relevantBlocks", rpc.relevantBlocks], ["scanElapsedMs", rpc.elapsedMs]]) {
+      ["relevantBlocks", rpc.relevantBlocks], ["scanElapsedMs", rpc.elapsedMs],
+      // Provider-fidelity signals: a lossy log index or a reorg observed mid-scan.
+      ["discoveryOmissions", rpc.discoveryOmissions], ["nonCanonicalLogs", rpc.nonCanonicalLogs],
+      ["auditedBlocks", rpc.auditedBlocks]]) {
       const numeric = metric(value);
       if (numeric !== undefined) rpcTelemetry[field] = numeric;
     }
