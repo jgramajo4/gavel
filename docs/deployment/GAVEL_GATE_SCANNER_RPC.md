@@ -92,15 +92,31 @@ provider, so it is not charged ethers' 10 ms batch drain stall that a real seque
 never pays. (`--unfair` reproduces that mis-measurement, which inflated an earlier version of
 these numbers.)
 
-**Sparse 5,000-block range, 20 ms per round trip, concurrency 64:**
+**Sparse 5,000-block range, 12 logs/block, 20 ms per round trip, concurrency 64:**
 
 | | A. logical RPC calls | B. HTTP round trips | Elapsed |
 | --- | --- | --- | --- |
-| before — sequential, non-batching provider | 15,003 | 15,003 | 321,529 ms |
-| after — concurrency 64, non-batching provider | 15,003 | 15,003 | 5,374 ms |
-| after — concurrency 64, batching provider | 15,003 | 240 | 7,677 ms |
+| before — sequential, non-batching provider | 15,003 | 15,003 | 321,388 ms |
+| after — concurrency 64, non-batching provider | 15,003 | 15,003 | 5,423 ms |
+| after — concurrency 64, batching provider | 15,003 | 240 | 7,705 ms |
 
-Logical calls are **identical**. Round trips fall 62x with batching. Wall clock falls ~60x.
+With one settlement present in the same range: 322,264 ms / 5,522 ms / 7,830 ms, same call
+shape.
+
+**Dense 1,000-block range, 500 logs/block, 20 ms per round trip, concurrency 64:**
+
+| | A. logical RPC calls | B. HTTP round trips | Elapsed |
+| --- | --- | --- | --- |
+| before — sequential, non-batching provider | 3,003 | 3,003 | 65,673 ms |
+| after — concurrency 64, non-batching provider | 3,003 | 3,003 | 2,086 ms |
+| after — concurrency 64, batching provider | 3,003 | 51 | 2,604 ms |
+
+**Logical calls are identical in every row — that is the point.** Round trips fall ~62x with
+batching, and wall clock falls ~59x (sparse) and ~31x (dense).
+
+Note that the call shape is `3N + 3` at *any* log density. A scanner that gated receipt reads on
+a header bloom would degrade toward the sequential cost as blocks got busier; this one does not
+depend on how many logs a block carries.
 
 ### Where the win comes from
 
