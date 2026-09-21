@@ -234,12 +234,10 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     const rpc = scanned.rpcStats && typeof scanned.rpcStats === "object" ? scanned.rpcStats : {};
     const metric = (value) => (Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : undefined);
     const rpcTelemetry = {};
-    for (const [field, value] of [["rpcCalls", rpc.rpcCalls], ["getLogsCalls", rpc.getLogsCalls],
-      ["headerCalls", rpc.headerCalls], ["receiptCalls", rpc.receiptCalls], ["relevantLogs", rpc.relevantLogs],
-      ["relevantBlocks", rpc.relevantBlocks], ["scanElapsedMs", rpc.elapsedMs],
-      // Provider-fidelity signals: a lossy log index or a reorg observed mid-scan.
-      ["discoveryOmissions", rpc.discoveryOmissions], ["nonCanonicalLogs", rpc.nonCanonicalLogs],
-      ["auditedBlocks", rpc.auditedBlocks]]) {
+    for (const [field, value] of [["rpcMethodCalls", rpc.rpcMethodCalls],
+      ["headerMethodCalls", rpc.headerMethodCalls], ["receiptMethodCalls", rpc.receiptMethodCalls],
+      ["logQueryMethodCalls", rpc.logQueryMethodCalls], ["relevantLogs", rpc.relevantLogs],
+      ["scanConcurrency", rpc.concurrency], ["scanElapsedMs", rpc.elapsedMs]]) {
       const numeric = metric(value);
       if (numeric !== undefined) rpcTelemetry[field] = numeric;
     }

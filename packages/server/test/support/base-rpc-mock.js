@@ -1,13 +1,13 @@
 // Deterministic synthetic Base chain + call-counting JSON-RPC client.
 //
-// Used by the scanner regression tests and by scripts/scanner-rpc-benchmark.js.
-// It exposes BOTH the legacy client surface (getBlock/getBlockTransactionCount/
-// getBlockReceipts) and the optimized surface (getBlockHeader/getLogs) so the
-// same fixture can measure the adapter before and after the optimization.
+// Used by the scanner regression tests and by the benchmark scripts. It exposes the
+// client surface the adapter requires (getBlock / getBlockHeader /
+// getBlockTransactionCount / getBlockReceipts / getTransactionReceipt) plus
+// getLogs and a real header logsBloom.
 //
-// logsBloom is built with the go-ethereum byte/mask convention, deliberately a
-// different formulation from the big-integer convention the adapter checks with,
-// so the two independently derived bit mappings cross-validate each other.
+// getLogs and logsBloom exist here on purpose even though the default scanner never
+// reads them: tests corrupt them and assert that settlement discovery is unaffected,
+// which is how the receipt-authoritative guarantee is proven rather than asserted.
 const { Interface, keccak256, getBytes, toBeHex, id } = require("ethers");
 const { QUOTE_SETTLED_EVENT_ABI, QUOTE_SETTLED_TOPIC } = require("@gavel/gate");
 

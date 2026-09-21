@@ -249,25 +249,16 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   if (maxBlockRange <= overlap) {
     throw new TypeError("GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE must be greater than GAVEL_GATE_REORG_OVERLAP_BLOCKS");
   }
-  // eth_getLogs span per query. Providers cap this independently and the adapter halves a span
-  // that a provider rejects, so this is a starting width, not a correctness boundary. A scan
-  // never spans more than maxBlockRange, so a wider log query would be wasted and is clamped.
-  const maxLogRange = Math.min(positive(env.GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE,
-    "GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE", 1_000), maxBlockRange);
-  const headerConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
-    "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", 64);
-  if (headerConcurrency > 256) throw new TypeError("GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY must not exceed 256");
+  // In-flight RPCs per scan phase. This changes transport only: the scanner performs the same
+  // logical reads either way, and a higher bound simply lets more of them be batched together.
+  const scanConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY,
+    "GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY", 64);
+  if (scanConcurrency > 256) throw new TypeError("GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY must not exceed 256");
   // JSON-RPC batch width. Providers that reject or cap batches need this lowered to match;
   // 1 disables batching and restores one HTTP round trip per call.
   const rpcBatchMaxCount = positive(env.GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT,
     "GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT", 100);
   if (rpcBatchMaxCount > 1_000) throw new TypeError("GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT must not exceed 1000");
-  // Fraction of bloom-negative blocks read in full anyway, so a provider whose bloom index
-  // disagrees with its own receipts is detected rather than silently trusted.
-  const bloomAuditRate = Number(env.GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE ?? 0.01);
-  if (!Number.isFinite(bloomAuditRate) || bloomAuditRate < 0 || bloomAuditRate > 1) {
-    throw new TypeError("GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE must be from 0 to 1");
-  }
   const notificationLeaseMs = positive(env.GAVEL_GATE_NOTIFICATION_LEASE_MS,
     "GAVEL_GATE_NOTIFICATION_LEASE_MS", 5 * 60_000);
   if (notificationLeaseMs > 3_600_000) throw new TypeError("GAVEL_GATE_NOTIFICATION_LEASE_MS must not exceed 3600000");
@@ -292,10 +283,8 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
     monitorConfirmations,
     overlap,
     maxBlockRange,
-    maxLogRange,
-    headerConcurrency,
+    scanConcurrency,
     rpcBatchMaxCount,
-    bloomAuditRate,
     pollIntervalMs: positive(env.GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS, "GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS", 5_000),
     rpcTimeoutMs,
     notificationLeaseMs,
@@ -383,9 +372,7 @@ async function createGateServerRuntime(options = {}) {
       confirmationDepth: config.confirmationDepth,
       overlap: config.overlap,
       maxBlockRange: config.maxBlockRange,
-      maxLogRange: config.maxLogRange,
-      headerConcurrency: config.headerConcurrency,
-      bloomAuditRate: config.bloomAuditRate,
+      scanConcurrency: config.scanConcurrency,
       rpcTimeoutMs: config.rpcTimeoutMs,
     });
     settlementService = factories.createSettlementService({

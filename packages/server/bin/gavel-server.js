@@ -263,9 +263,11 @@ function createRpcClient(url, chainId, providerOverride, { batchMaxCount } = {})
     // Concurrent sends are coalesced into JSON-RPC batches by JsonRpcProvider.
     // toQuantity, not toBeHex: JSON-RPC QUANTITY forbids leading zeros and go-ethereum rejects
     // them outright, while toBeHex pads to whole bytes ("0x02255100" for a 7-nibble height).
+    //
+    // A raw send rather than provider.getBlock(): AbstractProvider caches getBlock results for
+    // cacheTimeout (250 ms), which would serve the scanner's end-of-scan boundary re-read from
+    // cache and silently defeat its reorg check now that scans complete quickly.
     getBlockHeader: (number) => provider.send("eth_getBlockByNumber", [toQuantity(number), false]),
-    getLogs: ({ fromBlock, toBlock, address, topics }) => provider.send("eth_getLogs",
-      [{ fromBlock, toBlock, address, topics }]),
     getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toQuantity(number)]),
     getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toQuantity(number)]),
     getTransactionReceipt: (hash) => provider.getTransactionReceipt(hash),

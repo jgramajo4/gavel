@@ -15,12 +15,10 @@ const COUNTERS = new Map([
   ["gate_forward_cursor_checkpoint_failure_total", {}],
   ["gate_monitor_final_check_failure_total", {}],
   ["gate_reservation_released_total", {}],
-  // Scanner RPC shape. Parts only, never an overlapping grand total, so summing the label
-  // dimension gives the true call count.
-  ["gate_scanner_rpc_calls_total", { method: new Set(["get_logs", "headers", "receipts", "other"]) }],
-  ["gate_scanner_log_discovery_omissions_total", {}],
-  ["gate_scanner_non_canonical_logs_total", {}],
-  ["gate_scanner_bloom_audited_blocks_total", {}],
+  // Scanner LOGICAL JSON-RPC method calls -- not HTTP requests, which ethers does not report.
+  // Parts only, never an overlapping grand total, so summing the label dimension gives the
+  // true method count.
+  ["gate_scanner_rpc_method_calls_total", { method: new Set(["headers", "receipts", "log_queries", "other"]) }],
 ]);
 
 const GAUGES = new Map([
@@ -38,9 +36,9 @@ const GAUGES = new Map([
   ["gate_reservation_consumed_current", {}],
   ["gate_reservation_oldest_pending_age_seconds", {}],
   ["gate_scanner_range_blocks", {}],
-  ["gate_scanner_relevant_blocks", {}],
   ["gate_scanner_relevant_logs", {}],
   ["gate_scanner_elapsed_milliseconds", {}],
+  ["gate_scanner_concurrency", {}],
 ]);
 
 const ALERT_SOURCES = new Set(["gate", "gate_worker", "index", "cursor", "overlap", "monitor", "notification_worker", "email_notifier", "operator"]);
@@ -136,21 +134,19 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
           gauge("gate_reservation_released_current", result?.releasedRows);
           gauge("gate_reservation_consumed_current", result?.consumedRows);
           gauge("gate_reservation_oldest_pending_age_seconds", result?.oldestPendingAgeSeconds);
-          // Scanner RPC shape. Counts and timings only: no wallet, quote or submission content.
-          count("gate_scanner_rpc_calls_total", result?.getLogsCalls, { method: "get_logs" });
-          count("gate_scanner_rpc_calls_total", result?.headerCalls, { method: "headers" });
-          count("gate_scanner_rpc_calls_total", result?.receiptCalls, { method: "receipts" });
-          count("gate_scanner_rpc_calls_total", Number(result?.rpcCalls) - Number(result?.getLogsCalls)
-            - Number(result?.headerCalls) - Number(result?.receiptCalls), { method: "other" });
+          // Scanner logical JSON-RPC method shape. Counts and timings only: no wallet, quote or
+          // submission content. These are method calls, NOT HTTP requests -- how many round trips
+          // they become is a provider-transport property ethers does not expose.
+          count("gate_scanner_rpc_method_calls_total", result?.headerMethodCalls, { method: "headers" });
+          count("gate_scanner_rpc_method_calls_total", result?.receiptMethodCalls, { method: "receipts" });
+          count("gate_scanner_rpc_method_calls_total", result?.logQueryMethodCalls, { method: "log_queries" });
+          count("gate_scanner_rpc_method_calls_total", Number(result?.rpcMethodCalls)
+            - Number(result?.headerMethodCalls) - Number(result?.receiptMethodCalls)
+            - Number(result?.logQueryMethodCalls), { method: "other" });
           gauge("gate_scanner_range_blocks", result?.scanned);
-          gauge("gate_scanner_relevant_blocks", result?.relevantBlocks);
           gauge("gate_scanner_relevant_logs", result?.relevantLogs);
           gauge("gate_scanner_elapsed_milliseconds", result?.scanElapsedMs);
-          // A sustained non-zero count on either means the provider's log index disagrees with
-          // its own canonical receipts, or the chain reorged under an in-flight scan.
-          count("gate_scanner_log_discovery_omissions_total", result?.discoveryOmissions);
-          count("gate_scanner_non_canonical_logs_total", result?.nonCanonicalLogs);
-          count("gate_scanner_bloom_audited_blocks_total", result?.auditedBlocks);
+          gauge("gate_scanner_concurrency", result?.scanConcurrency);
         }
         if (job === "monitor") {
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "monitor" });

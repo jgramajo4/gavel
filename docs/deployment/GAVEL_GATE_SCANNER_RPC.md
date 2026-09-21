@@ -1,33 +1,39 @@
 # Gavel Gate — Base settlement scanner RPC shape
 
-How `BaseSettlementAdapter.scanRange()` spends RPC calls, why the per-block header read
-is not removable, and what an operator can tune.
+How `BaseSettlementAdapter.scanRange()` spends RPC calls, why every block still costs the same
+logical reads it always has, and what an operator can tune.
 
-## Before
+## Summary
 
-Every scanned block cost three sequential RPCs:
+The scanner's **evidence and trust model are unchanged**. It performs the same logical JSON-RPC
+reads it always has — `3N + 3` for an `N`-block range — and settlement discovery still rests
+entirely on block receipts.
 
-| RPC | Per block | Why |
-| --- | --- | --- |
-| `eth_getBlockByNumber(n, true)` | 1 | hash, parentHash, timestamp, transaction hash set |
-| `eth_getBlockTransactionCountByNumber(n)` | 1 | independent check that the receipt set is not truncated |
-| `eth_getBlockReceipts(n)` | 1 | enumerate every log to find `QuoteSettled` |
+What changed is **transport**. Those reads used to be issued one at a time, so an `N`-block range
+cost `3N + 3` serialized network round trips. They are now issued with bounded concurrency, which
+lets the provider transport coalesce them into JSON-RPC batches. A 5,000-block backfill goes from
+**15,003 round trips and ~5 minutes** to **240 round trips and a few seconds**.
 
-A 5,000-block backfill: **15,003 JSON-RPC calls in 15,003 sequential round trips.**
+**This is not an asymptotic improvement in RPC method count, and it is not claimed as one.**
+Logical calls remain O(N). Round trips fall by roughly two orders of magnitude.
 
-## After
+## Logical reads per scan — unchanged
 
-| RPC | Count | Why |
+| RPC | Count | Why it is load-bearing |
 | --- | --- | --- |
 | `eth_chainId` | 1 | chain identity is verified, never assumed from config |
-| `eth_getLogs` | `ceil(range / maxLogRange)` | discovery: exact splitter, exact `QuoteSettled` topic0, exact span |
-| `eth_getBlockByNumber(n, false)` | 1 per block + 2 boundary re-reads | contiguous canonical coverage (see below) |
-| `eth_getBlockTransactionCountByNumber` + `eth_getBlockReceipts` | 2 per **bloom-positive** block | the only source of accepted settlement evidence |
-| `eth_getTransactionReceipt` | 0 during a scan | receipts already arrive with the block |
+| `eth_getBlockByNumber(n, false)` | 1 per block | canonical coverage: hash, parentHash, timestamp, transaction set |
+| `eth_getBlockTransactionCountByNumber` | 1 per block | **independent** cross-check that the receipt set is not truncated |
+| `eth_getBlockReceipts` | 1 per block | the authoritative source of settlement logs |
+| `eth_getBlockByNumber` (boundaries) | 2 | detects a canonical rewrite during the scan |
 
-Complexity: `O(1) + O(log query chunks) + O(range) headers + O(bloom-positive blocks)`.
+Total: `3N + 3`, identical to the sequential scanner.
 
-## Why headers are still one per block
+`eth_getBlockTransactionCountByNumber` looks redundant against the receipt set's own transaction
+hashes, but it is a *separate* RPC method answering from a *separate* index. It is retained
+deliberately: proving it removable is a semantics argument, not a performance one.
+
+## Why every block still needs a header
 
 `gate.record_scanner_range` (`packages/server/migrations/001_gate.sql`) requires
 
@@ -36,176 +42,143 @@ jsonb_array_length(p_metadata->'canonicalBlocks') <> p_through-p_from+1
   -> 'scanner result does not completely describe its canonical range'
 ```
 
-and then walks that array asserting `parentHash` chaining block by block, and finally that
-every block from the deployment block through the checkpoint exists. `store-memory.js`
-enforces the same. Contiguous coverage — which is what capacity release consumes — therefore
-cannot be proven with fewer headers. **This is a hard floor, not a tuning choice.** The win
-on this path is round trips, not calls: the header reads are issued with bounded concurrency,
-so `JsonRpcProvider` coalesces them into JSON-RPC batches.
+then walks that array asserting `parentHash` chaining block by block, and finally that every block
+from the deployment block through the checkpoint exists. `store-memory.js` enforces the same.
+Contiguous coverage — which is what capacity release consumes — cannot be proven with fewer
+headers. **This is a hard floor, not a tuning choice.**
 
-`eth_getBlockByNumber(n, false)` returns everything the scanner needs — hash, parentHash,
-timestamp, the transaction hash set, and `logsBloom` — in one call, so the old
-`(n, true)` read plus a separate transaction-count read are both gone.
+`eth_getBlockByNumber(n, false)` returns everything needed — hash, parentHash, timestamp and the
+transaction hash set — in one call.
 
-## Why an empty `eth_getLogs` is never a release proof
+### Why headers are read with a raw `send`
 
-A block header's `logsBloom` is the union of its receipt blooms, and every log contributes
-its address and each of its topics. The filter has false positives but **never** false
-negatives. So:
+`provider.getBlock()` routes through `AbstractProvider`'s request cache (`#perform`,
+`cacheTimeout` 250 ms). The scanner re-reads both range boundaries *after* the scan specifically
+to detect a canonical rewrite that happened during it. Now that a scan can finish in well under
+250 ms, that re-read would be answered from cache and the check would silently stop detecting
+anything. A raw `provider.send` bypasses the cache while still going through the batching queue.
 
-- **bloom-negative block** — no `QuoteSettled` log from the splitter, on the strength of the
-  same canonical header the checkpoint already rests on. No receipt read.
-- **bloom-positive block** — full canonical receipt enumeration, byte for byte the
-  pre-optimization path. The receipt set is authoritative.
+## Receipts are authoritative
 
-### The residual trust delta — read this before tuning the audit to zero
+Settlement discovery consults **only** block receipts. The default scanner does not call
+`eth_getLogs` and does not read a header's `logsBloom`.
 
-Be precise about what "never false negatives" buys. That is a property of the **real** header
-bloom. Nothing here verifies `keccak256(rlp(header)) == header.hash`, so the `logsBloom` the
-scanner reads is **provider-asserted**, not proven. The pre-optimization scanner never read this
-field: it enumerated every block's receipts, so a provider's bloom index could not hide anything.
+That is a deliberate trust decision, not an oversight. An earlier revision of this work used
+`eth_getLogs` plus header `logsBloom` to skip receipt reads for blocks the bloom said were empty.
+It was rejected because it changes the trust model: go-ethereum's log filter selects candidate
+blocks using those same header blooms, so a corrupted or inconsistent bloom index would hide a
+settlement from the bloom gate **and** from `eth_getLogs`, consistently and undetectably. Sampled
+auditing gives probabilistic detection, not semantic equivalence, and capacity release is not a
+place for probabilistic evidence.
 
-`eth_getLogs` does **not** independently corroborate the bloom. go-ethereum's log filter selects
-candidate blocks using those same header blooms (`filters.Filter` → `bloomFilter(header.Bloom, …)`,
-and the bloombits index is built from them), so a provider serving a corrupted bloom hides a log
-from the bloom gate **and** from `eth_getLogs`, consistently and silently. The cross-check at
-"canonical block header contradicts settlement log discovery" only catches a provider that
-corrupts the bloom while leaving its log index intact.
+The guarantee this restores, and which the regression suite pins directly:
 
-That is a real reduction in evidence strength against a faulty or hostile RPC, and it is the one
-place this change is not semantically equivalent to its predecessor. Two things bound it:
+> A settlement cannot be hidden because a header bloom is wrong, an RPC log index is incomplete,
+> or `eth_getLogs` omits it.
 
-1. **The bloom audit.** A bounded random sample of bloom-negative blocks is read in full anyway
-   (`GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE`, default 1%, capped at 64 blocks per scan). A
-   sampled block whose receipts contain a `QuoteSettled` log aborts the scan — no checkpoint, no
-   release. This gives probabilistic detection of a corrupted bloom index, **not a proof**: a
-   single wrong block has only a sampling chance of being caught, while systemic corruption is
-   caught quickly.
-2. **Operator signal.** `gate_scanner_log_discovery_omissions_total` and
-   `gate_scanner_non_canonical_logs_total` are the early warning that a provider's log index
-   disagrees with its own receipts. A sustained non-zero rate on either warrants investigation.
+Tests corrupt each of those channels — empty `getLogs`, all-zero blooms on every header,
+malformed and throwing `getLogs`, and a `getLogs` that both invents a settlement and hides a real
+one — and assert that receipt-derived discovery is unaffected in every case.
 
-Deployments that treat the RPC provider as untrusted should raise the audit rate (1.0 restores
-the pre-optimization guarantee at the pre-optimization cost) or cross-check against a second
-independent provider.
-
-`eth_getLogs` itself is an accelerator and an integrity probe, never evidence:
-
-- a discovered log the receipts do **not** contain → fails closed (injection)
-- a discovered log in a bloom-negative block → fails closed (the header contradicts the index)
-- a discovered log on a non-canonical block hash → dropped, exactly as the receipt path drops it
-- a log the receipts contain that `eth_getLogs` **omitted** → still accepted, because the bloom
-  already forced that block's receipts to be read
-
-That last case is the one that matters for `record_scanner_range`'s release predicate: a lossy
-log index cannot manufacture canonical no-match coverage.
-
-**Worst case.** If every block is bloom-positive the cost is `3N + chunks + 3`, i.e. the previous
-`3N + 3` plus the log queries — marginally *worse* than the code it replaces, not equal to it. A
-provider that range-errors on every span would multiply the log queries, so the halving is capped
-by an explicit per-scan query budget (`max(64, 8 × chunks)`); beyond it the scan fails closed
-rather than degrading further.
+The bloom/`getLogs` design is a separate future backlog item. It is not present in this code;
+its history is in commits `7f62311` and `1bd050e` on this branch.
 
 ## Measured
 
 Synthetic ranges driven through a real `ethers` `JsonRpcProvider` whose transport adds a fixed
 delay per HTTP payload (`scripts/scanner-transport-benchmark.js --latency 20`). Each adapter runs
-in the provider configuration it was written for: the old sequential scanner against a
-non-batching provider, so it is not charged ethers' 10 ms batch drain stall that a real sequential
-HTTP client never pays. (`--unfair` reproduces that mis-measurement, which inflated an earlier
-version of these numbers by ~2.4x.)
+in the provider configuration it was written for: the sequential baseline against a non-batching
+provider, so it is not charged ethers' 10 ms batch drain stall that a real sequential HTTP client
+never pays. (`--unfair` reproduces that mis-measurement, which inflated an earlier version of
+these numbers.)
 
-**Sparse 5,000-block range** (12 logs/block, no bloom fallback):
+**Sparse 5,000-block range, 20 ms per round trip, concurrency 64:**
 
-| | JSON-RPC calls | HTTP round trips | Elapsed |
+| | A. logical RPC calls | B. HTTP round trips | Elapsed |
 | --- | --- | --- | --- |
-| before | 15,003 | 15,003 | 321,104 ms |
-| after, provider without batching | 5,008 | 5,008 | 1,951 ms |
-| after, batching provider | 5,008 | 87 | 2,770 ms |
+| before — sequential, non-batching provider | 15,003 | 15,003 | 321,529 ms |
+| after — concurrency 64, non-batching provider | 15,003 | 15,003 | 5,374 ms |
+| after — concurrency 64, batching provider | 15,003 | 240 | 7,677 ms |
 
-**3.0x fewer JSON-RPC calls, 172x fewer round trips, 165x faster.**
+Logical calls are **identical**. Round trips fall 62x with batching. Wall clock falls ~60x.
 
-**Dense 1,000-block range** (500 logs/block, ~50% of blocks bloom-positive):
+### Where the win comes from
 
-| | JSON-RPC calls | HTTP round trips | Elapsed |
-| --- | --- | --- | --- |
-| before | 3,003 | 3,003 | 65,609 ms |
-| after, batching provider | 2,008 | 36 | 1,681 ms |
+**Concurrency, not batching.** Sixty-four in-flight requests is what collapses wall-clock time;
+at 20 ms latency, concurrency alone is actually *faster* than concurrency plus batching, because
+ethers charges each batch drain a 10 ms stall.
 
-**1.5x fewer calls, 83x fewer round trips, 39x faster.**
-
-### What actually produces the speedup
-
-**Concurrency, not batching.** The old scanner awaited every RPC in sequence; header *and*
-receipt reads now run with bounded concurrency, which is why the dense range — where the bloom
-gate mostly fails and the call-count win collapses to 1.5x — still gets 39x on wall clock.
-
-Batching is a separate lever with a different payoff. At 20 ms latency it is marginally *slower*
-than unbatched concurrency (ethers charges each drain a 10 ms stall), but it cuts provider-side
-requests 57x, which is what matters for rate limits, quotas and per-request billing. It becomes a
-wall-clock win as provider latency rises above the stall.
-
-### Bloom fallback vs. log density
-
-The gate's value depends entirely on how many items a block's bloom carries (one address plus
-each topic, per log). Measured over a 2,000-block sparse range
-(`scripts/scanner-rpc-benchmark.js --sweep`):
-
-| logs/block | bloom items | bloom-positive blocks | total calls | vs. before |
-| --- | --- | --- | --- | --- |
-| 12 | 36 | 0 (0.0%) | 2,005 | 2.99x |
-| 50 | 150 | 1 (0.1%) | 2,007 | 2.99x |
-| 100 | 300 | 6 (0.3%) | 2,017 | 2.98x |
-| 200 | 600 | 83 (4.2%) | 2,171 | 2.77x |
-| 300 | 900 | 324 (16.2%) | 2,653 | 2.26x |
-| 500 | 1,500 | 1,028 (51.4%) | 4,061 | 1.48x |
-| 800 | 2,400 | 1,657 (82.8%) | 5,319 | 1.13x |
-
-The filter is M3:2048, so after `n` insertions the set-bit fraction is `~1-e^(-3n/2048)` and a
-two-item query needs six bits: saturation is sharp past ~600 items. **Quote the call-count win
-with its operating point.** The round-trip and wall-clock wins do not depend on it.
+Batching is a separate lever with a different payoff: it cuts the number of requests the provider
+actually receives by ~62x, which is what matters for rate limits, quotas and per-request billing.
+It also becomes a wall-clock win once provider latency rises above the stall.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE` | 1000 | starting `eth_getLogs` span; clamped to `MAX_BLOCK_RANGE`. Lower it for providers with tight log caps. |
-| `GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY` | 64 | in-flight header reads; max 256. Lower it for rate-limited providers, raise it to fill a larger provider batch. |
-| `GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` | 100 | JSON-RPC batch width. **Must be ≥ header concurrency to get the round-trip win.** Set it to `1` for a provider that rejects batched payloads. |
-| `GAVEL_GATE_SETTLEMENT_BLOOM_AUDIT_RATE` | 0.01 | fraction of bloom-negative blocks read in full anyway; `0` disables the audit, `1` restores the pre-optimization guarantee and cost. |
+| `GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY` | 64 | in-flight RPCs per scan phase; max 256. Transport only — the same reads happen either way. |
+| `GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` | 100 | JSON-RPC batch width. Set to `1` for a provider that rejects batched payloads. |
 
-A span a provider rejects **for width or result count** is halved recursively until it is accepted;
-a chunk is never skipped, and the total number of log queries per scan is bounded. Rate-limit
-shapes are deliberately **not** treated as range errors — splitting a throttled query would
-multiply requests at a provider that is already throttling. Errors that are not range limits abort
-the scan without retrying, and the worker retries the whole range on its next tick.
+Lower the concurrency for rate-limited providers. Keep `BATCH_MAX_COUNT >= SCAN_CONCURRENCY` to
+get one round trip per wave.
 
-### Known follow-up, not addressed here
+## Resource bounds
+
+Measured with `scripts/scanner-memory-probe.js` over a 5,000-block range at 150 transactions per
+block, against a lazily generated chain so the figure is the scanner's own retention:
+
+| | peak in-flight RPCs | peak heap delta |
+| --- | --- | --- |
+| before | 1 | 93 MB |
+| after | 64 | 36 MB |
+
+Concurrency is bounded by an explicit lane pool, so a scan never creates an unbounded promise set
+however wide the range. Peak memory is *lower* than the sequential scanner despite 64x the
+in-flight requests, because per-block transaction sets are retained as a digest of their canonical
+sorted form rather than as the full hash array. The receipt cross-check compares the same sorted
+canonical string either way, so the check is unchanged.
+
+## Client contract
+
+`createRpcClient` must provide `getBlockHeader(number)` — a raw `eth_getBlockByNumber(n, false)`,
+for the cache reason above. The adapter fails fast at construction if it is missing.
+
+Block tags are encoded with `toQuantity`, not `toBeHex`: JSON-RPC `QUANTITY` forbids leading zeros
+and go-ethereum rejects them, while `toBeHex` pads to whole bytes (`0x02255100` for a 7-nibble
+Base height).
+
+Batching is a plain ethers `JsonRpcProvider` behaviour (`batchStallTime` 10 ms, `batchMaxCount`
+100), with no negotiation and no fallback. A provider that rejects batched payloads or caps them
+below the scan concurrency will fail every scan identically until
+`GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` is lowered.
+
+## Observability
+
+Metrics report **logical JSON-RPC method calls**, never HTTP requests — ethers does not expose
+round-trip counts, so that figure is benchmark-only rather than an invented runtime metric.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `gate_scanner_rpc_method_calls_total{method}` | counter | logical method calls, split into `headers` / `receipts` / `log_queries` / `other`; the parts sum to the total |
+| `gate_scanner_range_blocks` | gauge | blocks in the scanned range |
+| `gate_scanner_relevant_logs` | gauge | matching logs found in receipts |
+| `gate_scanner_elapsed_milliseconds` | gauge | scan wall-clock time |
+| `gate_scanner_concurrency` | gauge | configured in-flight bound |
+
+`log_queries` is always zero on the default path and exists so the series does not change shape if
+supplemental log querying is ever added.
+
+## Known follow-up, not addressed here
 
 The worker scheduler retries a failed `scanOnce` every `pollIntervalMs` with no backoff or jitter
 (`runtime.js`). Sequential RPC used to throttle that accidentally; concurrent reads remove the
 brake. Adding exponential backoff to the job scheduler is worth doing but sits outside the
 scanner/adapter and is deliberately left out of this change.
 
-## Client contract
-
-`createRpcClient` must provide `getBlockHeader(number)` (raw `eth_getBlockByNumber(n, false)`,
-because ethers' `Block` does not expose `logsBloom`) and `getLogs(filter)`. The adapter fails
-fast at construction if either is missing, and fails closed mid-scan if a header arrives without
-a well-formed 256-byte `logsBloom` — it never silently falls back to trusting `eth_getLogs`.
-
-Block tags are encoded with `toQuantity`, not `toBeHex`: JSON-RPC `QUANTITY` forbids leading
-zeros and go-ethereum rejects them, while `toBeHex` pads to whole bytes (`0x02255100` for a
-7-nibble Base height).
-
-Batching is a plain ethers `JsonRpcProvider` behaviour (`batchStallTime` 10 ms, `batchMaxCount`
-100), with no negotiation and no fallback. A provider that rejects batched payloads or caps them
-below the header concurrency will fail every scan identically until
-`GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` is lowered.
-
 ## Rollback
 
-Revert the commit. There is no schema change, no migration, and no persisted-format change:
-`canonicalBlocks` is written with the same four fields as before, so ranges recorded by the new
-scanner and the old one are interchangeable and generation/replay comparisons are unaffected.
-A rolled-back deployment keeps the two extra client methods harmlessly unused.
+Revert the commits. There is no schema change, no migration, and no persisted-format change:
+`canonicalBlocks` is written with the same four fields as before, so ranges recorded by this
+scanner and by the previous one are interchangeable and generation/replay comparisons are
+unaffected. A rolled-back deployment keeps the extra `getBlockHeader` client method harmlessly
+unused.

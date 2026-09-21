@@ -2,7 +2,6 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { Interface } = require("ethers");
 const { QUOTE_SETTLED_EVENT_ABI } = require("@gavel/gate");
-const { bloomAdd, bloomHex } = require("./support/base-rpc-mock");
 const { createBaseSettlementAdapter } = require("../src/gate/base-settlement-adapter");
 const { SettlementRequestError, createSettlementService } = require("../src/gate/settlement-service");
 const { QuoteExpiredError } = require("../src/gate/store-errors");
@@ -20,19 +19,9 @@ function chainLog(overrides = {}) {
   return { address: SPLITTER, topics: encoded.topics, data: encoded.data, transactionHash: TX, index: 2,
     blockNumber: 10, blockHash: BLOCK_HASH, ...overrides };
 }
-// The synthetic chain's ground truth: block 10 carries exactly one QuoteSettled log.
-// getBlockHeader's logsBloom and getLogs are derived from that truth, while getBlockReceipts /
-// getTransactionReceipt are the provider views a test can corrupt. That separation is what lets
-// a test model "the provider lies about receipts" without also silently rewriting the header.
-function trueSettlementLogs(number) { return Number(number) === 10 ? [chainLog()] : []; }
-function blockBloom(number, logs = trueSettlementLogs) {
-  const bloom = new Uint8Array(256);
-  for (const entry of logs(number)) {
-    bloomAdd(bloom, entry.address);
-    for (const topic of entry.topics) bloomAdd(bloom, topic);
-  }
-  return bloomHex(bloom);
-}
+// getBlockHeader mirrors whatever getBlock a test configures, so an override of the block view
+// stays consistent across both. There is deliberately no getLogs and no logsBloom: the default
+// scanner derives settlement evidence from receipts alone.
 function rpc(overrides = {}) {
   const log = chainLog();
   const base = {
@@ -49,19 +38,7 @@ function rpc(overrides = {}) {
     async getTransaction() { return { hash: TX }; },
   };
   const client = { ...base, ...overrides };
-  // settlementLogs redefines the chain's ground truth for a test; it is not a client method.
-  const truth = overrides.settlementLogs || trueSettlementLogs;
-  delete client.settlementLogs;
-  if (!overrides.getBlockHeader) {
-    client.getBlockHeader = async (number) => ({ ...(await client.getBlock(number)), logsBloom: blockBloom(number, truth) });
-  }
-  if (!overrides.getLogs) {
-    client.getLogs = async ({ fromBlock, toBlock }) => {
-      const found = [];
-      for (let number = Number(fromBlock); number <= Number(toBlock); number += 1) found.push(...truth(number));
-      return found;
-    };
-  }
+  if (!overrides.getBlockHeader) client.getBlockHeader = (number) => client.getBlock(number);
   return client;
 }
 function quote(overrides = {}) {
@@ -168,6 +145,8 @@ test("6. Base adapter verifies receipt success, canonical block evidence, and on
 });
 
 test("6a. scanner derives release evidence from complete block receipts when filtered logs omit a payment", async () => {
+  // The client offers an eth_getLogs that reports nothing. The default scanner never consults it:
+  // settlement evidence comes from the block's receipts, so the payment is still found.
   const adapter = createBaseSettlementAdapter({
     client: rpc({ getLogs: async () => [] }),
     chainId: 8453,
@@ -204,10 +183,9 @@ test("7. Base adapter records malformed or failed target receipt evidence as ano
   for (const client of [
     rpc({ getTransactionReceipt: async () => ({ status: 0, transactionHash: TX,
       blockNumber: 10, blockHash: BLOCK_HASH, logs: [chainLog()] }) }),
-    rpc({ settlementLogs: (number) => (Number(number) === 10 ? [chainLog({ data: "0x12" })] : []),
-      getTransactionReceipt: async () => ({ status: 1, transactionHash: TX,
-        blockNumber: 10, blockHash: BLOCK_HASH,
-        logs: [chainLog({ data: "0x12" })] }) }),
+    rpc({ getTransactionReceipt: async () => ({ status: 1, transactionHash: TX,
+      blockNumber: 10, blockHash: BLOCK_HASH,
+      logs: [chainLog({ data: "0x12" })] }) }),
   ]) {
     const adapter = createBaseSettlementAdapter({ client, chainId: 8453, splitter: SPLITTER });
     const result = await adapter.scanRange({ fromBlock: 10n, throughBlock: 10n });
@@ -254,7 +232,6 @@ test("7b. Base adapter verifies the RPC chain identity instead of trusting its c
 test("7c. Base adapter rejects canonical block snapshots whose parent linkage mixes forks", async () => {
   const adapter = createBaseSettlementAdapter({
     client: rpc({
-      getLogs: async () => [],
       getBlock: async (number) => ({
         number: Number(number),
         hash: Number(number) === 10 ? H("9") : H("a"),

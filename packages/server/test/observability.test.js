@@ -133,35 +133,32 @@ test("worker result observation turns only committed outcome counts and lag snap
   ]);
 });
 
-test("scanner RPC telemetry is allowlisted, emitted, and carries no settlement content", () => {
+test("scanner RPC telemetry is allowlisted, emitted, truthfully named, and carries no content", () => {
   const lines = [];
   const telemetry = createGateObservability({ write(line) { lines.push(line); } });
 
   // Every name must be in the COUNTERS/GAUGES allowlist. metric() throws on an unlisted name and
   // observeWorkerResult swallows it, so an unlisted metric is silently dead rather than loud.
   telemetry.observeWorkerResult("scan", {
-    scanned: 5_000, rpcCalls: 5_010, getLogsCalls: 5, headerCalls: 5_002, receiptCalls: 2,
-    relevantBlocks: 1, relevantLogs: 1, scanElapsedMs: 143,
-    discoveryOmissions: 2, nonCanonicalLogs: 1, auditedBlocks: 50,
+    scanned: 5_000, rpcMethodCalls: 15_003, headerMethodCalls: 5_002, receiptMethodCalls: 10_000,
+    logQueryMethodCalls: 0, relevantLogs: 1, scanConcurrency: 64, scanElapsedMs: 143,
   });
 
   const events = parsed(lines).map(({ timestamp, level, type, ...event }) => event);
   assert.deepEqual(events, [
-    { name: "gate_scanner_rpc_calls_total", value: 5, labels: { method: "get_logs" } },
-    { name: "gate_scanner_rpc_calls_total", value: 5_002, labels: { method: "headers" } },
-    { name: "gate_scanner_rpc_calls_total", value: 2, labels: { method: "receipts" } },
-    { name: "gate_scanner_rpc_calls_total", value: 1, labels: { method: "other" } },
+    { name: "gate_scanner_rpc_method_calls_total", value: 5_002, labels: { method: "headers" } },
+    { name: "gate_scanner_rpc_method_calls_total", value: 10_000, labels: { method: "receipts" } },
+    { name: "gate_scanner_rpc_method_calls_total", value: 1, labels: { method: "other" } },
     { name: "gate_scanner_range_blocks", value: 5_000 },
-    { name: "gate_scanner_relevant_blocks", value: 1 },
     { name: "gate_scanner_relevant_logs", value: 1 },
     { name: "gate_scanner_elapsed_milliseconds", value: 143 },
-    { name: "gate_scanner_log_discovery_omissions_total", value: 2 },
-    { name: "gate_scanner_non_canonical_logs_total", value: 1 },
-    { name: "gate_scanner_bloom_audited_blocks_total", value: 50 },
+    { name: "gate_scanner_concurrency", value: 64 },
   ]);
-  // The labelled parts sum to the reported total, so no metric double-counts.
-  const parts = events.filter((event) => event.name === "gate_scanner_rpc_calls_total");
-  assert.equal(parts.reduce((total, event) => total + event.value, 0), 5_010);
+  // The labelled parts sum to the reported logical method total, so no metric double-counts.
+  const parts = events.filter((event) => event.name === "gate_scanner_rpc_method_calls_total");
+  assert.equal(parts.reduce((total, event) => total + event.value, 0), 15_003);
+  // No metric claims to measure HTTP round trips, which ethers does not expose.
+  assert.doesNotMatch(lines.join("\n"), /round_trip|http_request|batch/);
   // No address, hash, quote id or wallet may appear anywhere in the emitted telemetry.
   assert.doesNotMatch(lines.join("\n"), /0x[0-9a-fA-F]{8}/);
 });

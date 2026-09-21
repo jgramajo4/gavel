@@ -1,23 +1,23 @@
-// Regression matrix for the optimized BaseSettlementAdapter.scanRange() discovery path.
+// Regression matrix for the transport-optimized BaseSettlementAdapter.scanRange().
 //
-// The optimization replaces per-block receipt enumeration with one strictly filtered
-// eth_getLogs plus header-logsBloom gating. These tests pin BOTH halves of that claim:
-// the RPC call shape (explicit call-count assertions, including a 5,000-block range that
-// must no longer be O(5,000) receipt reads) and the semantics that must not move
-// (exact-log acceptance, canonical ancestry, reorg handling, and the canonical no-match
-// evidence that capacity release consumes).
+// The optimization is transport-only: the scanner performs exactly the logical reads the
+// sequential scanner performed (1 eth_chainId, one header per block, one transaction count and
+// one receipt set per block, two boundary re-reads), issued with bounded concurrency so the
+// provider can batch them.
+//
+// These tests pin two things. First, the RESTORED SEMANTIC GUARANTEE: receipts are the sole
+// authority for settlement discovery, so no eth_getLogs answer and no header logsBloom -- however
+// wrong, incomplete or hostile -- can hide a settlement the receipts contain. Second, the
+// logical RPC shape, with explicit call-count assertions showing it is unchanged at 3N+3.
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { QUOTE_SETTLED_TOPIC } = require("@gavel/gate");
 const { createBaseSettlementAdapter } = require("../src/gate/base-settlement-adapter");
-const { logsBloomMayContain, logsBloomMayContainEvent } = require("../src/gate/logs-bloom");
-const { createSyntheticChain, createCountingClient, bloomAdd, bloomHex, rawLog, digest } = require("./support/base-rpc-mock");
+const { createSyntheticChain, createCountingClient, bloomHex } = require("./support/base-rpc-mock");
 
 const A = (digit) => `0x${digit.repeat(40)}`;
 const H = (digit) => `0x${digit.repeat(64)}`;
 const SPLITTER = A("3");
-const OTHER_CONTRACT = A("7");
-const UNRELATED_TOPIC = H("e");
 
 function settlement(block, quoteNonce, extra = {}) {
   return { block: BigInt(block), quoteId: H(quoteNonce), payer: A("1"), voter: A("2"),
@@ -25,157 +25,145 @@ function settlement(block, quoteNonce, extra = {}) {
 }
 
 function harness({ from = 1_000n, through = 1_010n, settlements = [], noiseLogsPerBlock = 4,
-  overrides = {}, clientOptions = {}, options = {}, seed = "gavel" } = {}) {
+  overrides = {}, options = {}, seed = "gavel" } = {}) {
   const chain = createSyntheticChain({ fromBlock: BigInt(from) - 1n, head: BigInt(through) + 1n,
     splitter: SPLITTER, settlements, noiseLogsPerBlock, noiseTxPerBlock: 2, seed });
-  const counting = createCountingClient(chain, { splitter: SPLITTER, overrides, ...clientOptions });
-  // The bloom audit samples randomly, so it is off by default here: the call-count assertions
-  // below measure the pure discovery path. Tests that exercise the audit opt in explicitly.
+  const counting = createCountingClient(chain, { splitter: SPLITTER, overrides });
   const adapter = createBaseSettlementAdapter({ client: counting.client, chainId: 8453, splitter: SPLITTER,
-    maxBlockRange: 100_000, rpcTimeoutMs: 60_000, bloomAuditRate: 0, ...options });
+    maxBlockRange: 100_000, rpcTimeoutMs: 60_000, ...options });
   return { chain, counting, adapter, scan: () => adapter.scanRange({ fromBlock: BigInt(from), throughBlock: BigInt(through) }) };
 }
 
-// Expected header reads: one per block in the range, plus the post-scan boundary re-reads
-// (both endpoints, or just the single block when the range is one block wide).
+// Logical reads per scan: 1 chainId + N headers + 2 boundary re-reads + 2 receipt calls per block.
 const expectedHeaderCalls = (blocks) => blocks + (blocks > 1 ? 2 : 1);
+const expectedTotalCalls = (blocks) => 1 + expectedHeaderCalls(blocks) + 2 * blocks;
 
-test("1. an empty range proves contiguous canonical coverage without reading a single receipt", async () => {
-  const h = harness({ from: 1_000n, through: 1_099n });
-  const result = await h.scan();
+// A clean chain whose client can be selectively corrupted, for the "receipts are authoritative"
+// group. Each override models a provider lying through a channel the scanner must not depend on.
+function pristine(from, through, settlements, overrides) {
+  return harness({ from, through, settlements, overrides });
+}
 
-  assert.equal(result.candidates.length, 0);
-  assert.equal(result.anomalies.length, 0);
-  // Contiguous coverage: recordScannerRange requires exactly one canonical block per block.
-  assert.equal(result.canonicalBlocks.length, 100);
-  assert.equal(result.canonicalBlocks[0].blockNumber, "1000");
-  assert.equal(result.canonicalBlocks.at(-1).blockNumber, "1099");
-  for (let index = 1; index < result.canonicalBlocks.length; index += 1) {
-    assert.equal(result.canonicalBlocks[index].parentHash, result.canonicalBlocks[index - 1].blockHash);
-  }
-  assert.equal(h.counting.calls("eth_chainId"), 1);
-  assert.equal(h.counting.calls("eth_getLogs"), 1);
-  assert.equal(h.counting.calls("eth_getBlockByNumber"), expectedHeaderCalls(100));
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 0);
-  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 0);
-  assert.equal(h.counting.calls("eth_getTransactionReceipt"), 0);
-});
+// ---------------------------------------------------------------------------
+// The restored guarantee: nothing about eth_getLogs or logsBloom can hide a settlement.
+// ---------------------------------------------------------------------------
 
-test("2. a single settlement log is accepted from canonical receipts, reading only its own block", async () => {
-  const h = harness({ from: 1_000n, through: 1_099n, settlements: [settlement(1_042n, "6")] });
+test("1. eth_getLogs omitting a real settlement does not hide it from receipt evidence", async () => {
+  const h = pristine(1_000n, 1_049n, [settlement(1_020n, "6")], { async getLogs() { return []; } });
   const result = await h.scan();
 
   assert.equal(result.candidates.length, 1);
   assert.equal(result.candidates[0].quoteId, H("6"));
-  assert.equal(result.candidates[0].receiptBlock, "1042");
-  assert.equal(result.canonicalBlocks.length, 100);
-  // Exactly one block was receipt-enumerated: the one whose header bloom admitted the event.
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 1);
-  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 1);
-  assert.equal(h.counting.calls("eth_getLogs"), 1);
-});
-
-test("3. multiple settlement logs in one block are all accepted from a single receipt read", async () => {
-  const h = harness({ from: 1_000n, through: 1_049n,
-    settlements: [settlement(1_020n, "6"), settlement(1_020n, "b"), settlement(1_020n, "c")] });
-  const result = await h.scan();
-
-  assert.deepEqual(result.candidates.map((item) => item.quoteId).sort(), [H("6"), H("b"), H("c")]);
-  assert.equal(new Set(result.candidates.map((item) => item.logIndex)).size, 3);
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 1);
-});
-
-test("4. settlement logs spread across blocks read exactly one receipt set per relevant block", async () => {
-  const h = harness({ from: 1_000n, through: 1_099n,
-    settlements: [settlement(1_005n, "6"), settlement(1_050n, "b"), settlement(1_099n, "c")] });
-  const result = await h.scan();
-
-  assert.deepEqual(result.candidates.map((item) => item.receiptBlock), ["1005", "1050", "1099"]);
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 3);
-  assert.equal(result.rpcStats.relevantBlocks, 3);
-});
-
-test("5. a duplicated eth_getLogs entry is idempotent, and a conflicting duplicate fails closed", async () => {
-  const base = harness({ settlements: [settlement(1_005n, "6")] });
-  const original = await base.adapter.scanRange({ fromBlock: 1_000n, throughBlock: 1_010n });
-  assert.equal(original.candidates.length, 1);
-
-  const duplicated = harness({ settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs(filter) { const logs = await base.counting.client.getLogs(filter); return [...logs, ...logs]; } } });
-  const result = await duplicated.scan();
-  assert.equal(result.candidates.length, 1);
-  assert.deepEqual(result.candidates[0].event, original.candidates[0].event);
-
-  const conflicting = harness({ settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs(filter) {
-      const logs = await base.counting.client.getLogs(filter);
-      return [...logs, { ...logs[0], data: `0x${"1".repeat(320)}` }];
-    } } });
-  await assert.rejects(conflicting.scan(), /conflicting duplicate logs/i);
-});
-
-test("6. a structurally malformed discovery result aborts the range instead of being ignored", async () => {
-  const h = harness({ settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs() { return [{ address: SPLITTER, topics: [QUOTE_SETTLED_TOPIC], data: "0x" }]; } } });
-  await assert.rejects(h.scan(), /log discovery result is incomplete/i);
-
-  const notAnArray = harness({ overrides: { async getLogs() { return null; } } });
-  await assert.rejects(notAnArray.scan(), /log discovery result is incomplete/i);
-});
-
-test("7. a discovery result naming another contract fails closed rather than broadening matching", async () => {
-  const source = harness({ settlements: [settlement(1_005n, "6")] });
-  const logs = await source.counting.client.getLogs({ fromBlock: 1_000n, toBlock: 1_010n,
-    address: SPLITTER, topics: [QUOTE_SETTLED_TOPIC] });
-  const h = harness({ settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs() { return [{ ...logs[0], address: OTHER_CONTRACT }]; } } });
-  await assert.rejects(h.scan(), /from another contract/i);
-});
-
-test("8. a discovery result carrying another event topic fails closed", async () => {
-  const source = harness({ settlements: [settlement(1_005n, "6")] });
-  const logs = await source.counting.client.getLogs({ fromBlock: 1_000n, toBlock: 1_010n,
-    address: SPLITTER, topics: [QUOTE_SETTLED_TOPIC] });
-  const h = harness({ settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs() { return [{ ...logs[0], topics: [UNRELATED_TOPIC, ...logs[0].topics.slice(1)] }]; } } });
-  await assert.rejects(h.scan(), /unrelated event topic/i);
-});
-
-test("9. a chain identity mismatch aborts before any discovery or header work", async () => {
-  const h = harness({ overrides: { async getChainId() { return 1; } } });
-  await assert.rejects(h.scan(), /RPC chain 1 does not match configured chain 8453/);
+  assert.equal(result.candidates[0].receiptBlock, "1020");
+  // The scanner never asked in the first place.
   assert.equal(h.counting.calls("eth_getLogs"), 0);
-  assert.equal(h.counting.calls("eth_getBlockByNumber"), 0);
+  assert.equal(result.rpcStats.logQueryMethodCalls, 0);
 });
 
-test("10. an overlap re-scan of the same span reproduces identical evidence", async () => {
-  const settlements = [settlement(1_005n, "6")];
-  const first = harness({ from: 1_000n, through: 1_063n, settlements });
-  const firstResult = await first.scan();
-  // The overlap window re-covers an already-scanned span; the adapter is a pure function of
-  // the chain, so the second pass must produce byte-identical canonical evidence.
-  const second = harness({ from: 1_000n, through: 1_063n, settlements });
-  const secondResult = await second.scan();
-
-  assert.deepEqual(secondResult.canonicalBlocks, firstResult.canonicalBlocks);
-  assert.deepEqual(secondResult.candidates, firstResult.candidates);
-  assert.equal(secondResult.candidates.length, 1);
-});
-
-test("11. a canonical rewrite at a range boundary during the scan aborts the checkpoint", async () => {
-  let headerReads = 0;
-  const h = harness({ from: 1_000n, through: 1_009n,
+test("2. a false-negative header bloom does not hide a settlement the receipts contain", async () => {
+  // Every header in the range claims an all-zero bloom, which under a bloom-gated design would
+  // "prove" the range empty. The receipt read is unconditional, so the settlement is still found.
+  const h = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
     overrides: { async getBlockHeader(number) {
-      headerReads += 1;
       const header = await createCountingClient(h.chain).client.getBlockHeader(number);
-      // The post-scan boundary re-read observes a different canonical hash.
-      if (headerReads > 10 && Number(number) === 1_000) return { ...header, hash: H("b") };
-      return header;
+      return { ...header, logsBloom: bloomHex(new Uint8Array(256)) };
     } } });
-  await assert.rejects(h.scan(), /canonical boundary changed during scan/i);
+  const result = await h.scan();
+
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].quoteId, H("6"));
+  // Receipts were read for every block, not just bloom-positive ones.
+  assert.equal(h.counting.calls("eth_getBlockReceipts"), 50);
 });
 
-test("12. a reorged header whose parent linkage mixes forks aborts the range", async () => {
+test("3. an empty eth_getLogs result leaves the authoritative receipt scan untouched", async () => {
+  const withLogs = harness({ from: 1_000n, through: 1_029n, settlements: [settlement(1_005n, "6"), settlement(1_020n, "b")] });
+  const expected = await withLogs.scan();
+
+  const silent = pristine(1_000n, 1_029n, [settlement(1_005n, "6"), settlement(1_020n, "b")],
+    { async getLogs() { return []; } });
+  const result = await silent.scan();
+
+  assert.deepEqual(result.candidates, expected.candidates);
+  assert.deepEqual(result.canonicalBlocks, expected.canonicalBlocks);
+  assert.equal(result.candidates.length, 2);
+});
+
+test("4. malformed or throwing eth_getLogs cannot suppress receipt-derived evidence", async () => {
+  for (const getLogs of [
+    async () => { throw new Error("query returned more than 10000 results"); },
+    async () => null,
+    async () => [{ address: SPLITTER, topics: [QUOTE_SETTLED_TOPIC], data: "0x" }],
+    async () => { throw new Error("429 Too Many Requests"); },
+  ]) {
+    const h = pristine(1_000n, 1_019n, [settlement(1_005n, "6")], { getLogs });
+    const result = await h.scan();
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].quoteId, H("6"));
+  }
+});
+
+test("5. when eth_getLogs and the receipts disagree, the receipts decide", async () => {
+  // getLogs invents a settlement that no receipt contains, and hides one that does.
+  const fabricated = { address: SPLITTER, topics: [QUOTE_SETTLED_TOPIC, H("c"), H("1"), H("2")],
+    data: `0x${"11".repeat(160)}`, blockNumber: "0x3f2", blockHash: H("d"),
+    transactionHash: H("e"), logIndex: "0x0" };
+  const h = pristine(1_000n, 1_019n, [settlement(1_005n, "6")], { async getLogs() { return [fabricated]; } });
+  const result = await h.scan();
+
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].quoteId, H("6"), "the receipt-backed settlement is the accepted one");
+  assert.equal(result.candidates.some((item) => item.quoteId === H("c")), false,
+    "a settlement only eth_getLogs claims is never accepted");
+});
+
+test("6. reservation release evidence cannot be produced from an absent log alone", async () => {
+  // A no-match range is only ever produced when every block's receipts were read and contained
+  // nothing. Removing the settlement from the chain entirely is what makes the range empty --
+  // silencing eth_getLogs does not.
+  const populated = pristine(1_000n, 1_029n, [settlement(1_010n, "6")], { async getLogs() { return []; } });
+  const populatedResult = await populated.scan();
+  assert.equal(populatedResult.candidates.length, 1, "a real settlement still blocks a no-match range");
+
+  const empty = harness({ from: 1_000n, through: 1_029n, settlements: [] });
+  const emptyResult = await empty.scan();
+  assert.equal(emptyResult.candidates.length, 0);
+  assert.equal(emptyResult.canonicalBlocks.length, 30);
+  // The no-match conclusion rests on a receipt read for every single block in the range.
+  assert.equal(empty.counting.calls("eth_getBlockReceipts"), 30);
+  assert.equal(empty.counting.calls("eth_getBlockTransactionCountByNumber"), 30);
+});
+
+test("7. a block whose receipts are incomplete aborts rather than becoming no-match coverage", async () => {
+  const h = harness({ from: 1_000n, through: 1_029n, settlements: [settlement(1_010n, "6")],
+    overrides: { async getBlockReceipts(number) {
+      return Number(number) === 1_010 ? [] : createCountingClient(h.chain).client.getBlockReceipts(number);
+    } } });
+  await assert.rejects(h.scan(), /receipt count RPC result is incomplete/i);
+});
+
+// ---------------------------------------------------------------------------
+// Canonical coverage, ancestry, reorg, checkpoint.
+// ---------------------------------------------------------------------------
+
+test("8. the canonical block array covers every block in the range, in order and chained", async () => {
+  const h = harness({ from: 1_000n, through: 1_099n, settlements: [settlement(1_042n, "6")] });
+  const result = await h.scan();
+
+  assert.equal(result.canonicalBlocks.length, 100);
+  assert.deepEqual(result.canonicalBlocks.map((item) => Number(item.blockNumber)),
+    Array.from({ length: 100 }, (_, index) => 1_000 + index));
+  for (let index = 1; index < result.canonicalBlocks.length; index += 1) {
+    assert.equal(result.canonicalBlocks[index].parentHash, result.canonicalBlocks[index - 1].blockHash);
+  }
+  // Exactly the four fields record_scanner_range validates, and nothing else.
+  for (const block of result.canonicalBlocks) {
+    assert.deepEqual(Object.keys(block).sort(), ["blockHash", "blockNumber", "blockTimestamp", "parentHash"]);
+  }
+  assert.equal(result.canonicalBlocks.at(-1).blockNumber, "1099");
+});
+
+test("9. parent-hash continuity still aborts a range that mixes forks", async () => {
   const h = harness({ from: 1_000n, through: 1_009n,
     overrides: { async getBlockHeader(number) {
       const header = await createCountingClient(h.chain).client.getBlockHeader(number);
@@ -184,98 +172,118 @@ test("12. a reorged header whose parent linkage mixes forks aborts the range", a
   await assert.rejects(h.scan(), /parent ancestry is inconsistent/i);
 });
 
-test("13. a previously observed exact log that a reorg removes simply stops being observed", async () => {
-  const before = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6")] });
-  const observed = await before.scan();
-  assert.equal(observed.candidates.length, 1);
-
-  // Same span, rewritten canonical chain (different seed => different hashes) with no settlement.
-  const after = harness({ from: 1_000n, through: 1_009n, settlements: [], seed: "reorged" });
-  const rescanned = await after.scan();
-  assert.equal(rescanned.candidates.length, 0);
-  assert.equal(rescanned.canonicalBlocks.length, 10);
-  // The disappearance is expressed as canonical no-match coverage of the same span, which is
-  // exactly what recordScannerRange consumes to detect a pre/post-acceptance reorg.
-  assert.notEqual(rescanned.canonicalBlocks[5].blockHash, observed.canonicalBlocks[5].blockHash);
+test("10. a boundary rewritten during the scan aborts the checkpoint", async () => {
+  let reads = 0;
+  const h = harness({ from: 1_000n, through: 1_009n,
+    overrides: { async getBlockHeader(number) {
+      reads += 1;
+      const header = await createCountingClient(h.chain).client.getBlockHeader(number);
+      return reads > 10 && Number(number) === 1_000 ? { ...header, hash: H("b") } : header;
+    } } });
+  await assert.rejects(h.scan(), /canonical boundary changed during scan/i);
 });
 
-test("14. every scan returns full-span canonical evidence, so generation semantics are unchanged", async () => {
-  for (const settlements of [[], [settlement(1_005n, "6")]]) {
-    const h = harness({ from: 1_000n, through: 1_009n, settlements });
-    const result = await h.scan();
-    assert.equal(result.canonicalBlocks.length, 10);
-    assert.deepEqual(Object.keys(result.canonicalBlocks[0]).sort(),
-      ["blockHash", "blockNumber", "blockTimestamp", "parentHash"]);
-  }
+test("11. the boundary re-read is a real second read, never served from a provider cache", async () => {
+  const seen = [];
+  const h = harness({ from: 1_000n, through: 1_009n,
+    overrides: { async getBlockHeader(number) {
+      seen.push(Number(number));
+      return createCountingClient(h.chain).client.getBlockHeader(number);
+    } } });
+  await h.scan();
+
+  // 10 range headers plus both boundaries re-read afterwards.
+  assert.equal(seen.length, 12);
+  assert.equal(seen.filter((number) => number === 1_000).length, 2);
+  assert.equal(seen.filter((number) => number === 1_009).length, 2);
 });
 
-test("15. an empty discovery result over a bloom-negative span is canonical no-match coverage", async () => {
-  const h = harness({ from: 1_000n, through: 1_049n });
+test("12. overlap re-scan and post-reorg re-scan behave exactly as before", async () => {
+  const settlements = [settlement(1_005n, "6")];
+  const first = harness({ from: 1_000n, through: 1_063n, settlements });
+  const firstResult = await first.scan();
+  const overlap = harness({ from: 1_000n, through: 1_063n, settlements });
+  const overlapResult = await overlap.scan();
+  assert.deepEqual(overlapResult.canonicalBlocks, firstResult.canonicalBlocks);
+  assert.deepEqual(overlapResult.candidates, firstResult.candidates);
+
+  // A rewritten chain over the same span yields full canonical coverage with new hashes and no
+  // observation, which is what record_scanner_range consumes to detect the disappearance.
+  const reorged = harness({ from: 1_000n, through: 1_063n, settlements: [], seed: "reorged" });
+  const reorgedResult = await reorged.scan();
+  assert.equal(reorgedResult.candidates.length, 0);
+  assert.equal(reorgedResult.canonicalBlocks.length, 64);
+  assert.notEqual(reorgedResult.canonicalBlocks[5].blockHash, firstResult.canonicalBlocks[5].blockHash);
+});
+
+test("13. exact-log settlement acceptance is unchanged in shape and content", async () => {
+  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6")] });
+  const result = await h.scan();
+  const [candidate] = result.candidates;
+  const block = h.chain.blocks.get("1005");
+
+  assert.deepEqual(Object.keys(candidate).sort(),
+    ["event", "evidence", "logIndex", "quoteId", "receiptBlock", "receiptBlockHash", "receiptBlockTimestamp",
+      "settledAt", "txHash"]);
+  assert.equal(candidate.receiptBlockHash, block.hash);
+  assert.equal(candidate.receiptBlockTimestamp.valueOf(), block.timestamp * 1_000);
+  assert.deepEqual(candidate.evidence, { chainId: "8453", splitter: SPLITTER, canonical: true,
+    scannerVerified: true, oneConfirmation: true, confirmations: 1 });
+  assert.deepEqual(candidate.event, { quoteId: H("6"), payer: A("1"), voter: A("2"), attentionAmount: "1000000",
+    gavelRecipient: A("4"), gavelFeeAmount: "250000", token: A("5"), submissionHash: H("7") });
+});
+
+test("14. a failed settlement transaction is still an anomaly, with a decimal block number", async () => {
+  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6", { status: 0 })] });
   const result = await h.scan();
 
   assert.equal(result.candidates.length, 0);
-  assert.equal(result.canonicalBlocks.length, 50);
-  // No receipt was read, because every header's own logsBloom PROVED the absence of the event.
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 0);
-  for (const block of h.chain.blocks.values()) {
-    if (block.number < 1_000n || block.number > 1_049n) continue;
-    assert.equal(logsBloomMayContainEvent(block.logsBloom, SPLITTER, QUOTE_SETTLED_TOPIC), false);
+  assert.equal(result.anomalies.length, 1);
+  assert.equal(result.anomalies[0].code, "INVALID_SETTLEMENT_EVIDENCE");
+  // Receipts carry hex quantities; observations persist as numeric(78,0).
+  assert.match(String(result.anomalies[0].blockNumber), /^\d{1,78}$/);
+  assert.equal(result.anomalies[0].blockNumber, "1005");
+  assert.equal(result.canonicalBlocks.length, 10);
+});
+
+// ---------------------------------------------------------------------------
+// Transport: concurrency, association, partial responses, bounds.
+// ---------------------------------------------------------------------------
+
+test("15. a missing entry in a concurrent response set aborts instead of leaving a coverage hole", async () => {
+  for (const missing of [null, undefined]) {
+    const h = harness({ from: 1_000n, through: 1_009n,
+      overrides: { async getBlockHeader(number) {
+        if (Number(number) === 1_004) return missing;
+        return createCountingClient(h.chain).client.getBlockHeader(number);
+      } } });
+    await assert.rejects(h.scan(), /canonical block unavailable/i);
   }
-});
 
-test("16. an empty discovery result NEVER stands in for canonical evidence a bloom-positive block owes", async () => {
-  // The chain really does contain a settlement; the provider's eth_getLogs hides it. The block's
-  // own header bloom still forces the receipt read, so the log is found and capacity is not released.
-  const h = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
-    overrides: { async getLogs() { return []; } } });
-  const result = await h.scan();
-  assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0].quoteId, H("6"));
-  assert.equal(result.rpcStats.discoveryOmissions, 1);
-
-  // And a provider that ALSO hides it from the receipts cannot produce a no-match range: the
-  // bloom-positive block's receipt set no longer describes its own transactions, so the scan aborts.
-  const hidden = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
-    overrides: { async getLogs() { return []; },
-      async getBlockReceipts(number) { return Number(number) === 1_020 ? [] : h.chain.blocks.get(String(number)).receipts; } } });
-  await assert.rejects(hidden.scan(), /receipt count RPC result is incomplete/i);
-
-  // A header bloom that denies a log the receipts contain is a contradiction, not a no-match proof.
-  const lyingBloom = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
-    overrides: { async getBlockHeader(number) {
-      const header = await createCountingClient(lyingBloom.chain).client.getBlockHeader(number);
-      return Number(number) === 1_020 ? { ...header, logsBloom: `0x${"00".repeat(256)}` } : header;
+  const noReceipts = harness({ from: 1_000n, through: 1_009n,
+    overrides: { async getBlockReceipts(number) {
+      return Number(number) === 1_004 ? undefined : createCountingClient(noReceipts.chain).client.getBlockReceipts(number);
     } } });
-  await assert.rejects(lyingBloom.scan(), /header contradicts settlement log discovery/i);
+  await assert.rejects(noReceipts.scan(), /receipt count RPC result is incomplete/i);
 });
 
-test("17. logs returned out of order are ordered by the chain, not by the provider's response", async () => {
-  const settlements = [settlement(1_005n, "6"), settlement(1_005n, "b"), settlement(1_030n, "c"), settlement(1_012n, "d")];
-  const ordered = harness({ from: 1_000n, through: 1_049n, settlements });
-  const expected = await ordered.scan();
-
-  const shuffled = harness({ from: 1_000n, through: 1_049n, settlements,
-    overrides: { async getLogs(filter) {
-      const logs = await createCountingClient(shuffled.chain).client.getLogs(filter);
-      return [...logs].reverse();
-    } } });
-  const result = await shuffled.scan();
-
-  assert.deepEqual(result.candidates.map((item) => `${item.receiptBlock}:${item.logIndex}`),
-    expected.candidates.map((item) => `${item.receiptBlock}:${item.logIndex}`));
-  assert.deepEqual(result.candidates.map((item) => item.receiptBlock), ["1005", "1005", "1012", "1030"]);
-});
-
-test("18. concurrent header responses are associated by request, not by arrival order", async () => {
+test("16. out-of-order responses are associated by request, not by arrival", async () => {
   const outOfOrder = harness({ from: 1_000n, through: 1_049n,
-    overrides: { async getBlockHeader(number) {
-      const header = await createCountingClient(outOfOrder.chain).client.getBlockHeader(number);
-      // Later blocks resolve first, so arrival order is the reverse of request order.
-      await new Promise((resolve) => { setTimeout(resolve, Math.max(0, 1_050 - Number(number)) % 7); });
-      return header;
-    } } });
+    overrides: {
+      async getBlockHeader(number) {
+        const header = await createCountingClient(outOfOrder.chain).client.getBlockHeader(number);
+        // Later blocks resolve first, so arrival order is the reverse of request order.
+        await new Promise((resolve) => { setTimeout(resolve, Math.max(0, 1_050 - Number(number)) % 7); });
+        return header;
+      },
+      async getBlockReceipts(number) {
+        const receipts = await createCountingClient(outOfOrder.chain).client.getBlockReceipts(number);
+        await new Promise((resolve) => { setTimeout(resolve, Number(number) % 5); });
+        return receipts;
+      },
+    } });
   const result = await outOfOrder.scan();
-  assert.equal(result.canonicalBlocks.length, 50);
+
   assert.deepEqual(result.canonicalBlocks.map((item) => Number(item.blockNumber)),
     Array.from({ length: 50 }, (_, index) => 1_000 + index));
 
@@ -288,240 +296,121 @@ test("18. concurrent header responses are associated by request, not by arrival 
   await assert.rejects(mismatched.scan(), /canonical block unavailable/i);
 });
 
-test("19. a missing entry in a batched header response aborts instead of leaving a coverage hole", async () => {
-  for (const missing of [null, undefined]) {
-    const h = harness({ from: 1_000n, through: 1_009n,
-      overrides: { async getBlockHeader(number) {
-        if (Number(number) === 1_004) return missing;
-        return createCountingClient(h.chain).client.getBlockHeader(number);
-      } } });
-    await assert.rejects(h.scan(), /canonical block unavailable/i);
-  }
-
-  const truncated = harness({ from: 1_000n, through: 1_009n,
-    overrides: { async getBlockHeader(number) {
-      const header = await createCountingClient(truncated.chain).client.getBlockHeader(number);
-      return Number(number) === 1_004 ? { ...header, logsBloom: undefined } : header;
+test("17. settlement ordering follows the chain, not response completion order", async () => {
+  const settlements = [settlement(1_005n, "6"), settlement(1_005n, "b"), settlement(1_030n, "c"), settlement(1_012n, "d")];
+  const h = harness({ from: 1_000n, through: 1_049n, settlements,
+    overrides: { async getBlockReceipts(number) {
+      const receipts = await createCountingClient(h.chain).client.getBlockReceipts(number);
+      // Earlier blocks answer last.
+      await new Promise((resolve) => { setTimeout(resolve, (1_050 - Number(number)) % 11); });
+      return receipts;
     } } });
-  await assert.rejects(truncated.scan(), /header is incomplete/i);
-});
-
-test("20. a provider eth_getLogs range limit is chunked down, never skipped", async () => {
-  const settlements = [settlement(1_005n, "6"), settlement(1_400n, "b"), settlement(1_999n, "c")];
-  const h = harness({ from: 1_000n, through: 1_999n, settlements, clientOptions: { logRangeLimit: 100 } });
   const result = await h.scan();
 
-  assert.deepEqual(result.candidates.map((item) => item.receiptBlock), ["1005", "1400", "1999"]);
-  assert.equal(result.canonicalBlocks.length, 1_000);
-  // The 1,000-block query was halved until the provider accepted it; every sub-range was queried.
-  assert.ok(h.counting.calls("eth_getLogs") > 1, "expected the range-limited query to be chunked");
-  assert.ok(h.counting.calls("eth_getLogs") < 1_000, "chunking must not degrade to per-block queries");
-  assert.equal(result.rpcStats.discoveredLogs, 3);
+  assert.deepEqual(result.candidates.map((item) => item.receiptBlock), ["1005", "1005", "1012", "1030"]);
+  assert.deepEqual(result.candidates.map((item) => item.quoteId), [H("6"), H("b"), H("d"), H("c")]);
 });
 
-test("21. a non-range provider failure aborts the scan without retrying or skipping a chunk", async () => {
-  let queries = 0;
-  const rateLimited = harness({ from: 1_000n, through: 1_999n,
-    overrides: { async getLogs() { queries += 1; throw new Error("429 Too Many Requests"); } } });
-  await assert.rejects(rateLimited.scan(), /log discovery failed for blocks 1000-1999/);
-  assert.equal(queries, 1);
+test("18. concurrency is bounded and never exceeds the configured limit", async () => {
+  for (const limit of [1, 4, 32]) {
+    let inFlight = 0;
+    let peak = 0;
+    const h = harness({ from: 1_000n, through: 1_199n, options: { scanConcurrency: limit },
+      overrides: {
+        async getBlockHeader(number) {
+          inFlight += 1; peak = Math.max(peak, inFlight);
+          try {
+            await new Promise((resolve) => { setTimeout(resolve, 1); });
+            return await createCountingClient(h.chain).client.getBlockHeader(number);
+          } finally { inFlight -= 1; }
+        },
+        async getBlockReceipts(number) {
+          inFlight += 1; peak = Math.max(peak, inFlight);
+          try {
+            await new Promise((resolve) => { setTimeout(resolve, 1); });
+            return await createCountingClient(h.chain).client.getBlockReceipts(number);
+          } finally { inFlight -= 1; }
+        },
+      } });
+    const result = await h.scan();
+    assert.equal(result.canonicalBlocks.length, 200);
+    assert.ok(peak <= limit, `scanConcurrency=${limit} but ${peak} requests were in flight`);
+    assert.equal(result.rpcStats.concurrency, limit);
+  }
 
-  const hung = harness({ from: 1_000n, through: 1_009n, options: { rpcTimeoutMs: 20 },
-    overrides: { getLogs() { return new Promise(() => {}); } } });
-  await assert.rejects(hung.scan(), /Base RPC getLogs timed out/);
+  assert.throws(() => createBaseSettlementAdapter({ client: harness().counting.client, chainId: 8453,
+    splitter: SPLITTER, scanConcurrency: 257 }), /scanConcurrency must not exceed 256/);
+});
 
+test("19. a concurrent failure reports the lowest-indexed block, matching sequential scan order", async () => {
+  // Two blocks are broken. The sequential scanner would have raised the earlier one; concurrency
+  // must not make which error surfaces depend on scheduling.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const h = harness({ from: 1_000n, through: 1_049n,
+      overrides: { async getBlockHeader(number) {
+        const header = await createCountingClient(h.chain).client.getBlockHeader(number);
+        if (Number(number) === 1_010) return { ...header, hash: "not-a-hash" };
+        if (Number(number) === 1_040) return null;
+        return header;
+      } } });
+    await assert.rejects(h.scan(), /block hash must be bytes32/,
+      "the earlier broken block must always be the reported failure");
+  }
+});
+
+test("20. a chain identity mismatch aborts before any block work", async () => {
+  const h = harness({ overrides: { async getChainId() { return 1; } } });
+  await assert.rejects(h.scan(), /RPC chain 1 does not match configured chain 8453/);
+  assert.equal(h.counting.calls("eth_getBlockByNumber"), 0);
+  assert.equal(h.counting.calls("eth_getBlockReceipts"), 0);
+});
+
+test("21. hung header or receipt reads time out and abort the range", async () => {
   const hungHeader = harness({ from: 1_000n, through: 1_009n, options: { rpcTimeoutMs: 20 },
     overrides: { getBlockHeader() { return new Promise(() => {}); } } });
   await assert.rejects(hungHeader.scan(), /Base RPC getBlock timed out/);
+
+  const hungReceipts = harness({ from: 1_000n, through: 1_009n, options: { rpcTimeoutMs: 20 },
+    overrides: { getBlockReceipts() { return new Promise(() => {}); } } });
+  await assert.rejects(hungReceipts.scan(), /Base RPC getBlockReceipts timed out/);
 });
 
-test("22. resuming a later window re-derives the same evidence for the blocks it re-covers", async () => {
-  const settlements = [settlement(1_005n, "6"), settlement(1_070n, "b")];
-  const first = harness({ from: 1_000n, through: 1_049n, settlements });
-  const firstResult = await first.scan();
-  assert.deepEqual(firstResult.candidates.map((item) => item.receiptBlock), ["1005"]);
+// ---------------------------------------------------------------------------
+// Logical RPC shape.
+// ---------------------------------------------------------------------------
 
-  // Restart: a new adapter resumes from the checkpoint with the standard 64-block overlap.
-  const resumed = harness({ from: 1_050n - 64n, through: 1_099n, settlements });
-  const resumedResult = await resumed.scan();
-  assert.deepEqual(resumedResult.candidates.map((item) => item.receiptBlock), ["1005", "1070"]);
-  const overlapped = resumedResult.canonicalBlocks.find((item) => item.blockNumber === "1005");
-  const original = firstResult.canonicalBlocks.find((item) => item.blockNumber === "1005");
-  assert.deepEqual(overlapped, original);
-  const reobserved = resumedResult.candidates.find((item) => item.receiptBlock === "1005");
-  assert.deepEqual(reobserved, firstResult.candidates[0]);
+test("22. the logical RPC shape is exactly the sequential scanner's: 1 + (N+2) + 2N", async () => {
+  for (const blocks of [1, 10, 100]) {
+    const h = harness({ from: 1_000n, through: 1_000n + BigInt(blocks) - 1n });
+    const result = await h.scan();
+
+    assert.equal(result.canonicalBlocks.length, blocks);
+    assert.equal(h.counting.calls("eth_chainId"), 1);
+    assert.equal(h.counting.calls("eth_getBlockByNumber"), expectedHeaderCalls(blocks));
+    assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), blocks);
+    assert.equal(h.counting.calls("eth_getBlockReceipts"), blocks);
+    assert.equal(h.counting.calls("eth_getLogs"), 0);
+    assert.equal(h.counting.total, expectedTotalCalls(blocks));
+    assert.equal(result.rpcStats.rpcMethodCalls, expectedTotalCalls(blocks));
+    assert.equal(result.rpcStats.headerMethodCalls, expectedHeaderCalls(blocks));
+    assert.equal(result.rpcStats.receiptMethodCalls, 2 * blocks);
+  }
 });
 
-test("23. accepted settlement evidence is byte-identical to the pre-optimization shape", async () => {
-  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6")] });
-  const result = await h.scan();
-  const [candidate] = result.candidates;
-  const block = h.chain.blocks.get("1005");
-
-  assert.deepEqual(Object.keys(candidate).sort(),
-    ["event", "evidence", "logIndex", "quoteId", "receiptBlock", "receiptBlockHash", "receiptBlockTimestamp",
-      "settledAt", "txHash"]);
-  assert.equal(candidate.quoteId, H("6"));
-  assert.equal(candidate.receiptBlock, "1005");
-  assert.equal(candidate.receiptBlockHash, block.hash);
-  assert.equal(candidate.receiptBlockTimestamp.valueOf(), block.timestamp * 1_000);
-  assert.equal(candidate.settledAt.valueOf(), block.timestamp * 1_000);
-  assert.deepEqual(candidate.evidence, { chainId: "8453", splitter: SPLITTER, canonical: true,
-    scannerVerified: true, oneConfirmation: true, confirmations: 1 });
-  assert.deepEqual(candidate.event, { quoteId: H("6"), payer: A("1"), voter: A("2"), attentionAmount: "1000000",
-    gavelRecipient: A("4"), gavelFeeAmount: "250000", token: A("5"), submissionHash: H("7") });
-});
-
-test("24. a failed settlement transaction stays an anomaly and never becomes release evidence", async () => {
-  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6", { status: 0 })] });
-  const result = await h.scan();
-
-  assert.equal(result.candidates.length, 0);
-  assert.equal(result.anomalies.length, 1);
-  assert.equal(result.anomalies[0].code, "INVALID_SETTLEMENT_EVIDENCE");
-  assert.equal(String(result.anomalies[0].blockNumber), "1005");
-  // An anomaly still rides a fully covered canonical range, so the checkpoint stays provable.
-  assert.equal(result.canonicalBlocks.length, 10);
-});
-
-test("a 5,000-block sparse range is no longer O(blocks) in receipt reads", async () => {
+test("23. a 5,000-block range performs the full authoritative read set, not a reduced one", async () => {
   const h = harness({ from: 1_000n, through: 5_999n, settlements: [settlement(3_000n, "6")] });
   const result = await h.scan();
 
   assert.equal(result.canonicalBlocks.length, 5_000);
   assert.equal(result.candidates.length, 1);
-  // Before: 5,000 eth_getBlockReceipts + 5,000 eth_getBlockTransactionCountByNumber (15,003 total).
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 1);
-  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 1);
-  assert.equal(h.counting.calls("eth_getLogs"), 5);
-  assert.equal(h.counting.calls("eth_chainId"), 1);
-  assert.equal(h.counting.calls("eth_getBlockByNumber"), expectedHeaderCalls(5_000));
-  assert.equal(h.counting.total, 5_010);
-  assert.ok(h.counting.total < 15_003 / 2, "the 5,000-block call shape must be far below the 15,003-call baseline");
-  assert.equal(result.rpcStats.rpcCalls, 5_010);
-  assert.equal(result.rpcStats.headerCalls, 5_002);
-  assert.equal(result.rpcStats.receiptCalls, 2);
+  // Deliberately NOT O(relevant blocks): every block is still read authoritatively.
+  assert.equal(h.counting.calls("eth_getBlockReceipts"), 5_000);
+  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 5_000);
+  assert.equal(h.counting.calls("eth_getBlockByNumber"), 5_002);
+  assert.equal(h.counting.total, 15_003, "the logical call count matches the sequential scanner exactly");
 });
 
-test("the header bloom gate is a proof of absence, never merely a hint", async () => {
-  // No false negatives: a bloom built from a log always admits that log's address and topics.
-  const bloom = new Uint8Array(256);
-  bloomAdd(bloom, SPLITTER);
-  bloomAdd(bloom, QUOTE_SETTLED_TOPIC);
-  const hex = bloomHex(bloom);
-  assert.equal(logsBloomMayContain(hex, SPLITTER), true);
-  assert.equal(logsBloomMayContain(hex, QUOTE_SETTLED_TOPIC), true);
-  assert.equal(logsBloomMayContainEvent(hex, SPLITTER, QUOTE_SETTLED_TOPIC), true);
-  // A bloom that never saw the splitter rejects it.
-  assert.equal(logsBloomMayContainEvent(bloomHex(new Uint8Array(256)), SPLITTER, QUOTE_SETTLED_TOPIC), false);
-  // And a malformed filter is rejected rather than silently treated as empty.
-  assert.throws(() => logsBloomMayContain("0x00", SPLITTER), /logsBloom must be 256 bytes/);
-  assert.throws(() => logsBloomMayContain(hex, "not-hex"), /bloom item must be non-empty bytes/);
-
-  // Every synthetic block that holds a settlement is bloom-positive for it.
-  const chain = createSyntheticChain({ fromBlock: 999n, head: 1_011n, splitter: SPLITTER,
-    settlements: [settlement(1_005n, "6")], noiseLogsPerBlock: 8, noiseTxPerBlock: 2 });
-  assert.equal(logsBloomMayContainEvent(chain.blocks.get("1005").logsBloom, SPLITTER, QUOTE_SETTLED_TOPIC), true);
-});
-
-test("a log pinned to an orphaned sibling block is dropped, not accepted and not fatal", async () => {
-  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6")],
-    overrides: { async getLogs(filter) {
-      const logs = await createCountingClient(h.chain).client.getLogs(filter);
-      // Same log identity, but reported against a block hash that is not canonical.
-      return [...logs, rawLog({ ...logs[0], blockNumber: 1_007, blockHash: digest("orphan"),
-        index: 99, transactionHash: digest("orphan-tx"), address: SPLITTER,
-        topics: logs[0].topics, data: logs[0].data })];
-    } } });
-  const result = await h.scan();
-
-  assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0].receiptBlock, "1005");
-  assert.equal(result.rpcStats.nonCanonicalLogs, 1);
-});
-
-test("the bloom audit reads a bounded sample of skipped blocks and is capped", async () => {
-  const h = harness({ from: 1_000n, through: 1_099n, options: { bloomAuditRate: 0.1, bloomAuditCap: 64 } });
-  const result = await h.scan();
-
-  assert.equal(result.candidates.length, 0);
-  assert.equal(result.rpcStats.auditedBlocks, 10);
-  // Two receipt RPCs per audited block, plus one header re-read for its transaction set.
-  assert.equal(h.counting.calls("eth_getBlockReceipts"), 10);
-  assert.equal(h.counting.calls("eth_getBlockTransactionCountByNumber"), 10);
-  assert.equal(h.counting.calls("eth_getBlockByNumber"), expectedHeaderCalls(100) + 10);
-
-  const capped = harness({ from: 1_000n, through: 1_999n, options: { bloomAuditRate: 1, bloomAuditCap: 8 } });
-  const cappedResult = await capped.scan();
-  assert.equal(cappedResult.rpcStats.auditedBlocks, 8);
-  assert.equal(capped.counting.calls("eth_getBlockReceipts"), 8);
-
-  const disabled = harness({ from: 1_000n, through: 1_099n, options: { bloomAuditRate: 0 } });
-  const disabledResult = await disabled.scan();
-  assert.equal(disabledResult.rpcStats.auditedBlocks, 0);
-  assert.equal(disabled.counting.calls("eth_getBlockReceipts"), 0);
-
-  assert.throws(() => createBaseSettlementAdapter({ client: h.counting.client, chainId: 8453,
-    splitter: SPLITTER, bloomAuditRate: 1.5 }), /bloomAuditRate must be from 0 to 1/);
-});
-
-test("the bloom audit fails closed when a bloom-negative block's receipts hold a settlement", async () => {
-  // A provider whose bloom index is corrupted hides the log from the bloom gate AND from
-  // eth_getLogs, because go-ethereum's filter selects candidate blocks by those same blooms.
-  // Auditing every skipped block catches exactly that, and refuses to checkpoint the range.
-  const h = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
-    options: { bloomAuditRate: 1 },
-    overrides: {
-      async getLogs() { return []; },
-      async getBlockHeader(number) {
-        const header = await createCountingClient(h.chain).client.getBlockHeader(number);
-        return Number(number) === 1_020 ? { ...header, logsBloom: `0x${"00".repeat(256)}` } : header;
-      },
-    } });
-
-  await assert.rejects(h.scan(), /canonical receipts contradict a bloom-negative block header/i);
-
-  // With the audit disabled the same corrupted provider yields a silent no-match range, which
-  // is precisely the residual risk the audit exists to bound.
-  const unaudited = harness({ from: 1_000n, through: 1_049n, settlements: [settlement(1_020n, "6")],
-    options: { bloomAuditRate: 0 },
-    overrides: {
-      async getLogs() { return []; },
-      async getBlockHeader(number) {
-        const header = await createCountingClient(unaudited.chain).client.getBlockHeader(number);
-        return Number(number) === 1_020 ? { ...header, logsBloom: `0x${"00".repeat(256)}` } : header;
-      },
-    } });
-  const silent = await unaudited.scan();
-  assert.equal(silent.candidates.length, 0);
-});
-
-test("anomaly block numbers leave the adapter as decimal, not raw QUANTITY hex", async () => {
-  // eth_getBlockReceipts returns hex block numbers; observations are persisted as numeric(78,0),
-  // so an un-normalized "0x3ed" would fail the store check and stall the scanner on checkpoint.
-  const h = harness({ from: 1_000n, through: 1_009n, settlements: [settlement(1_005n, "6", { status: 0 })] });
-  const result = await h.scan();
-
-  assert.equal(result.anomalies.length, 1);
-  assert.match(String(result.anomalies[0].blockNumber), /^\d{1,78}$/);
-  assert.equal(result.anomalies[0].blockNumber, "1005");
-  assert.equal(result.anomalies[0].blockHash, h.chain.blocks.get("1005").hash);
-  assert.equal(result.anomalies[0].blockTimestamp.valueOf(), h.chain.blocks.get("1005").timestamp * 1_000);
-});
-
-test("a degraded eth_getLogs provider is bounded by a query budget instead of halving forever", async () => {
-  let queries = 0;
-  const h = harness({ from: 1_000n, through: 1_999n,
-    overrides: { async getLogs() { queries += 1; throw new Error("query returned more than 10000 results"); } } });
-
-  await assert.rejects(h.scan(), /exceeded its query budget|log discovery failed/);
-  // Without the budget this would halve to single-block queries: ~2,000 sequential calls.
-  assert.ok(queries <= 64, `expected the halving to stay within budget, issued ${queries}`);
-});
-
-test("scan RPC stats are not polluted by concurrent monitor or reconcile work", async () => {
-  // reconcileSubmitted and monitorOnce run on their own timers against the SAME adapter. Their
-  // RPC calls must not be attributed to an in-flight scan's call-shape telemetry.
+test("24. scan RPC stats are not polluted by concurrent monitor work", async () => {
   const h = harness({ from: 1_000n, through: 1_099n, settlements: [settlement(1_050n, "6")] });
   const block = h.chain.blocks.get("1050");
   const monitor = { quoteId: H("6"), receiptBlock: "1050", receiptBlockHash: block.hash,
@@ -529,18 +418,11 @@ test("scan RPC stats are not polluted by concurrent monitor or reconcile work", 
 
   const [scanned] = await Promise.all([
     h.scan(),
-    // Hammer the adapter's other entry points while the scan is in flight.
-    (async () => {
-      for (let round = 0; round < 5; round += 1) await h.adapter.revalidateMonitor(monitor);
-    })(),
+    (async () => { for (let round = 0; round < 5; round += 1) await h.adapter.revalidateMonitor(monitor); })(),
   ]);
 
-  // The scan's own shape is exact and unchanged despite the concurrent monitor traffic.
-  assert.equal(scanned.rpcStats.headerCalls, expectedHeaderCalls(100));
-  assert.equal(scanned.rpcStats.getLogsCalls, 1);
-  assert.equal(scanned.rpcStats.receiptCalls, 2);
-  assert.equal(scanned.rpcStats.rpcCalls, expectedHeaderCalls(100) + 1 + 2 + 1);
-  // The client counted the monitor traffic too, so the concurrency really did overlap.
-  assert.ok(h.counting.total > scanned.rpcStats.rpcCalls,
+  assert.equal(scanned.rpcStats.rpcMethodCalls, expectedTotalCalls(100));
+  assert.equal(scanned.rpcStats.headerMethodCalls, expectedHeaderCalls(100));
+  assert.ok(h.counting.total > scanned.rpcStats.rpcMethodCalls,
     "expected concurrent monitor calls to be counted by the client but not by the scan");
 });
