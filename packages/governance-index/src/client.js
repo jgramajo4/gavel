@@ -13,10 +13,10 @@ const DEFAULT_BASE_BACKOFF_MS = 250;
 const DEFAULT_MAX_BACKOFF_MS = 8_000;
 const DEFAULT_MAX_RETRY_AFTER_MS = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-// Caps a whole history sync (pages + proposal joins + 429 waits). Long enough
-// for a few rate-limit pauses, short enough that a busy index cannot hang the
-// CLI for tens of minutes.
-const DEFAULT_OPERATION_DEADLINE_MS = 90_000;
+// Caps cumulative time spent waiting after HTTP 429s in one history/proposal
+// operation. Successful request latency, pagination, and proposal joins do
+// not count.
+const DEFAULT_MAX_RATE_LIMIT_WAIT_MS = 90_000;
 
 class IndexStaleError extends Error {
   constructor(message) { super(message); this.name = "IndexStaleError"; this.code = "GAVEL_INDEX_STALE"; }
@@ -70,14 +70,13 @@ class IndexApiClient {
     this.maxBackoffMs = positiveNumber(options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS, "maxBackoffMs");
     this.maxRetryAfterMs = positiveNumber(options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS, "maxRetryAfterMs");
     this.requestTimeoutMs = positiveNumber(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, "requestTimeoutMs");
-    this.operationDeadlineMs = positiveNumber(options.operationDeadlineMs ?? DEFAULT_OPERATION_DEADLINE_MS, "operationDeadlineMs");
+    this.maxRateLimitWaitMs = positiveNumber(options.maxRateLimitWaitMs ?? DEFAULT_MAX_RATE_LIMIT_WAIT_MS, "maxRateLimitWaitMs");
     if (this.maxBackoffMs < this.baseBackoffMs) throw new RangeError("maxBackoffMs must be >= baseBackoffMs");
     if (this.maxRetryAfterMs < this.baseBackoffMs) throw new RangeError("maxRetryAfterMs must be >= baseBackoffMs");
     // Recorded provenance is origin-only: a private endpoint's path and query
     // never reach a history document.
     this.publicBaseUrl = sanitizeEndpoint(this.baseUrl);
     this._freshness = new Map();
-    this._deadlineAt = null;
   }
 
   static dao(value) {
@@ -110,28 +109,22 @@ class IndexApiClient {
     return Math.min(cap, Math.max(this.baseBackoffMs, delay));
   }
 
-  assertWithinDeadline(upcomingDelayMs = 0) {
-    if (this._deadlineAt == null) return;
-    if (this.now().getTime() + upcomingDelayMs >= this._deadlineAt) {
+  reserveRateLimitWait(op, delayMs) {
+    if (op.waitedMs + delayMs > this.maxRateLimitWaitMs) {
       throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
     }
+    op.waitedMs += delayMs;
   }
 
-  async runOperation(fn) {
-    if (this._deadlineAt != null) return fn();
-    this._deadlineAt = this.now().getTime() + this.operationDeadlineMs;
-    try {
-      return await fn();
-    } finally {
-      this._deadlineAt = null;
-    }
+  async runOperation(existing, fn) {
+    if (existing) return fn(existing);
+    return fn({ waitedMs: 0 });
   }
 
-  async request(path) {
+  async request(path, op) {
     const url = `${this.baseUrl}${path}`;
     const override = this.isDefaultEndpoint ? "; set GAVEL_INDEX_API_URL to read a different index" : "";
     for (let attempt = 0; ; attempt++) {
-      this.assertWithinDeadline();
       let response;
       try {
         // Fresh timeout per attempt so a Retry-After sleep cannot abort the next request.
@@ -148,7 +141,7 @@ class IndexApiClient {
       if (response.status === 429) {
         if (attempt >= this.maxRetries) throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
         const delay = this.retryDelayMs(response, attempt);
-        this.assertWithinDeadline(delay);
+        this.reserveRateLimitWait(op, delay);
         await this.sleep(delay);
         continue;
       }
@@ -160,10 +153,10 @@ class IndexApiClient {
   // The index is a cache of chain state, not an oracle. Serving a history
   // document from a stalled, failed or empty index would look identical to a
   // voter with no history, so every read gates on checkpoint freshness first.
-  async assertFresh(dao) {
+  async assertFresh(dao, op) {
     const daoId = IndexApiClient.dao(dao);
     if (this._freshness.has(daoId)) return this._freshness.get(daoId);
-    const status = await this.request(`/v1/daos/${daoId}/sync-status`);
+    const status = await this.request(`/v1/daos/${daoId}/sync-status`, op);
     const sources = Array.isArray(status?.sources) ? status.sources : [];
     if (!sources.length) {
       throw new IndexStaleError(`Governance index has no sync checkpoint for ${daoId}. Run \`gavel-indexer backfill --dao ${daoId}\` before reading history.`);
@@ -187,19 +180,19 @@ class IndexApiClient {
     return freshness;
   }
 
-  async fetchProposal(dao, id) {
-    return this.runOperation(async () => {
+  async fetchProposal(dao, id, op) {
+    return this.runOperation(op, async (budget) => {
       const daoId = IndexApiClient.dao(dao);
       if (!/^\d+$/.test(String(id)) || String(id).length > 78) throw new TypeError("invalid proposal id");
-      await this.assertFresh(daoId);
-      return this.request(`/v1/daos/${daoId}/proposals/${id}`);
+      await this.assertFresh(daoId, budget);
+      return this.request(`/v1/daos/${daoId}/proposals/${id}`, budget);
     });
   }
 
   async fetchHistory(dao, voter) {
-    return this.runOperation(async () => {
+    return this.runOperation(null, async (budget) => {
     const daoId = IndexApiClient.dao(dao);
-    const freshness = await this.assertFresh(daoId);
+    const freshness = await this.assertFresh(daoId, budget);
     const address = getAddress(voter);
     const queriedAt = new Date().toISOString();
     const events = [];
@@ -209,14 +202,14 @@ class IndexApiClient {
       if (++pages > MAX_HISTORY_PAGES) throw new Error(`Governance index history for ${address} exceeded ${MAX_HISTORY_PAGES} pages`);
       const query = new URLSearchParams({ limit: String(this.pageSize) });
       if (cursor) query.set("cursor", cursor);
-      const page = await this.request(`/v1/daos/${daoId}/voters/${address}/history?${query}`);
+      const page = await this.request(`/v1/daos/${daoId}/voters/${address}/history?${query}`, budget);
       events.push(...page.items);
       cursor = page.nextCursor;
     } while (cursor);
     const cache = new Map();
     const votes = [];
     for (const event of events) {
-      if (!cache.has(event.proposalId)) cache.set(event.proposalId, await this.fetchProposal(daoId, event.proposalId));
+      if (!cache.has(event.proposalId)) cache.set(event.proposalId, await this.fetchProposal(daoId, event.proposalId, budget));
       const proposal = cache.get(event.proposalId);
       votes.push(normalizedVoteSchema.parse({
         dao: daoId,
