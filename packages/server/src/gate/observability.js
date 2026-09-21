@@ -15,6 +15,13 @@ const COUNTERS = new Map([
   ["gate_forward_cursor_checkpoint_failure_total", {}],
   ["gate_monitor_final_check_failure_total", {}],
   ["gate_reservation_released_total", {}],
+  // Scanner LOGICAL JSON-RPC method calls -- not HTTP requests, which ethers does not report.
+  // Parts only, never an overlapping grand total, so summing the label dimension gives the
+  // true method count.
+  ["gate_scanner_rpc_method_calls_total", { method: new Set(["headers", "receipts", "log_queries", "other"]) }],
+  // Real HTTP payloads put on the wire, which is what batching reduces. Emitted only when the
+  // transport can report it; compare against rpc_method_calls_total to see batching working.
+  ["gate_scanner_http_payloads_total", {}],
 ]);
 
 const GAUGES = new Map([
@@ -31,6 +38,10 @@ const GAUGES = new Map([
   ["gate_reservation_released_current", {}],
   ["gate_reservation_consumed_current", {}],
   ["gate_reservation_oldest_pending_age_seconds", {}],
+  ["gate_scanner_range_blocks", {}],
+  ["gate_scanner_relevant_logs", {}],
+  ["gate_scanner_elapsed_milliseconds", {}],
+  ["gate_scanner_concurrency", {}],
 ]);
 
 const ALERT_SOURCES = new Set(["gate", "gate_worker", "index", "cursor", "overlap", "monitor", "notification_worker", "email_notifier", "operator"]);
@@ -126,6 +137,20 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
           gauge("gate_reservation_released_current", result?.releasedRows);
           gauge("gate_reservation_consumed_current", result?.consumedRows);
           gauge("gate_reservation_oldest_pending_age_seconds", result?.oldestPendingAgeSeconds);
+          // Scanner logical JSON-RPC method shape. Counts and timings only: no wallet, quote or
+          // submission content. These are method calls, NOT HTTP requests -- how many round trips
+          // they become is a provider-transport property ethers does not expose.
+          count("gate_scanner_rpc_method_calls_total", result?.headerMethodCalls, { method: "headers" });
+          count("gate_scanner_rpc_method_calls_total", result?.receiptMethodCalls, { method: "receipts" });
+          count("gate_scanner_rpc_method_calls_total", result?.logQueryMethodCalls, { method: "log_queries" });
+          count("gate_scanner_rpc_method_calls_total", Number(result?.rpcMethodCalls)
+            - Number(result?.headerMethodCalls) - Number(result?.receiptMethodCalls)
+            - Number(result?.logQueryMethodCalls), { method: "other" });
+          gauge("gate_scanner_range_blocks", result?.scanned);
+          gauge("gate_scanner_relevant_logs", result?.relevantLogs);
+          gauge("gate_scanner_elapsed_milliseconds", result?.scanElapsedMs);
+          gauge("gate_scanner_concurrency", result?.scanConcurrency);
+          count("gate_scanner_http_payloads_total", result?.httpPayloads);
         }
         if (job === "monitor") {
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "monitor" });

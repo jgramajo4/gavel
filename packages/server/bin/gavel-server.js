@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { Contract, Interface, JsonRpcProvider, toBeHex } = require("ethers");
+const { Contract, Interface, JsonRpcProvider, toQuantity } = require("ethers");
 const { createAuthService } = require("../src/gate/auth");
 const { createEnsNameResolver } = require("../src/gate/ens");
 const { createInboxService } = require("../src/gate/inbox-service");
@@ -247,15 +247,41 @@ function createCanonicalIndexSource({ baseUrl, ethereumProvider, fetchImpl = glo
   });
 }
 
-function createRpcClient(url, chainId, providerOverride) {
-  const provider = providerOverride || new JsonRpcProvider(url, Number(chainId), { staticNetwork: true });
+function createRpcClient(url, chainId, providerOverride, { batchMaxCount } = {}) {
+  // batchMaxCount is exposed because the scanner issues header reads concurrently and relies on
+  // JsonRpcProvider coalescing them into JSON-RPC batches. Providers that reject batched payloads
+  // or cap them below the scanner's concurrency need it lowered (1 disables batching entirely).
+  const provider = providerOverride || new JsonRpcProvider(url, Number(chainId),
+    { staticNetwork: true, ...(batchMaxCount === undefined ? {} : { batchMaxCount }) });
+  // Actual HTTP payload count. JsonRpcProvider emits one "sendRpcPayload" per request it puts on
+  // the wire, batched or not, so this is a true round-trip counter rather than a method counter.
+  // Without it the whole point of batching -- far fewer requests for the same reads -- has no
+  // runtime signal at all, and a provider that silently stops honouring batches looks identical.
+  const transport = { httpPayloads: 0, jsonRpcRequests: 0 };
+  if (typeof provider.on === "function") {
+    try {
+      provider.on("debug", (event) => {
+        if (event?.action !== "sendRpcPayload") return;
+        transport.httpPayloads += 1;
+        transport.jsonRpcRequests += Array.isArray(event.payload) ? event.payload.length : 1;
+      });
+    } catch {}
+  }
   return Object.freeze({
     provider,
+    transportStats: () => ({ ...transport }),
     getChainId: async () => BigInt(await provider.send("eth_chainId", [])).toString(),
     getBlockNumber: () => provider.getBlockNumber(),
     getBlock: (number) => provider.getBlock(number),
-    getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toBeHex(number)]),
-    getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toBeHex(number)]),
+    // toQuantity, not toBeHex: JSON-RPC QUANTITY forbids leading zeros and go-ethereum rejects
+    // them outright, while toBeHex pads to whole bytes ("0x02255100" for a 7-nibble height).
+    //
+    // A raw send rather than provider.getBlock(): AbstractProvider caches getBlock results for
+    // cacheTimeout (250 ms), which would serve the scanner's end-of-scan boundary re-read from
+    // cache and silently defeat its reorg check now that scans complete quickly.
+    getBlockHeader: (number) => provider.send("eth_getBlockByNumber", [toQuantity(number), false]),
+    getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toQuantity(number)]),
+    getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toQuantity(number)]),
     getTransactionReceipt: (hash) => provider.getTransactionReceipt(hash),
     getTransaction: (hash) => provider.getTransaction(hash),
     getCode: (target) => provider.getCode(target),
@@ -285,7 +311,8 @@ function contractVerifier(client) {
 async function composeProduction(env) {
   const config = serverConfigFromEnv(env);
   const observability = createGateObservability();
-  const baseClient = createRpcClient(config.baseRpcUrl, config.settlement.chainId);
+  const baseClient = createRpcClient(config.baseRpcUrl, config.settlement.chainId, undefined,
+    { batchMaxCount: config.settlement.rpcBatchMaxCount });
   const ethereumClient = createRpcClient(config.ethereumRpcUrl, "1");
   const store = new PostgresGateStore({ connectionString: config.databaseUrl,
     baseCodeReader: ({ wallet }) => baseClient.getCode(wallet) });

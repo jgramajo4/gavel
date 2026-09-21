@@ -22,12 +22,19 @@ PR6 settlement settings:
 - `GAVEL_GATE_REORG_OVERLAP_BLOCKS` — defaults to `64`
 - `GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE` — defaults to `5000` and must exceed the overlap
 - `GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS` — defaults to `5000`
-- `GAVEL_GATE_BASE_RPC_TIMEOUT_MS` — defaults to `10000`; every settlement RPC operation is bounded
+- `GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY` — defaults to `64`, capped at `256`; in-flight RPCs per
+  scan phase. Transport only: the scanner performs the same reads at any setting. Lower it for a
+  rate-limited provider
+- `GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` — defaults to `100`; JSON-RPC batch width. **Set it to `1`
+  if your provider rejects or caps batched payloads**, otherwise every scan fails identically
+- `GAVEL_GATE_BASE_RPC_TIMEOUT_MS` — defaults to `10000`; bounds every settlement RPC operation.
+  Note that with batching the budget covers a whole batched round trip rather than a single
+  request, so a low scan concurrency and a low batch width make it effectively more generous
 - `GAVEL_GATE_NOTIFICATION_LEASE_MS` — defaults to `300000` and is capped at one hour
 
 The injected Base RPC client must expose canonical blocks with their transaction
 hashes, complete per-block receipt enumeration, and an independent transaction count
-(`getBlock`, `getBlockReceipts(blockNumber)`, and
+(`getBlockHeader`, `getBlockReceipts(blockNumber)`, and
 `getBlockTransactionCount(blockNumber)`). Scanner no-match evidence is accepted only
 when the canonical transaction hashes, receipt transaction hashes, and independent
 count agree exactly; filtered `eth_getLogs` results are never authoritative for

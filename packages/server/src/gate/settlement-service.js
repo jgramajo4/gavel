@@ -230,8 +230,22 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     if (Number(persisted?.unknownQuotes) > 0) await operatorAlert({ code: "UNKNOWN_QUOTE", source: "scanner_overlap" });
     if (Number(persisted?.mismatches) > 0) await operatorAlert({ code: "MISMATCHED_SETTLEMENT", source: "scanner_overlap" });
     accepted += await settleDurableObservations();
+    // Privacy-safe scanner performance shape: counts and elapsed time only.
+    const rpc = scanned.rpcStats && typeof scanned.rpcStats === "object" ? scanned.rpcStats : {};
+    const metric = (value) => (Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : undefined);
+    const rpcTelemetry = {};
+    for (const [field, value] of [["rpcMethodCalls", rpc.rpcMethodCalls],
+      ["headerMethodCalls", rpc.headerMethodCalls], ["receiptMethodCalls", rpc.receiptMethodCalls],
+      ["logQueryMethodCalls", rpc.logQueryMethodCalls], ["relevantLogs", rpc.relevantLogs],
+      ["scanConcurrency", rpc.concurrency], ["scanElapsedMs", rpc.elapsedMs],
+      // Real HTTP payloads, when the transport can report them. Distinct from method calls.
+      ["httpPayloads", rpc.httpPayloads]]) {
+      const numeric = metric(value);
+      if (numeric !== undefined) rpcTelemetry[field] = numeric;
+    }
     return reservationTelemetry({
       scanned: scanned.canonicalBlocks.length,
+      ...rpcTelemetry,
       accepted,
       anomalies: Number(persisted?.unknownQuotes || 0) + Number(persisted?.mismatches || 0),
       unknownQuotes: Number(persisted?.unknownQuotes || 0),

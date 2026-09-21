@@ -188,6 +188,8 @@ test("production settlement config requires exact Base mainnet and canonical nat
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    scanConcurrency: 64,
+    rpcBatchMaxCount: 100,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -216,6 +218,8 @@ test("test settlement config accepts exact Base Sepolia with an explicitly label
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    scanConcurrency: 64,
+    rpcBatchMaxCount: 100,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -311,6 +315,8 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    scanConcurrency: 64,
+    rpcBatchMaxCount: 100,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -325,7 +331,46 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
   })), { environment: "production", chainId: "8453", token: CANONICAL_BASE_USDC.toLowerCase(),
     splitter: SPLITTER, quoteSigner: SIGNER, gavelRecipient: GAVEL_RECIPIENT,
     confirmationDepth: 1, monitorConfirmations: 64, overlap: 12, maxBlockRange: 200,
+    scanConcurrency: 64, rpcBatchMaxCount: 100,
     pollIntervalMs: 9_000, rpcTimeoutMs: 8_000, notificationLeaseMs: 420_000 });
+});
+
+test("both settlement config readers enforce the same concurrency default and cap", () => {
+  // These two readers have drifted apart once already. They now share exported constants, and
+  // this pins that: the adapter's reader is only used by tests, so nothing else would notice.
+  const { settlementConfigFromEnv, DEFAULT_SCAN_CONCURRENCY, MAX_SCAN_CONCURRENCY } =
+    require("../src/gate/base-settlement-adapter");
+  const { settlementRuntimeConfigFromEnv } = loadRuntime();
+
+  assert.equal(DEFAULT_SCAN_CONCURRENCY, 64);
+  assert.equal(MAX_SCAN_CONCURRENCY, 256);
+
+  const adapterOf = (value) => settlementConfigFromEnv({ GAVEL_GATE_CONFIRMATION_DEPTH: "1",
+    ...(value === undefined ? {} : { GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY: String(value) }) }).scanConcurrency;
+  const runtimeOf = (value) => settlementRuntimeConfigFromEnv(productionEnv(
+    value === undefined ? {} : { GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY: String(value) })).scanConcurrency;
+
+  for (const value of [undefined, 1, 8, MAX_SCAN_CONCURRENCY]) {
+    assert.equal(adapterOf(value), value === undefined ? DEFAULT_SCAN_CONCURRENCY : value);
+    assert.equal(runtimeOf(value), adapterOf(value), `config readers disagree at ${value}`);
+  }
+  for (const value of [MAX_SCAN_CONCURRENCY + 1, 0, -1]) {
+    assert.throws(() => adapterOf(value), /SCAN_CONCURRENCY/, `adapter accepted ${value}`);
+    assert.throws(() => runtimeOf(value), /SCAN_CONCURRENCY/, `runtime accepted ${value}`);
+  }
+});
+
+test("the JSON-RPC batch width is bounded and reaches the settlement config", () => {
+  const { settlementRuntimeConfigFromEnv } = loadRuntime();
+  assert.equal(settlementRuntimeConfigFromEnv(productionEnv()).rpcBatchMaxCount, 100);
+  for (const value of [1, 10, 1_000]) {
+    assert.equal(settlementRuntimeConfigFromEnv(productionEnv({
+      GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT: String(value) })).rpcBatchMaxCount, value);
+  }
+  for (const value of [1_001, 0]) {
+    assert.throws(() => settlementRuntimeConfigFromEnv(productionEnv({
+      GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT: String(value) })), /BATCH_MAX_COUNT/);
+  }
 });
 
 test("Base adapter config uses the canonical PR6 overlap setting", () => {
@@ -333,7 +378,7 @@ test("Base adapter config uses the canonical PR6 overlap setting", () => {
   assert.deepEqual(settlementConfigFromEnv({
     GAVEL_GATE_CONFIRMATION_DEPTH: "1",
     GAVEL_GATE_REORG_OVERLAP_BLOCKS: "17",
-  }), { confirmationDepth: 1, overlap: 17, maxBlockRange: 5_000 });
+  }), { confirmationDepth: 1, overlap: 17, maxBlockRange: 5_000, scanConcurrency: 64 });
   assert.throws(() => settlementConfigFromEnv({ GAVEL_GATE_CONFIRMATION_DEPTH: "3" }), /exactly 1/);
 });
 
@@ -388,7 +433,7 @@ test("canonical server composes only after authoritative deployment parity", asy
   assert.equal(calls[0][0], "adapter");
   assert.deepEqual(calls[0][1], {
     client: input.baseClient, chainId: "8453", splitter: SPLITTER, confirmationDepth: 1, overlap: 64,
-    maxBlockRange: 5_000, rpcTimeoutMs: 10_000,
+    maxBlockRange: 5_000, scanConcurrency: 64, rpcTimeoutMs: 10_000,
   });
   assert.equal(calls[1][1].store, input.store);
   assert.equal(calls[1][1].adapter, adapter);

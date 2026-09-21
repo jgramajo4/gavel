@@ -19,23 +19,27 @@ function chainLog(overrides = {}) {
   return { address: SPLITTER, topics: encoded.topics, data: encoded.data, transactionHash: TX, index: 2,
     blockNumber: 10, blockHash: BLOCK_HASH, ...overrides };
 }
+// getBlockHeader mirrors whatever getBlock a test configures, so an override of the block view
+// stays consistent across both. There is deliberately no getLogs and no logsBloom: the default
+// scanner derives settlement evidence from receipts alone.
 function rpc(overrides = {}) {
   const log = chainLog();
-  return {
+  const base = {
     async getChainId() { return 8453; },
     async getBlockNumber() { return 12; },
     async getBlock(number) { return { number: Number(number), hash: rpcBlockHash(number),
       parentHash: rpcBlockHash(Number(number) - 1), timestamp: 100,
       transactions: Number(number) === 10 ? [TX] : [] }; },
     async getBlockTransactionCount(number) { return Number(number) === 10 ? 1 : 0; },
-    async getLogs() { return [log]; },
     async getBlockReceipts(number) {
       return Number(number) === 10 ? [await this.getTransactionReceipt(TX)] : [];
     },
     async getTransactionReceipt() { return { status: 1, transactionHash: TX, blockNumber: 10, blockHash: BLOCK_HASH, logs: [log] }; },
     async getTransaction() { return { hash: TX }; },
-    ...overrides,
   };
+  const client = { ...base, ...overrides };
+  if (!overrides.getBlockHeader) client.getBlockHeader = (number) => client.getBlock(number);
+  return client;
 }
 function quote(overrides = {}) {
   return { quoteId: QUOTE_ID, payer: PAYER, voter: VOTER, attentionAmount: "1000000", feeAmount: "250000",
@@ -141,6 +145,8 @@ test("6. Base adapter verifies receipt success, canonical block evidence, and on
 });
 
 test("6a. scanner derives release evidence from complete block receipts when filtered logs omit a payment", async () => {
+  // The client offers an eth_getLogs that reports nothing. The default scanner never consults it:
+  // settlement evidence comes from the block's receipts, so the payment is still found.
   const adapter = createBaseSettlementAdapter({
     client: rpc({ getLogs: async () => [] }),
     chainId: 8453,
@@ -226,7 +232,6 @@ test("7b. Base adapter verifies the RPC chain identity instead of trusting its c
 test("7c. Base adapter rejects canonical block snapshots whose parent linkage mixes forks", async () => {
   const adapter = createBaseSettlementAdapter({
     client: rpc({
-      getLogs: async () => [],
       getBlock: async (number) => ({
         number: Number(number),
         hash: Number(number) === 10 ? H("9") : H("a"),
@@ -246,7 +251,6 @@ test("7d. Base adapter aborts when a range boundary changes during collection", 
   let blockReads = 0;
   const adapter = createBaseSettlementAdapter({
     client: rpc({
-      getLogs: async () => [],
       getBlock: async (number) => {
         blockReads += 1;
         if (Number(number) === 10) return { number: 10, hash: blockReads > 2 ? H("b") : H("9"),
