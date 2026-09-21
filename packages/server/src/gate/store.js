@@ -1016,6 +1016,29 @@ class PostgresGateStore {
     });
   }
 
+  async getReservationCapacityStats({ chainId, splitter } = {}) {
+    const settlementChain = positiveBigint(chainId, "chainId");
+    const settlementSplitter = address(splitter, "splitter");
+    const row = (await this.pool.query(`SELECT
+      count(*) FILTER (WHERE r.state='active')::int AS active,
+      count(*) FILTER (WHERE r.state='expiry_pending_reconciliation')::int AS "expiryPending",
+      count(*) FILTER (WHERE r.state='released')::int AS "releasedRows",
+      count(*) FILTER (WHERE r.state='consumed')::int AS "consumedRows",
+      COALESCE(EXTRACT(epoch FROM (clock_timestamp()-min(r.created_at)
+        FILTER (WHERE r.state IN('active','expiry_pending_reconciliation')))),0)::float8 AS "oldestPendingAgeSeconds"
+      FROM gate.capacity_reservations r
+      JOIN gate.quotes q ON q.id=r.quote_id
+      JOIN gate.splitter_deployments d ON d.id=q.deployment_id
+      WHERE d.chain_id=$1 AND d.splitter=$2`, [settlementChain, settlementSplitter])).rows[0];
+    return {
+      active: Number(row?.active || 0),
+      expiryPending: Number(row?.expiryPending || 0),
+      releasedRows: Number(row?.releasedRows || 0),
+      consumedRows: Number(row?.consumedRows || 0),
+      oldestPendingAgeSeconds: Number(row?.oldestPendingAgeSeconds || 0),
+    };
+  }
+
   async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
     const settlementChain = positiveBigint(chainId, "chainId");
     const settlementSplitter = address(splitter, "splitter");

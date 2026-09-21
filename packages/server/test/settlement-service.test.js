@@ -617,13 +617,13 @@ test("25. a lagging safe head drains a current-generation durable observation wi
     unsettled: [{ quoteId: QUOTE_ID, settlement: durable }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.state.settlement.settlement, durable);
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
   assert.deepEqual(h.operatorAlerts, []);
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.calls.filter(([name]) => name === "settle").length, 1);
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
 });
@@ -633,7 +633,7 @@ test("25a. durable observations settle while the safe head is before deployment"
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
 });
 
@@ -642,7 +642,7 @@ test("25b. a deep head regression drains durable observations without scanning o
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 1, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range"), false);
   assert.deepEqual(h.operatorAlerts, []);
 });
@@ -661,7 +661,7 @@ test("25d. a pending lifecycle claim remains retryable when the safe head is lag
     unsettled: [{ quoteId: QUOTE_ID, settlement: candidate() }], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.calls.filter(([name]) => name === "claimLifecycle").length, 1);
   assert.equal(h.calls.some(([name]) => name === "settle" || name === "scan" || name === "range"), false);
   assert.equal(h.state.unsettled.length, 1);
@@ -671,6 +671,34 @@ test("25e. a lagging safe head with no durable observations is a no-op", async (
   const h = fakeHarness({ nextRangeFrom: "100", safeHead: 34n, unsettled: [], candidates: [] });
 
   assert.deepEqual(await h.service.scanOnce(), { scanned: 0, accepted: 0, anomalies: 0, unknownQuotes: 0,
-    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0 });
+    mismatches: 0, reorged: 0, confirmationLag: 0, cursorLag: 0, overlapLag: 0, released: 0 });
   assert.equal(h.calls.some(([name]) => name === "scan" || name === "range" || name === "settle"), false);
+});
+
+test("scanner worker result includes committed reservation releases from recordScannerRange", async () => {
+  const h = fakeHarness({ candidates: [], rangeResult: { released: 3, reorged: 0 } });
+  const result = await h.service.scanOnce();
+  assert.equal(result.released, 3);
+  assert.equal(result.accepted, 0);
+});
+
+test("reservation capacity statistics remain optional observability", async () => {
+  const h = fakeHarness({ candidates: [] });
+  assert.equal(typeof h.store.getReservationCapacityStats, "undefined");
+  const result = await h.service.scanOnce();
+  assert.equal(result.released, 0);
+  assert.equal(Object.hasOwn(result, "expiryPending"), false);
+});
+
+test("scanOnce attaches reservation gauges without changing settlement acceptance", async () => {
+  const h = fakeHarness({ candidates: [] });
+  h.store.getReservationCapacityStats = async () => ({
+    active: 2, expiryPending: 5, releasedRows: 7, consumedRows: 9, oldestPendingAgeSeconds: 11,
+  });
+  const result = await h.service.scanOnce();
+  assert.equal(result.accepted, 0);
+  assert.deepEqual({
+    active: result.active, expiryPending: result.expiryPending, releasedRows: result.releasedRows,
+    consumedRows: result.consumedRows, oldestPendingAgeSeconds: result.oldestPendingAgeSeconds,
+  }, { active: 2, expiryPending: 5, releasedRows: 7, consumedRows: 9, oldestPendingAgeSeconds: 11 });
 });

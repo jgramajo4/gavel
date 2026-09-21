@@ -1044,6 +1044,116 @@ test("late canonical settlement consumes a released reservation, creates overage
   })), /capacity unavailable/);
 });
 
+function scanRange(generation, timestamp, { observations = [], blockHash = hash("8") } = {}) {
+  return {
+    deploymentId: "deployment-1", generation, fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: blockHash, canonicalBlockTimestamp: timestamp,
+    canonicalBlocks: [{ blockNumber: "0", blockHash, parentHash: hash("9"), blockTimestamp: timestamp }],
+    observations,
+  };
+}
+
+test("scanner lag before expiry coverage retains expiry-pending liability", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("1");
+  await store.issue(issuance("lag", { quoteId }));
+  now = new Date("2026-01-01T00:10:01.000Z");
+  assert.equal(await store.markExpired(), 1);
+  const early = new Date("2026-01-01T00:09:59.000Z");
+  assert.deepEqual(await store.recordScannerRange(scanRange("1", early, { blockHash: hash("2") })),
+    { released: 0, reorged: 0 });
+  assert.equal(await store.countLiabilities("profile-1"), 1000000n);
+  const stats = await store.getReservationCapacityStats({ chainId: "8453", splitter: ADDR.splitter });
+  assert.equal(stats.active, 0);
+  assert.equal(stats.expiryPending, 1);
+  assert.equal(stats.releasedRows, 0);
+  assert.equal(stats.consumedRows, 0);
+  assert.equal(stats.oldestPendingAgeSeconds > 0, true);
+});
+
+test("current exact pre-expiry observation blocks release until settlement consumes", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("3");
+  await store.issue(issuance("observed", { quoteId, submissionHash: hash("4") }));
+  const includedAt = new Date("2026-01-01T00:05:00.000Z");
+  const coveredAt = new Date("2026-01-01T00:10:01.000Z");
+  const settlement = settlementCommand("observed", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("4") } },
+  }).settlement;
+  settlement.receiptBlock = "0";
+  settlement.receiptBlockHash = hash("5");
+  settlement.receiptBlockTimestamp = includedAt;
+  now = coveredAt;
+  await store.markExpired();
+  assert.equal((await store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "1", fromBlock: "0", throughBlock: "1",
+    canonicalBlockHash: hash("6"), canonicalBlockTimestamp: coveredAt,
+    canonicalBlocks: [
+      { blockNumber: "0", blockHash: hash("5"), parentHash: hash("4"), blockTimestamp: includedAt },
+      { blockNumber: "1", blockHash: hash("6"), parentHash: hash("5"), blockTimestamp: coveredAt },
+    ],
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("5"), blockTimestamp: includedAt, exactMatch: true, details: { settlement } }],
+  })).released, 0);
+  assert.equal(await store.countLiabilities("profile-1"), 1000000n);
+  assert.deepEqual(await store.settle(settlementCommand("observed", quoteId, {
+    settlement: { ...settlement, event: { quoteId, submissionHash: hash("4") } },
+  })), { settled: true, inboxCreatedAt: now });
+  assert.equal(await store.countLiabilities("profile-1"), 0n);
+  assert.equal((await store.getReservationCapacityStats({ chainId: "8453", splitter: ADDR.splitter })).consumedRows, 1);
+});
+
+test("concurrent expiry and settlement consume once and never release a settled reservation", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const store = await setupStore({ clock: () => now });
+  const quoteId = hash("6");
+  await store.issue(issuance("race", { quoteId, submissionHash: hash("7") }));
+  now = new Date("2026-01-01T00:10:01.000Z");
+  const [expiredCount, settled] = await Promise.all([
+    store.markExpired(),
+    store.settle(settlementCommand("race", quoteId, {
+      settlement: { event: { quoteId, submissionHash: hash("7") } },
+    })),
+  ]);
+  assert.equal(expiredCount === 0 || expiredCount === 1, true);
+  assert.equal(settled.settled, true);
+  assert.equal((await store.recordScannerRange(scanRange("1", now, { blockHash: hash("a") }))).released, 0);
+  assert.equal((await store.getReservationCapacityStats({ chainId: "8453", splitter: ADDR.splitter })).consumedRows, 1);
+  assert.equal(await store.countLiabilities("profile-1"), 0n);
+});
+
+test("post-acceptance reorg does not release or double-count consumed capacity", async () => {
+  const store = await setupStore();
+  const quoteId = hash("b");
+  await store.issue(issuance("reorg-cap", { quoteId, submissionHash: hash("c") }));
+  const settlement = settlementCommand("reorg-cap", quoteId, {
+    settlement: { event: { quoteId, submissionHash: hash("c") } },
+  }).settlement;
+  settlement.receiptBlock = "0";
+  settlement.receiptBlockHash = hash("d");
+  const at = settlement.receiptBlockTimestamp;
+  await store.recordScannerRange(scanRange("1", at, {
+    blockHash: hash("d"),
+    observations: [{ kind: "exact_log", quoteId, txHash: settlement.txHash, logIndex: 0, blockNumber: "0",
+      blockHash: hash("d"), blockTimestamp: at, exactMatch: true, details: { settlement } }],
+  }));
+  await store.settle(settlementCommand("reorg-cap", quoteId, {
+    settlement: { ...settlement, event: { quoteId, submissionHash: hash("c") } },
+  }));
+  const rewrite = await store.recordScannerRange({
+    deploymentId: "deployment-1", generation: "2", fromBlock: "0", throughBlock: "0",
+    canonicalBlockHash: hash("e"), canonicalBlockTimestamp: at,
+    canonicalBlocks: [{ blockNumber: "0", blockHash: hash("e"), parentHash: hash("f"), blockTimestamp: at }],
+    observations: [],
+  });
+  assert.equal(rewrite.reorged, 1);
+  assert.equal(rewrite.released, 0);
+  assert.equal((await store.getReservationCapacityStats({ chainId: "8453", splitter: ADDR.splitter })).consumedRows, 1);
+  assert.equal(await store.countLiabilities("profile-1"), 0n);
+});
+
 defineGateStoreConformance("MemoryGateStore", async (suffix, options = {}) => {
   let now = new Date("2026-01-01T00:00:00.000Z");
   const store = await setupStore({ ...options, clock: () => now });

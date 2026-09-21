@@ -95,7 +95,12 @@ test("worker result observation turns only committed outcome counts and lag snap
     confirmationLag: 5, cursorLag: 6, overlapLag: 7 });
   telemetry.observeWorkerResult("monitor", { reorged: 1, queueDepth: 8, oldestAgeSeconds: 9,
     progressLag: 10 });
+  telemetry.observeWorkerResult("scan", { released: 3, active: 4, expiryPending: 5, releasedRows: 6,
+    consumedRows: 7, oldestPendingAgeSeconds: 8 });
   telemetry.observeWorkerResult("notification", { claimed: 11, attempted: 7, failed: 3, reconciled: 2 });
+  telemetry.observeWorkerResult("scan", { released: 0, checkpointFailed: true });
+  telemetry.observeWorkerResult("scan", { released: 2 }); // second committed release batch
+
 
   const events = parsed(lines).map(({ timestamp, level, type, ...event }) => event);
   assert.deepEqual(events, [
@@ -113,7 +118,17 @@ test("worker result observation turns only committed outcome counts and lag snap
     { name: "gate_monitor_queue_depth", value: 8 },
     { name: "gate_monitor_oldest_age_seconds", value: 9 },
     { name: "gate_monitor_progress_lag_blocks", value: 10 },
+    { name: "gate_reservation_released_total", value: 3 },
+    { name: "gate_reservation_release_batch", value: 3 },
+    { name: "gate_reservation_active_total", value: 4 },
+    { name: "gate_reservation_expiry_pending_total", value: 5 },
+    { name: "gate_reservation_released_current", value: 6 },
+    { name: "gate_reservation_consumed_current", value: 7 },
+    { name: "gate_reservation_oldest_pending_age_seconds", value: 8 },
     { name: "gate_notification_attempt_total", value: 7 },
     { name: "gate_notification_failure_total", value: 5 },
+    { name: "gate_reservation_release_batch", value: 0 },
+    { name: "gate_reservation_released_total", value: 2 },
+    { name: "gate_reservation_release_batch", value: 2 },
   ]);
 });

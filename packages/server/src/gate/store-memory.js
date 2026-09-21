@@ -1222,6 +1222,33 @@ class MemoryGateStore {
     });
   }
 
+  async getReservationCapacityStats({ chainId, splitter } = {}) {
+    const settlementChain = block(chainId, "chainId").raw;
+    const settlementSplitter = address(splitter, "splitter");
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      const deployments = [...this.#deployments.values()]
+        .filter((row) => row.chainId === settlementChain && row.splitter === settlementSplitter)
+        .map((row) => row.id);
+      const quoteIds = new Set([...this.#quotes.values()]
+        .filter((quote) => deployments.includes(quote.deploymentId))
+        .map((quote) => quote.quoteId));
+      const rows = [...this.#reservations.values()].filter((row) => quoteIds.has(row.quoteId));
+      const pending = rows.filter((row) => ["active", "expiry_pending_reconciliation"].includes(row.state));
+      const oldest = pending.reduce((min, row) => {
+        const created = row.createdAt ? instant(row.createdAt, "createdAt").valueOf() : now.valueOf();
+        return Math.min(min, created);
+      }, Number.POSITIVE_INFINITY);
+      return {
+        active: rows.filter((row) => row.state === "active").length,
+        expiryPending: rows.filter((row) => row.state === "expiry_pending_reconciliation").length,
+        releasedRows: rows.filter((row) => row.state === "released").length,
+        consumedRows: rows.filter((row) => row.state === "consumed").length,
+        oldestPendingAgeSeconds: pending.length ? Math.max(0, (now.valueOf() - oldest) / 1000) : 0,
+      };
+    });
+  }
+
   async getSettlementMonitorStats({ chainId, splitter, headBlock } = {}) {
     const settlementChain = block(chainId, "chainId").raw;
     const settlementSplitter = address(splitter, "splitter");

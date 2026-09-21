@@ -52,6 +52,7 @@ jobs:
           set +e
           output="$(node --test --test-concurrency=1 \
             packages/server/test/gate-store-postgres.test.js \
+            packages/server/test/gate-reservation-lifecycle-postgres.test.js \
             packages/server/test/durable-persistence.test.js \
             packages/server/test/auth-session-environment.test.js 2>&1)"
           status=$?

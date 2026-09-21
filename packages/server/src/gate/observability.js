@@ -14,6 +14,7 @@ const COUNTERS = new Map([
   ["gate_notification_failure_total", {}],
   ["gate_forward_cursor_checkpoint_failure_total", {}],
   ["gate_monitor_final_check_failure_total", {}],
+  ["gate_reservation_released_total", {}],
 ]);
 
 const GAUGES = new Map([
@@ -24,6 +25,12 @@ const GAUGES = new Map([
   ["gate_monitor_queue_depth", {}],
   ["gate_monitor_oldest_age_seconds", {}],
   ["gate_monitor_progress_lag_blocks", {}],
+  ["gate_reservation_release_batch", {}],
+  ["gate_reservation_active_total", {}],
+  ["gate_reservation_expiry_pending_total", {}],
+  ["gate_reservation_released_current", {}],
+  ["gate_reservation_consumed_current", {}],
+  ["gate_reservation_oldest_pending_age_seconds", {}],
 ]);
 
 const ALERT_SOURCES = new Set(["gate", "gate_worker", "index", "cursor", "overlap", "monitor", "notification_worker", "email_notifier", "operator"]);
@@ -107,9 +114,18 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
           count("gate_settlement_mismatch_total", result?.mismatches);
           count("gate_settlement_reorg_total", result?.preAcceptanceReorged, { phase: "pre_acceptance", source: "overlap" });
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "overlap" });
+          count("gate_reservation_released_total", result?.released);
           gauge("gate_confirmation_lag_blocks", result?.confirmationLag);
           gauge("gate_forward_cursor_lag_blocks", result?.cursorLag);
           gauge("gate_overlap_lag_blocks", result?.overlapLag);
+          if (Number.isSafeInteger(result?.released) && result.released >= 0) {
+            gauge("gate_reservation_release_batch", result.released);
+          }
+          gauge("gate_reservation_active_total", result?.active);
+          gauge("gate_reservation_expiry_pending_total", result?.expiryPending);
+          gauge("gate_reservation_released_current", result?.releasedRows);
+          gauge("gate_reservation_consumed_current", result?.consumedRows);
+          gauge("gate_reservation_oldest_pending_age_seconds", result?.oldestPendingAgeSeconds);
         }
         if (job === "monitor") {
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "monitor" });

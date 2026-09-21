@@ -249,7 +249,14 @@ GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.ym
   | jq -R 'fromjson? | select(.name == "gate_monitor_queue_depth" or .name == "gate_monitor_oldest_age_seconds" or .name == "gate_monitor_progress_lag_blocks" or .name == "gate_monitor_final_check_failure_total" or .name == "gate_settlement_reorg_total")'
 ```
 
-The remaining counters are `gate_quote_issued_total`, `gate_quote_rejected_total{reason}`, `gate_quote_expired_total`, `gate_settlement_pending_total`, `gate_settlement_verified_total`, `gate_settlement_mismatch_total`, `gate_settlement_unknown_quote_total`, `gate_inbox_created_total`, `gate_notification_attempt_total`, and `gate_notification_failure_total`. DAO health is reported as `gate_dao_freshness_age_seconds{health="healthy|stale|unhealthy"}`. Counters are event deltas, not database totals; ship the JSON stream to the approved metrics/log collector for durable aggregation and alert on any `type="alert"`, checkpoint/final-check failure increment, sustained lag/oldest-age growth, unhealthy freshness, unknown quote, mismatch, notification failure, or reorg.
+Show scanner-owned reservation release and pending capacity (never identifiers):
+
+```sh
+GAVEL_GATE_ENV_FILE=.env.server.local docker compose -f docker-compose.server.yml logs --no-log-prefix gate \
+  | jq -R 'fromjson? | select(.name == "gate_reservation_released_total" or .name == "gate_reservation_release_batch" or .name == "gate_reservation_active_total" or .name == "gate_reservation_expiry_pending_total" or .name == "gate_reservation_released_current" or .name == "gate_reservation_consumed_current" or .name == "gate_reservation_oldest_pending_age_seconds")'
+```
+
+The remaining counters are `gate_quote_issued_total`, `gate_quote_rejected_total{reason}`, `gate_quote_expired_total`, `gate_settlement_pending_total`, `gate_settlement_verified_total`, `gate_settlement_mismatch_total`, `gate_settlement_unknown_quote_total`, `gate_inbox_created_total`, `gate_notification_attempt_total`, `gate_notification_failure_total`, and `gate_reservation_released_total`. DAO health is reported as `gate_dao_freshness_age_seconds{health="healthy|stale|unhealthy"}`. Counters are event deltas, not database totals; ship the JSON stream to the approved metrics/log collector for durable aggregation and alert on any `type="alert"`, checkpoint/final-check failure increment, sustained lag/oldest-age growth, unhealthy freshness, unknown quote, mismatch, notification failure, reorg, or a growing `gate_reservation_expiry_pending_total` / `gate_reservation_oldest_pending_age_seconds` while `gate_reservation_released_total` stays flat.
 
 When manual reconciliation proves a reorg outside the automatic overlap/monitor paths, emit the required operator-source event without passing an identifier or free text:
 

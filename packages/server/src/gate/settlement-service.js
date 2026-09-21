@@ -154,6 +154,23 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     return accepted;
   }
 
+  async function reservationTelemetry(result) {
+    const next = { ...result, released: Number.isSafeInteger(Number(result.released)) ? Number(result.released) : 0 };
+    try {
+      if (typeof store.getReservationCapacityStats !== "function") return next;
+      const raw = await store.getReservationCapacityStats({ chainId: adapter.chainId, splitter: adapter.splitter });
+      const values = [raw?.active, raw?.expiryPending, raw?.releasedRows, raw?.consumedRows, raw?.oldestPendingAgeSeconds]
+        .map(Number);
+      if (!values.every((value) => Number.isFinite(value) && value >= 0)) return next;
+      return {
+        ...next, active: values[0], expiryPending: values[1], releasedRows: values[2],
+        consumedRows: values[3], oldestPendingAgeSeconds: values[4],
+      };
+    } catch {
+      return next;
+    }
+  }
+
   async function scanOnce() {
     let accepted = 0;
     const safeThrough = await adapter.getSafeHead();
@@ -164,9 +181,9 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     if (Number(cursor.overlap) !== adapter.overlap) throw new Error("durable scanner overlap does not match adapter overlap");
     if (safeThrough < BigInt(cursor.nextRangeFrom) - 1n) {
       accepted += await settleDurableObservations();
-      return { scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
+      return reservationTelemetry({ scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
         ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
-        cursorLag: 0, overlapLag: 0 };
+        cursorLag: 0, overlapLag: 0, released: 0 });
     }
     const requested = scannerWindow({ deploymentBlock: cursor.deploymentBlock, nextRangeFrom: cursor.nextRangeFrom,
       safeThrough, overlap: cursor.overlap });
@@ -175,9 +192,9 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
         ? requested.fromBlock + BigInt(adapter.maxBlockRange) - 1n : requested.throughBlock });
     if (!window || window.throughBlock < window.fromBlock) {
       accepted += await settleDurableObservations();
-      return { scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
+      return reservationTelemetry({ scanned: 0, accepted, anomalies: 0, unknownQuotes: 0, mismatches: 0, reorged: 0,
         ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
-        cursorLag: 0, overlapLag: 0 };
+        cursorLag: 0, overlapLag: 0, released: 0 });
     }
     const scanned = await adapter.scanRange(window);
     const unique = new Map();
@@ -213,7 +230,7 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     if (Number(persisted?.unknownQuotes) > 0) await operatorAlert({ code: "UNKNOWN_QUOTE", source: "scanner_overlap" });
     if (Number(persisted?.mismatches) > 0) await operatorAlert({ code: "MISMATCHED_SETTLEMENT", source: "scanner_overlap" });
     accepted += await settleDurableObservations();
-    return {
+    return reservationTelemetry({
       scanned: scanned.canonicalBlocks.length,
       accepted,
       anomalies: Number(persisted?.unknownQuotes || 0) + Number(persisted?.mismatches || 0),
@@ -224,7 +241,8 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
       ...(typeof canonicalHead === "bigint" ? { confirmationLag: Number(canonicalHead > safeThrough ? canonicalHead - safeThrough : 0n) } : {}),
       cursorLag: Number(safeThrough > window.throughBlock ? safeThrough - window.throughBlock : 0n),
       overlapLag: Number(safeThrough > BigInt(checkpoint.blockNumber) ? safeThrough - BigInt(checkpoint.blockNumber) : 0n),
-    };
+      released: Number(persisted?.released || 0),
+    });
   }
 
   async function reconcileSubmitted() {
