@@ -8,10 +8,24 @@ const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
 const DEFAULT_INDEX_API_URL = "https://index.0773h.com";
 const DEFAULT_MAX_STALENESS_MS = 60 * 60 * 1000;
 const MAX_HISTORY_PAGES = 1000;
+const DEFAULT_MAX_RETRIES = 5;
+const DEFAULT_BASE_BACKOFF_MS = 250;
+const DEFAULT_MAX_BACKOFF_MS = 8_000;
+const DEFAULT_MAX_RETRY_AFTER_MS = 30_000;
 
 class IndexStaleError extends Error {
   constructor(message) { super(message); this.name = "IndexStaleError"; this.code = "GAVEL_INDEX_STALE"; }
 }
+
+class IndexRateLimitedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "IndexRateLimitedError";
+    this.code = "GAVEL_INDEX_RATE_LIMITED";
+  }
+}
+
+const RATE_LIMITED_MESSAGE = "The public history source is temporarily rate-limited. History sync did not complete, so no vote can be prepared until history sync completes. Try again in a moment.";
 
 class IndexApiClient {
   constructor(options = {}) {
@@ -32,6 +46,12 @@ class IndexApiClient {
     if (!Number.isFinite(staleness) || staleness <= 0) throw new RangeError("maxStalenessMs must be a positive number");
     this.maxStalenessMs = staleness;
     this.now = options.now || (() => new Date());
+    this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.random = options.random || Math.random;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
+    this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+    this.maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
     // Recorded provenance is origin-only: a private endpoint's path and query
     // never reach a history document.
     this.publicBaseUrl = sanitizeEndpoint(this.baseUrl);
@@ -44,19 +64,48 @@ class IndexApiClient {
     return dao;
   }
 
-  async request(path) {
-    let response;
-    try {
-      response = await this.fetch(`${this.baseUrl}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
-    } catch (error) {
-      // Name the endpoint that failed. The default one is chosen silently, so a
-      // bare transport error leaves the caller nothing to act on. The sanitized
-      // origin is used so the text can never echo a misconfigured secret.
-      const override = this.isDefaultEndpoint ? "; set GAVEL_INDEX_API_URL to read a different index" : "";
-      throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
+  retryDelayMs(response, attempt) {
+    const raw = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
+    if (raw != null && raw !== "") {
+      const trimmed = String(raw).trim();
+      let delayMs = null;
+      if (/^\d+(\.\d+)?$/.test(trimmed)) delayMs = Number(trimmed) * 1000;
+      else {
+        const at = Date.parse(trimmed);
+        if (Number.isFinite(at)) delayMs = at - this.now().getTime();
+      }
+      if (delayMs != null && Number.isFinite(delayMs)) {
+        return Math.min(this.maxRetryAfterMs, Math.max(0, delayMs));
+      }
     }
-    if (!response.ok) throw new Error(`Governance index HTTP ${response.status} from ${this.publicBaseUrl}`);
-    return response.json();
+    const capped = Math.min(this.maxBackoffMs, this.baseBackoffMs * (2 ** attempt));
+    return capped * (0.5 + this.random());
+  }
+
+  async request(path) {
+    const url = `${this.baseUrl}${path}`;
+    const init = { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) };
+    const override = this.isDefaultEndpoint ? "; set GAVEL_INDEX_API_URL to read a different index" : "";
+    for (let attempt = 0; ; attempt++) {
+      let response;
+      try {
+        response = await this.fetch(url, init);
+      } catch (error) {
+        // Name the endpoint that failed. The default one is chosen silently, so a
+        // bare transport error leaves the caller nothing to act on. The sanitized
+        // origin is used so the text can never echo a misconfigured secret.
+        throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
+      }
+      if (response.status === 429) {
+        if (attempt < this.maxRetries) {
+          await this.sleep(this.retryDelayMs(response, attempt));
+          continue;
+        }
+        throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
+      }
+      if (!response.ok) throw new Error(`Governance index HTTP ${response.status} from ${this.publicBaseUrl}`);
+      return response.json();
+    }
   }
 
   // The index is a cache of chain state, not an oracle. Serving a history
@@ -158,4 +207,4 @@ class IndexApiClient {
   }
 }
 
-module.exports = { IndexApiClient, IndexStaleError, DEFAULT_INDEX_API_URL };
+module.exports = { IndexApiClient, IndexStaleError, IndexRateLimitedError, DEFAULT_INDEX_API_URL };

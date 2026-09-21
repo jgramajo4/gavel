@@ -39,6 +39,11 @@ older than `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`) fails the
 command, and `GAVEL_STRUCTURED_ERRORS=1` reports it under category
 `STALE_DATA`. An orchestrator must treat that as a hard stop, never as a voter
 with no votes, and must not silently fall back to another source.
+Gavel retries short-lived HTTP 429 responses from the index (`Retry-After` when
+present, otherwise bounded exponential backoff). If recovery fails, the command
+exits and asks the user to try again; it does not write a partial history or
+allow vote preparation from incomplete sync. `GAVEL_STRUCTURED_ERRORS=1` reports
+that as `RETRYABLE_INFRASTRUCTURE`.
 `packages/governance-index` ships the worker, schema, and read-only API for
 operators who self-host one.
 

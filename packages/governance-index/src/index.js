@@ -4,10 +4,10 @@ const { GovernanceSyncWorker } = require("./worker");
 const { EnsGovernorSource, RailgunVotingSource } = require("./sources");
 const { createReadOnlyApi } = require("./api");
 const { proposalContentHash } = require("./hash");
-const { IndexApiClient, IndexStaleError, DEFAULT_INDEX_API_URL } = require("./client");
+const { IndexApiClient, IndexStaleError, IndexRateLimitedError, DEFAULT_INDEX_API_URL } = require("./client");
 const { NounsSubgraphSource } = require("./nouns-source");
 
-module.exports = { DAO_CONFIGS, MemoryGovernanceStore, GovernanceSyncWorker, EnsGovernorSource, RailgunVotingSource, NounsSubgraphSource, createReadOnlyApi, proposalContentHash, IndexApiClient, IndexStaleError, DEFAULT_INDEX_API_URL };
+module.exports = { DAO_CONFIGS, MemoryGovernanceStore, GovernanceSyncWorker, EnsGovernorSource, RailgunVotingSource, NounsSubgraphSource, createReadOnlyApi, proposalContentHash, IndexApiClient, IndexStaleError, IndexRateLimitedError, DEFAULT_INDEX_API_URL };
 try {
   const { PostgresGovernanceStore } = require("./postgres-store");
   const { patchProposalReads } = require("./postgres-proposal-reads");

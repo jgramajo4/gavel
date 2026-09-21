@@ -183,6 +183,8 @@ Lists use `limit` (1–100) and opaque `cursor` values. The history endpoint is 
 
 Every DAO reads the index, Nouns included: one voter's Nouns history is hundreds of paginated subgraph queries, which this API answers in a few. Live chain state is deliberately not served from here — voting power, delegation, proposal state and the canonical proposal verification in `prepare-vote` are read over RPC against the Governor. `gavel history --dao nouns --endpoint <url>` opts a single read back onto a subgraph if this API is unavailable.
 
+The client retries short-lived HTTP 429 responses using `Retry-After` when the index sends it, otherwise bounded exponential backoff with jitter. If those retries do not recover, it fails closed: no partial history document, and no vote can be prepared until a later successful sync. Ordinary users are not asked to change endpoints or set environment variables.
+
 The client sends no credentials. It has no authentication mechanism today — no bearer token, no API key, no signed request — and credentials must not be embedded in `GAVEL_INDEX_API_URL`: a URL is logged, echoed in error text, and copied between environments far more freely than a secret should be. A private deployment must therefore be reached over a network boundary that authenticates for it (a private network, a reverse proxy performing its own authentication, or an operator-controlled tunnel). If a client-side credential is ever required, it needs a request-header mechanism added to `IndexApiClient` first; do not work around its absence with a URL.
 
 The client strips any userinfo, query and fragment from the endpoint before recording provenance. That is defence against accidental leakage into a history document, not permission to put a secret in the URL.

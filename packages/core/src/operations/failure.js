@@ -1,5 +1,6 @@
 // Raised by the governance index client; matched here without importing it.
 const INDEX_STALE_CODE = "GAVEL_INDEX_STALE";
+const INDEX_RATE_LIMITED_CODE = "GAVEL_INDEX_RATE_LIMITED";
 
 const STAGES = Object.freeze({
   history: "HISTORY_INGESTION",
@@ -30,7 +31,7 @@ function classifyOperationalFailure(command, error) {
   // error code so the wording of each refusal stays free to change.
   if (error?.code === INDEX_STALE_CODE) {
     category = "STALE_DATA";
-  } else if (/timeout|http 5\d\d|rpc|network|fetch|socket|econn|rate limit|canonical version could not be verified/.test(lowered)) {
+  } else if (error?.code === INDEX_RATE_LIMITED_CODE || /timeout|http 5\d\d|rpc|network|fetch|socket|econn|rate[- ]limit|canonical version could not be verified/.test(lowered)) {
     category = "RETRYABLE_INFRASTRUCTURE";
     retryable = true;
   } else if (/stale|mismatch|already present|earlier than|older than/.test(lowered)) {

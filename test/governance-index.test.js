@@ -404,3 +404,126 @@ test("indexed votes keep upstream entity ids and client ids", async () => {
   assert.equal(item.clientId, 11);
   assert.equal(item.normalized, undefined, "the private normalized blob is never served");
 });
+
+function freshSources() {
+  return { sources: [{ sourceId: "s", finalizedHead: "10", updatedAt: new Date().toISOString(), lastError: null }] };
+}
+
+function jsonOk(body) {
+  return { ok: true, status: 200, headers: { get() { return null; } }, async json() { return body; } };
+}
+
+function http429(retryAfter = null) {
+  return {
+    ok: false,
+    status: 429,
+    headers: { get(name) { return String(name).toLowerCase() === "retry-after" ? retryAfter : null; } },
+    async json() { return { error: "rate_limited" }; },
+  };
+}
+
+test("history fetch retries a 429 and then succeeds", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const sleeps = [];
+  let historyCalls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    sleep: async (ms) => { sleeps.push(ms); },
+    random: () => 0.5,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        historyCalls += 1;
+        if (historyCalls === 1) return http429();
+        return jsonOk({ items: [], nextCursor: null });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  const document = await client.fetchHistory("nouns", ADDRESS);
+  assert.equal(document.voteCount, 0);
+  assert.equal(historyCalls, 2);
+  assert.equal(sleeps.length, 1);
+  assert.ok(sleeps[0] > 0);
+});
+
+test("history fetch honors Retry-After on 429", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const sleeps = [];
+  let historyCalls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    sleep: async (ms) => { sleeps.push(ms); },
+    random: () => 1,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        historyCalls += 1;
+        if (historyCalls === 1) return http429("7");
+        return jsonOk({ items: [], nextCursor: null });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  await client.fetchHistory("nouns", ADDRESS);
+  assert.equal(historyCalls, 2);
+  assert.deepEqual(sleeps, [7_000]);
+});
+
+test("repeated 429s exhaust the retry budget with a rate-limit error", async () => {
+  const { IndexApiClient, IndexRateLimitedError } = require("../packages/governance-index");
+  const sleeps = [];
+  let historyCalls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    maxRetries: 2,
+    sleep: async (ms) => { sleeps.push(ms); },
+    random: () => 0.5,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        historyCalls += 1;
+        return http429();
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  const error = await client.fetchHistory("nouns", ADDRESS).catch((caught) => caught);
+  assert.ok(error instanceof IndexRateLimitedError);
+  assert.equal(error.code, "GAVEL_INDEX_RATE_LIMITED");
+  assert.match(error.message, /public history source is temporarily rate-limited/i);
+  assert.match(error.message, /no vote can be prepared until history sync completes/i);
+  assert.equal(historyCalls, 3);
+  assert.equal(sleeps.length, 2);
+});
+
+test("a rate-limited later history page does not return partial history", async () => {
+  const { IndexApiClient, IndexRateLimitedError } = require("../packages/governance-index");
+  const event = {
+    chainId: 1, proposalId: "1", voter: ADDRESS, support: "FOR", reason: null, voteWeight: "1",
+    blockNumber: "10", timestamp: "2023-11-14T22:13:20.000Z", transactionHash: TX, logIndex: 0,
+    sourceKind: "nouns-subgraph", sourceEndpoint: "https://subgraph.example", observedHead: "10",
+    entityId: "vote-1",
+  };
+  let returned = null;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    pageSize: 1,
+    maxRetries: 1,
+    sleep: async () => {},
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history") && !url.includes("cursor=")) {
+        return jsonOk({ items: [event], nextCursor: "page-2" });
+      }
+      if (url.includes("/history")) return http429();
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  const error = await client.fetchHistory("nouns", ADDRESS).then((document) => {
+    returned = document;
+    return null;
+  }, (caught) => caught);
+  assert.ok(error instanceof IndexRateLimitedError);
+  assert.equal(returned, null);
+});
