@@ -237,7 +237,9 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     for (const [field, value] of [["rpcMethodCalls", rpc.rpcMethodCalls],
       ["headerMethodCalls", rpc.headerMethodCalls], ["receiptMethodCalls", rpc.receiptMethodCalls],
       ["logQueryMethodCalls", rpc.logQueryMethodCalls], ["relevantLogs", rpc.relevantLogs],
-      ["scanConcurrency", rpc.concurrency], ["scanElapsedMs", rpc.elapsedMs]]) {
+      ["scanConcurrency", rpc.concurrency], ["scanElapsedMs", rpc.elapsedMs],
+      // Real HTTP payloads, when the transport can report them. Distinct from method calls.
+      ["httpPayloads", rpc.httpPayloads]]) {
       const numeric = metric(value);
       if (numeric !== undefined) rpcTelemetry[field] = numeric;
     }

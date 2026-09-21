@@ -142,6 +142,7 @@ test("scanner RPC telemetry is allowlisted, emitted, truthfully named, and carri
   telemetry.observeWorkerResult("scan", {
     scanned: 5_000, rpcMethodCalls: 15_003, headerMethodCalls: 5_002, receiptMethodCalls: 10_000,
     logQueryMethodCalls: 0, relevantLogs: 1, scanConcurrency: 64, scanElapsedMs: 143,
+    httpPayloads: 240,
   });
 
   const events = parsed(lines).map(({ timestamp, level, type, ...event }) => event);
@@ -153,12 +154,16 @@ test("scanner RPC telemetry is allowlisted, emitted, truthfully named, and carri
     { name: "gate_scanner_relevant_logs", value: 1 },
     { name: "gate_scanner_elapsed_milliseconds", value: 143 },
     { name: "gate_scanner_concurrency", value: 64 },
+    { name: "gate_scanner_http_payloads_total", value: 240 },
   ]);
   // The labelled parts sum to the reported logical method total, so no metric double-counts.
   const parts = events.filter((event) => event.name === "gate_scanner_rpc_method_calls_total");
   assert.equal(parts.reduce((total, event) => total + event.value, 0), 15_003);
-  // No metric claims to measure HTTP round trips, which ethers does not expose.
-  assert.doesNotMatch(lines.join("\n"), /round_trip|http_request|batch/);
+  // Method calls and HTTP payloads are distinct series and must never be conflated: 15,003
+  // logical calls really did travel as 240 requests.
+  const payloads = events.find((event) => event.name === "gate_scanner_http_payloads_total");
+  assert.equal(payloads.value, 240);
+  assert.notEqual(payloads.value, 15_003);
   // No address, hash, quote id or wallet may appear anywhere in the emitted telemetry.
   assert.doesNotMatch(lines.join("\n"), /0x[0-9a-fA-F]{8}/);
 });

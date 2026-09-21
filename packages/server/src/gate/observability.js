@@ -19,6 +19,9 @@ const COUNTERS = new Map([
   // Parts only, never an overlapping grand total, so summing the label dimension gives the
   // true method count.
   ["gate_scanner_rpc_method_calls_total", { method: new Set(["headers", "receipts", "log_queries", "other"]) }],
+  // Real HTTP payloads put on the wire, which is what batching reduces. Emitted only when the
+  // transport can report it; compare against rpc_method_calls_total to see batching working.
+  ["gate_scanner_http_payloads_total", {}],
 ]);
 
 const GAUGES = new Map([
@@ -147,6 +150,7 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
           gauge("gate_scanner_relevant_logs", result?.relevantLogs);
           gauge("gate_scanner_elapsed_milliseconds", result?.scanElapsedMs);
           gauge("gate_scanner_concurrency", result?.scanConcurrency);
+          count("gate_scanner_http_payloads_total", result?.httpPayloads);
         }
         if (job === "monitor") {
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "monitor" });

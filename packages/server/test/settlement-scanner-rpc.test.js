@@ -434,3 +434,34 @@ test("24. scan RPC stats are not polluted by concurrent monitor work", async () 
   assert.ok(h.counting.total > scanned.rpcStats.rpcMethodCalls,
     "expected concurrent monitor calls to be counted by the client but not by the scan");
 });
+
+test("25. real HTTP payload counts are surfaced when the transport can report them, and are optional", async () => {
+  // A transport that reports payload counts: the scan must surface the delta, so an operator can
+  // see 3N+3 logical calls travelling as far fewer requests. This is the only runtime signal that
+  // batching is still in effect.
+  let payloads = 7;
+  const reporting = harness({ from: 1_000n, through: 1_009n,
+    overrides: { transportStats: () => ({ httpPayloads: payloads, jsonRpcRequests: payloads * 10 }) } });
+  const original = reporting.counting.client.getBlockHeader;
+  reporting.counting.client.getBlockHeader = async (number) => { payloads += 1; return original(number); };
+  const result = await reporting.scan();
+
+  assert.equal(result.rpcStats.httpPayloads, 12, "delta across the scan, not the absolute counter");
+  assert.ok(result.rpcStats.httpPayloads < result.rpcStats.rpcMethodCalls,
+    "payloads must be distinct from, and fewer than, logical method calls");
+
+  // A transport without the capability simply omits the field; the scan is otherwise unchanged.
+  const plain = harness({ from: 1_000n, through: 1_009n });
+  const plainResult = await plain.scan();
+  assert.equal(plainResult.rpcStats.httpPayloads, undefined);
+  assert.equal(plainResult.rpcStats.rpcMethodCalls, expectedTotalCalls(10));
+
+  // A transport that reports nonsense is ignored rather than emitting a bogus metric.
+  const bogus = harness({ from: 1_000n, through: 1_009n,
+    overrides: { transportStats: () => ({ httpPayloads: Number.NaN }) } });
+  assert.equal((await bogus.scan()).rpcStats.httpPayloads, undefined);
+
+  const regressing = harness({ from: 1_000n, through: 1_009n,
+    overrides: { transportStats: (() => { let n = 100; return () => ({ httpPayloads: (n -= 50) }); })() } });
+  assert.equal((await regressing.scan()).rpcStats.httpPayloads, undefined);
+});

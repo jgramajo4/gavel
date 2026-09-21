@@ -1,7 +1,8 @@
 "use strict";
 
 const { Interface, TypedDataEncoder, keccak256 } = require("ethers");
-const { createBaseSettlementAdapter } = require("./base-settlement-adapter");
+const { createBaseSettlementAdapter, DEFAULT_SCAN_CONCURRENCY, MAX_SCAN_CONCURRENCY }
+  = require("./base-settlement-adapter");
 const { createGateHttpServer } = require("./http");
 const { createNotificationWorker } = require("./notification-worker");
 const { createGateRelayService } = require("./relay-service");
@@ -251,9 +252,13 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   }
   // In-flight RPCs per scan phase. This changes transport only: the scanner performs the same
   // logical reads either way, and a higher bound simply lets more of them be batched together.
+  // Shares the adapter's constants rather than repeating the literals: these two config readers
+  // have already drifted apart once.
   const scanConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY,
-    "GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY", 64);
-  if (scanConcurrency > 256) throw new TypeError("GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY must not exceed 256");
+    "GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY", DEFAULT_SCAN_CONCURRENCY);
+  if (scanConcurrency > MAX_SCAN_CONCURRENCY) {
+    throw new TypeError(`GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY must not exceed ${MAX_SCAN_CONCURRENCY}`);
+  }
   // JSON-RPC batch width. Providers that reject or cap batches need this lowered to match;
   // 1 disables batching and restores one HTTP round trip per call.
   const rpcBatchMaxCount = positive(env.GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT,

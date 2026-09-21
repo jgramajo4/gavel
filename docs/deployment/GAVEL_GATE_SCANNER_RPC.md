@@ -135,8 +135,11 @@ It also becomes a wall-clock win once provider latency rises above the stall.
 | `GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY` | 64 | in-flight RPCs per scan phase; max 256. Transport only — the same reads happen either way. |
 | `GAVEL_GATE_BASE_RPC_BATCH_MAX_COUNT` | 100 | JSON-RPC batch width. Set to `1` for a provider that rejects batched payloads. |
 
-Lower the concurrency for rate-limited providers. Keep `BATCH_MAX_COUNT >= SCAN_CONCURRENCY` to
-get one round trip per wave.
+Lower the concurrency for rate-limited providers. `BATCH_MAX_COUNT >= SCAN_CONCURRENCY` gives one
+round trip per wave, which is ideal for the header phase — but note that it also makes the receipt
+phase send up to `SCAN_CONCURRENCY` blocks' worth of receipts in a single response, which is the
+shape most likely to hit a provider's response-size cap or gateway timeout. If receipt batches are
+rejected while header batches succeed, lower `BATCH_MAX_COUNT` rather than the concurrency.
 
 ## Resource bounds
 
@@ -145,8 +148,12 @@ block, against a lazily generated chain so the figure is the scanner's own reten
 
 | | peak in-flight RPCs | peak heap delta |
 | --- | --- | --- |
-| before | 1 | 93 MB |
-| after | 64 | 36 MB |
+| before | 1 | 92–93 MB |
+| after | 64 | 34–47 MB (median ~36) |
+
+The `after` figure varies across runs because the 64-lane window is transient and GC timing moves
+it; `before` is steady because its retention is durable. The direction and magnitude are not in
+doubt, the precision is.
 
 Concurrency is bounded by an explicit lane pool, so a scan never creates an unbounded promise set
 however wide the range. Peak memory is *lower* than the sequential scanner despite 64x the
@@ -170,8 +177,10 @@ below the scan concurrency will fail every scan identically until
 
 ## Observability
 
-Metrics report **logical JSON-RPC method calls**, never HTTP requests — ethers does not expose
-round-trip counts, so that figure is benchmark-only rather than an invented runtime metric.
+Metrics distinguish **logical JSON-RPC method calls** from **actual HTTP payloads**, and never
+conflate the two. `JsonRpcProvider` emits one `debug` event with `action: "sendRpcPayload"` per
+request it puts on the wire, batched or not, so the round-trip count is a real measurement rather
+than an inference.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
@@ -179,17 +188,53 @@ round-trip counts, so that figure is benchmark-only rather than an invented runt
 | `gate_scanner_range_blocks` | gauge | blocks in the scanned range |
 | `gate_scanner_relevant_logs` | gauge | matching logs found in receipts |
 | `gate_scanner_elapsed_milliseconds` | gauge | scan wall-clock time |
-| `gate_scanner_concurrency` | gauge | configured in-flight bound |
+| `gate_scanner_concurrency` | gauge | configured in-flight bound (not observed parallelism) |
+| `gate_scanner_http_payloads_total` | counter | real HTTP requests put on the wire |
+
+Compare `gate_scanner_http_payloads_total` against `gate_scanner_rpc_method_calls_total` to see
+batching working: the ratio is the mean batch size. **This is the only signal that the
+optimization is still in effect** — a provider that quietly stops honouring batches, or a
+`BATCH_MAX_COUNT=1` set during an incident and forgotten, is invisible in every other metric.
 
 `log_queries` is always zero on the default path and exists so the series does not change shape if
 supplemental log querying is ever added.
+
+## Two operational notes about timeouts
+
+**`GAVEL_GATE_BASE_RPC_TIMEOUT_MS` now bounds a batched round trip, not a single request.** With
+64 concurrent calls coalesced into one payload, all 64 per-call timers cover the same HTTP round
+trip, so the default 10 s must now cover a 64-block receipt batch where it previously covered one
+block. The default was deliberately left unchanged, but an operator on a slow provider may need to
+raise it, or to lower `BATCH_MAX_COUNT`.
+
+**A timed-out call is abandoned, not cancelled.** `rpcCall` races a timer against the operation
+and drops the loser; ethers plumbs no abort signal, and its `FetchRequest` retries a 429 internally
+up to 12 times under a 300 s request timeout. So a rate-limited provider leaves each abandoned wave
+retrying in the background while the worker restarts the whole scan. This pathology predates this
+change, but concurrency multiplies it from one orphaned request at a time to up to
+`SCAN_CONCURRENCY`. Lowering `SCAN_CONCURRENCY` is the mitigation until the follow-up below lands.
 
 ## Known follow-up, not addressed here
 
 The worker scheduler retries a failed `scanOnce` every `pollIntervalMs` with no backoff or jitter
 (`runtime.js`). Sequential RPC used to throttle that accidentally; concurrent reads remove the
-brake. Adding exponential backoff to the job scheduler is worth doing but sits outside the
-scanner/adapter and is deliberately left out of this change.
+brake. Combined with the abandoned-request behaviour above, a rate-limited provider can accumulate
+overlapping in-flight waves. Adding exponential backoff to the job scheduler — and an abort path
+for abandoned requests — is worth doing but sits outside the scanner/adapter and is deliberately
+left out of this change. `runtime.js`'s scheduler is untouched by it.
+
+## What the adapter returns vs. what is persisted
+
+Worth stating explicitly, because two independent reviews of this change got it wrong in opposite
+directions. `scanRange()` returns canonical blocks carrying only the four checkpoint fields, and
+the previous scanner returned a fifth, `transactionHashes`. **Neither ever reached the database.**
+Both stores normalize `canonicalBlocks` to exactly the four fields before building `p_metadata`
+(`store.js`'s `recordScannerRange`, and `store-memory.js`'s equivalent), so `scanner_result` JSONB
+is byte-identical between the two scanners.
+
+Verified by intercepting the parameter passed to `gate.record_scanner_range`: given block entries
+that carry `transactionHashes`, the persisted `p_metadata` contains only
+`blockNumber` / `blockHash` / `parentHash` / `blockTimestamp`.
 
 ## Rollback
 

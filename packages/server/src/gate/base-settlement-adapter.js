@@ -333,7 +333,19 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
    */
   async function scanRange(window = {}) {
     const stats = {};
-    return meters.run(stats, () => runScan(window, stats));
+    // Optional client capability: a transport that can report real HTTP payload counts. The
+    // scanner never depends on it, and its absence simply omits the two transport fields.
+    const before = typeof client.transportStats === "function" ? client.transportStats() : undefined;
+    const result = await meters.run(stats, () => runScan(window, stats));
+    if (!before) return result;
+    const after = client.transportStats();
+    const delta = (field) => {
+      const value = Number(after?.[field]) - Number(before?.[field]);
+      return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+    };
+    const httpPayloads = delta("httpPayloads");
+    if (httpPayloads === undefined) return result;
+    return { ...result, rpcStats: Object.freeze({ ...result.rpcStats, httpPayloads }) };
   }
 
   async function runScan({ fromBlock, throughBlock } = {}, stats) {
@@ -451,4 +463,5 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     getCanonicalHead, getSafeHead, scanRange, inspectTransaction, revalidateMonitor });
 }
 
-module.exports = { createBaseSettlementAdapter, settlementConfigFromEnv };
+module.exports = { createBaseSettlementAdapter, settlementConfigFromEnv,
+  DEFAULT_SCAN_CONCURRENCY, MAX_SCAN_CONCURRENCY };

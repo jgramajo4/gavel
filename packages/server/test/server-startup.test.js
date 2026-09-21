@@ -307,3 +307,45 @@ test("scanner header reads bypass the provider cache and encode block tags as ca
     ["eth_getBlockReceipts", "0x2255100"],
   ]);
 });
+
+test("the real provider is constructed so batchMaxCount and batching actually take effect", async () => {
+  const { createRpcClient } = require("../bin/gavel-server");
+  // Deliberately NO providerOverride: the other createRpcClient tests stub the provider and so
+  // would not notice options being passed in the wrong constructor position -- JsonRpcProvider is
+  // (url, network, options), and a fourth argument is silently ignored. That exact mistake
+  // silently disabled this optimization once already.
+  const defaulted = createRpcClient("http://rpc.invalid", "8453");
+  assert.equal(defaulted.provider._getOption("batchMaxCount"), 100);
+  assert.equal(defaulted.provider._getOption("staticNetwork"), true);
+
+  for (const configured of [1, 7, 64, 250]) {
+    const client = createRpcClient("http://rpc.invalid", "8453", undefined, { batchMaxCount: configured });
+    assert.equal(client.provider._getOption("batchMaxCount"), configured,
+      "batchMaxCount must reach the provider, not be dropped as an ignored 4th argument");
+  }
+
+  // batchMaxCount === 1 is the documented escape hatch for batch-hostile providers, and is the
+  // only value for which ethers also zeroes the batch drain stall.
+  const unbatched = createRpcClient("http://rpc.invalid", "8453", undefined, { batchMaxCount: 1 });
+  assert.equal(unbatched.provider._getOption("batchMaxCount"), 1);
+});
+
+test("the scanner client reports real HTTP payload counts, not method counts", async () => {
+  const { createRpcClient } = require("../bin/gavel-server");
+  const listeners = [];
+  const client = createRpcClient("http://rpc.invalid", "8453", {
+    on(event, handler) { if (event === "debug") listeners.push(handler); return this; },
+    async send() { return null; },
+  });
+
+  assert.equal(typeof client.transportStats, "function");
+  assert.deepEqual(client.transportStats(), { httpPayloads: 0, jsonRpcRequests: 0 });
+
+  // One batched payload carrying 64 requests is ONE round trip but 64 logical method calls.
+  listeners[0]({ action: "sendRpcPayload", payload: Array.from({ length: 64 }, (_, id) => ({ id })) });
+  listeners[0]({ action: "sendRpcPayload", payload: { id: 1 } });
+  // Non-send debug events must not be counted.
+  listeners[0]({ action: "receiveRpcResult", result: [] });
+
+  assert.deepEqual(client.transportStats(), { httpPayloads: 2, jsonRpcRequests: 65 });
+});
