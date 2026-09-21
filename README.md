@@ -284,6 +284,10 @@ checkpoint, a reported sync error, or a newest checkpoint older than
 partial history. Treat that failure as a hard stop; an empty indexed history is
 not evidence that a voter has never voted.
 
+Short-lived public-index rate limits are retried automatically. If those retries
+do not recover, Gavel asks you to try again and still refuses to write a partial
+history, build a profile, or prepare a vote from incomplete sync.
+
 The public `https://eth.drpc.org` endpoint is used automatically for the
 chain-backed commands. Set `ETHEREUM_RPC_URL` or pass `--rpc` only when the host
 needs a dedicated provider, higher limits, or different privacy properties.

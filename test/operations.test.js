@@ -24,6 +24,14 @@ test("classifies every governance index freshness refusal as stale data", () => 
   }
 });
 
+test("exhausted index rate limits are retryable infrastructure, not a software defect", () => {
+  const error = new Error("The history source is temporarily rate-limited. Try again in a moment. No vote can be prepared until history sync completes.");
+  error.code = "GAVEL_INDEX_RATE_LIMITED";
+  const failure = classifyOperationalFailure("history", error);
+  assert.equal(failure.category, "RETRYABLE_INFRASTRUCTURE");
+  assert.equal(failure.retryable, true);
+});
+
 test("redacts likely secrets and long transaction material from operational messages", () => {
   const message = safeOperationMessage(new Error(`RPC failed ?api_key=secret 0x${"a".repeat(128)}`));
   assert.doesNotMatch(message, /secret/);

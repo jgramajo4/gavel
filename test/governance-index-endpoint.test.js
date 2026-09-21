@@ -45,6 +45,24 @@ async function startStubIndex() {
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
+async function startRateLimitedIndex() {
+  const server = http.createServer((req, res) => {
+    if (req.url.split("?")[0].endsWith("/sync-status")) {
+      const payload = JSON.stringify({
+        dao: "nouns",
+        sources: [{ sourceId: "nouns-subgraph", finalizedHead: "500", updatedAt: new Date().toISOString(), lastError: null }],
+      });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
+      res.end(payload);
+      return;
+    }
+    res.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+    res.end(JSON.stringify({ error: "rate_limited" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
 test("GAVEL_INDEX_API_URL overrides the default and serves an indexed history through the CLI", async (t) => {
   const { server, url } = await startStubIndex();
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-index-endpoint-"));
@@ -127,6 +145,28 @@ test("Nouns reads the index by default and --endpoint is the subgraph opt-out", 
     (error) => !/gavel-governance-index/.test(error.stdout || ""),
     "--endpoint must not fall through to the index",
   );
+});
+
+test("CLI history does not persist a partial artifact after a rate-limited index", async (t) => {
+  const { server, url } = await startRateLimitedIndex();
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-index-429-"));
+  t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
+  const env = { ...process.env, GAVEL_INDEX_API_URL: url };
+  delete env.GAVEL_DATA_DIR;
+  await assert.rejects(
+    execFileAsync(process.execPath, [cli, "history", VOTER, "--dao", "nouns"], {
+      cwd: temporary, encoding: "utf8", env,
+    }),
+    (error) => {
+      const text = `${error.stderr || ""}\n${error.message || ""}`;
+      return /history source is temporarily rate-limited/i.test(text)
+        && /no vote can be prepared until history sync completes/i.test(text)
+        && !/GAVEL_INDEX_API_URL/.test(text);
+    },
+  );
+  const defaultHistory = path.join(temporary, "data", "private", "nouns", `${VOTER.toLowerCase()}.json`);
+  assert.equal(fs.existsSync(defaultHistory), false);
+  assert.equal(fs.existsSync(path.join(temporary, "data", "private")), false);
 });
 
 test("the TUI default index endpoint matches the client's", () => {

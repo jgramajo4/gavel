@@ -105,7 +105,9 @@ evidence.
 - Indexed reads gate on checkpoint freshness: a missing checkpoint, a reported
   sync error, or a stale index fails the command. Report the failing
   prerequisite and stop; an empty or refused history is not a voter with no
-  votes.
+  votes. Short-lived public-index rate limits are retried automatically; only
+  an unsuccessful recovery should be reported as try again, and it must not
+  produce a partial history or a prepared vote.
 - Chain-backed commands default to the public `https://eth.drpc.org` endpoint;
   Bankr does not need to provide its own raw RPC URL for the basic workflow.
 - `ETHEREUM_RPC_URL` in Bankr's secure Env Vars settings is an optional advanced

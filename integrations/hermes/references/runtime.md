@@ -100,7 +100,9 @@ build a history document from an index that has no checkpoint, reports a sync
 error, or is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS` (default `3600`).
 Report that refusal as a stale or failing index and stop; do not silently fall
 back to another source, and never present an empty indexed history as a voter
-with no votes.
+with no votes. Short-lived public-index rate limits are retried automatically;
+only an unsuccessful recovery should be reported back as "try again," and it
+must not produce a partial history or a prepared vote.
 
 The address roles are independent:
 
