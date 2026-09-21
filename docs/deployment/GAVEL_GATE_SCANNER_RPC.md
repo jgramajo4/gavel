@@ -108,25 +108,62 @@ rather than degrading further.
 
 ## Measured
 
-Synthetic 5,000-block range driven through a real `ethers` `JsonRpcProvider` whose transport
-adds 5 ms per HTTP payload (`scripts/scanner-transport-benchmark.js`):
+Synthetic ranges driven through a real `ethers` `JsonRpcProvider` whose transport adds a fixed
+delay per HTTP payload (`scripts/scanner-transport-benchmark.js --latency 20`). Each adapter runs
+in the provider configuration it was written for: the old sequential scanner against a
+non-batching provider, so it is not charged ethers' 10 ms batch drain stall that a real sequential
+HTTP client never pays. (`--unfair` reproduces that mis-measurement, which inflated an earlier
+version of these numbers by ~2.4x.)
+
+**Sparse 5,000-block range** (12 logs/block, no bloom fallback):
 
 | | JSON-RPC calls | HTTP round trips | Elapsed |
 | --- | --- | --- | --- |
-| before | 15,003 | 15,003 | 231,870 ms |
-| after | 5,008 | 87 | 1,520 ms |
+| before | 15,003 | 15,003 | 321,104 ms |
+| after, provider without batching | 5,008 | 5,008 | 1,951 ms |
+| after, batching provider | 5,008 | 87 | 2,770 ms |
 
-**2.99x fewer calls, 172x fewer round trips, 152x faster.**
+**3.0x fewer JSON-RPC calls, 172x fewer round trips, 165x faster.**
 
-Bloom false-positive rate rises with log density per block (measured over 2,000 blocks):
+**Dense 1,000-block range** (500 logs/block, ~50% of blocks bloom-positive):
 
-| logs/block | bloom-positive blocks | total calls |
-| --- | --- | --- |
-| ~50 | 1 (0.05%) | 2,007 |
-| ~150 | 24 (1.2%) | 2,053 |
-| ~300 | 324 (16%) | 2,653 |
+| | JSON-RPC calls | HTTP round trips | Elapsed |
+| --- | --- | --- | --- |
+| before | 3,003 | 3,003 | 65,609 ms |
+| after, batching provider | 2,008 | 36 | 1,681 ms |
 
-Even at 16% fallback the scan stays well under the 6,003-call baseline for that range.
+**1.5x fewer calls, 83x fewer round trips, 39x faster.**
+
+### What actually produces the speedup
+
+**Concurrency, not batching.** The old scanner awaited every RPC in sequence; header *and*
+receipt reads now run with bounded concurrency, which is why the dense range — where the bloom
+gate mostly fails and the call-count win collapses to 1.5x — still gets 39x on wall clock.
+
+Batching is a separate lever with a different payoff. At 20 ms latency it is marginally *slower*
+than unbatched concurrency (ethers charges each drain a 10 ms stall), but it cuts provider-side
+requests 57x, which is what matters for rate limits, quotas and per-request billing. It becomes a
+wall-clock win as provider latency rises above the stall.
+
+### Bloom fallback vs. log density
+
+The gate's value depends entirely on how many items a block's bloom carries (one address plus
+each topic, per log). Measured over a 2,000-block sparse range
+(`scripts/scanner-rpc-benchmark.js --sweep`):
+
+| logs/block | bloom items | bloom-positive blocks | total calls | vs. before |
+| --- | --- | --- | --- | --- |
+| 12 | 36 | 0 (0.0%) | 2,005 | 2.99x |
+| 50 | 150 | 1 (0.1%) | 2,007 | 2.99x |
+| 100 | 300 | 6 (0.3%) | 2,017 | 2.98x |
+| 200 | 600 | 83 (4.2%) | 2,171 | 2.77x |
+| 300 | 900 | 324 (16.2%) | 2,653 | 2.26x |
+| 500 | 1,500 | 1,028 (51.4%) | 4,061 | 1.48x |
+| 800 | 2,400 | 1,657 (82.8%) | 5,319 | 1.13x |
+
+The filter is M3:2048, so after `n` insertions the set-bit fraction is `~1-e^(-3n/2048)` and a
+two-item query needs six bits: saturation is sharp past ~600 items. **Quote the call-count win
+with its operating point.** The round-trip and wall-clock wins do not depend on it.
 
 ## Configuration
 

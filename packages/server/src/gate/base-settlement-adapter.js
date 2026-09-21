@@ -276,6 +276,9 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     const found = [];
     const seen = new Map();
     const idealChunks = Number((through - from) / BigInt(logRangeLimit)) + 1;
+    // A scan covers at most maxBlockRange blocks, and a settlement log is one per settlement, so
+    // an unbounded result stream is a broken or hostile provider rather than a busy chain.
+    const resultLimit = rangeLimit * 16;
     // Halving is bounded: legitimate adaptation needs a few extra queries, a provider that
     // rejects everything would otherwise issue ~2 queries per block before giving up.
     let budget = Math.max(64, idealChunks * 8);
@@ -320,6 +323,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
         }
         seen.set(identity, fingerprint);
         found.push(log);
+        if (found.length > resultLimit) throw new Error("settlement log discovery returned an implausible result count");
       }
     }
     for (let start = from; start <= through; start += BigInt(logRangeLimit)) {
