@@ -188,6 +188,8 @@ test("production settlement config requires exact Base mainnet and canonical nat
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    maxLogRange: 1_000,
+    headerConcurrency: 64,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -216,6 +218,8 @@ test("test settlement config accepts exact Base Sepolia with an explicitly label
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    maxLogRange: 1_000,
+    headerConcurrency: 64,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -311,6 +315,8 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
     monitorConfirmations: 64,
     overlap: 64,
     maxBlockRange: 5_000,
+    maxLogRange: 1_000,
+    headerConcurrency: 64,
     pollIntervalMs: 5_000,
     rpcTimeoutMs: 10_000,
     notificationLeaseMs: 300_000,
@@ -325,6 +331,8 @@ test("PR6 runtime config is opt-in, defaults to one confirmation and the canonic
   })), { environment: "production", chainId: "8453", token: CANONICAL_BASE_USDC.toLowerCase(),
     splitter: SPLITTER, quoteSigner: SIGNER, gavelRecipient: GAVEL_RECIPIENT,
     confirmationDepth: 1, monitorConfirmations: 64, overlap: 12, maxBlockRange: 200,
+    // The default 1,000-block log query width is clamped to the configured scan span.
+    maxLogRange: 200, headerConcurrency: 64,
     pollIntervalMs: 9_000, rpcTimeoutMs: 8_000, notificationLeaseMs: 420_000 });
 });
 
@@ -333,7 +341,7 @@ test("Base adapter config uses the canonical PR6 overlap setting", () => {
   assert.deepEqual(settlementConfigFromEnv({
     GAVEL_GATE_CONFIRMATION_DEPTH: "1",
     GAVEL_GATE_REORG_OVERLAP_BLOCKS: "17",
-  }), { confirmationDepth: 1, overlap: 17, maxBlockRange: 5_000 });
+  }), { confirmationDepth: 1, overlap: 17, maxBlockRange: 5_000, maxLogRange: 1_000, headerConcurrency: 64 });
   assert.throws(() => settlementConfigFromEnv({ GAVEL_GATE_CONFIRMATION_DEPTH: "3" }), /exactly 1/);
 });
 
@@ -388,7 +396,7 @@ test("canonical server composes only after authoritative deployment parity", asy
   assert.equal(calls[0][0], "adapter");
   assert.deepEqual(calls[0][1], {
     client: input.baseClient, chainId: "8453", splitter: SPLITTER, confirmationDepth: 1, overlap: 64,
-    maxBlockRange: 5_000, rpcTimeoutMs: 10_000,
+    maxBlockRange: 5_000, maxLogRange: 1_000, headerConcurrency: 64, rpcTimeoutMs: 10_000,
   });
   assert.equal(calls[1][1].store, input.store);
   assert.equal(calls[1][1].adapter, adapter);

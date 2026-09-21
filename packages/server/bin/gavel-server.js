@@ -254,6 +254,12 @@ function createRpcClient(url, chainId, providerOverride) {
     getChainId: async () => BigInt(await provider.send("eth_chainId", [])).toString(),
     getBlockNumber: () => provider.getBlockNumber(),
     getBlock: (number) => provider.getBlock(number),
+    // Raw header read: it carries logsBloom (which ethers' Block does not expose) and the
+    // block's transaction hash set, so the scanner gets every field it needs in one call.
+    // Concurrent sends are coalesced into JSON-RPC batches by JsonRpcProvider.
+    getBlockHeader: (number) => provider.send("eth_getBlockByNumber", [toBeHex(number), false]),
+    getLogs: ({ fromBlock, toBlock, address, topics }) => provider.send("eth_getLogs",
+      [{ fromBlock, toBlock, address, topics }]),
     getBlockTransactionCount: (number) => provider.send("eth_getBlockTransactionCountByNumber", [toBeHex(number)]),
     getBlockReceipts: (number) => provider.send("eth_getBlockReceipts", [toBeHex(number)]),
     getTransactionReceipt: (hash) => provider.getTransactionReceipt(hash),

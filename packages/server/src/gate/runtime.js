@@ -249,6 +249,14 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
   if (maxBlockRange <= overlap) {
     throw new TypeError("GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE must be greater than GAVEL_GATE_REORG_OVERLAP_BLOCKS");
   }
+  // eth_getLogs span per query. Providers cap this independently and the adapter halves a span
+  // that a provider rejects, so this is a starting width, not a correctness boundary. A scan
+  // never spans more than maxBlockRange, so a wider log query would be wasted and is clamped.
+  const maxLogRange = Math.min(positive(env.GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE,
+    "GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE", 1_000), maxBlockRange);
+  const headerConcurrency = positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
+    "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", 64);
+  if (headerConcurrency > 256) throw new TypeError("GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY must not exceed 256");
   const notificationLeaseMs = positive(env.GAVEL_GATE_NOTIFICATION_LEASE_MS,
     "GAVEL_GATE_NOTIFICATION_LEASE_MS", 5 * 60_000);
   if (notificationLeaseMs > 3_600_000) throw new TypeError("GAVEL_GATE_NOTIFICATION_LEASE_MS must not exceed 3600000");
@@ -273,6 +281,8 @@ function settlementRuntimeConfigFromEnv(env = process.env) {
     monitorConfirmations,
     overlap,
     maxBlockRange,
+    maxLogRange,
+    headerConcurrency,
     pollIntervalMs: positive(env.GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS, "GAVEL_GATE_SETTLEMENT_POLL_INTERVAL_MS", 5_000),
     rpcTimeoutMs,
     notificationLeaseMs,
@@ -360,6 +370,8 @@ async function createGateServerRuntime(options = {}) {
       confirmationDepth: config.confirmationDepth,
       overlap: config.overlap,
       maxBlockRange: config.maxBlockRange,
+      maxLogRange: config.maxLogRange,
+      headerConcurrency: config.headerConcurrency,
       rpcTimeoutMs: config.rpcTimeoutMs,
     });
     settlementService = factories.createSettlementService({

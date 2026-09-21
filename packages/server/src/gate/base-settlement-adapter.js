@@ -5,14 +5,37 @@ const {
   decodeQuoteSettledLog,
   safeHead,
 } = require("@gavel/gate");
+const { isLogsBloom, logsBloomMayContainEvent } = require("./logs-bloom");
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DEFAULT_MAX_BLOCK_RANGE = 5_000;
+// Public Base RPC providers cap eth_getLogs spans (commonly 10k blocks / 10k results).
+// A conservative default keeps a full maxBlockRange scan to a handful of log queries.
+const DEFAULT_MAX_LOG_RANGE = 1_000;
+// Header reads are the one per-block RPC the checkpoint invariant still requires, so they
+// are issued with bounded concurrency. ethers' JsonRpcProvider coalesces concurrent sends
+// into JSON-RPC batches, which turns this bound into "one HTTP round trip per wave".
+const DEFAULT_HEADER_CONCURRENCY = 64;
+const MAX_HEADER_CONCURRENCY = 256;
+const RANGE_LIMIT_HINT =
+  /range|too many results|more than \d+ results|limit exceeded|query timeout|exceeds? the limit|block range|response size|-32005/i;
 
 function positive(value, name, fallback) {
   const result = value === undefined ? fallback : Number(value);
   if (!Number.isSafeInteger(result) || result < 1) throw new TypeError(`${name} must be a positive integer`);
+  return result;
+}
+function quantity(value, name) {
+  let result;
+  if (typeof value === "bigint") result = value;
+  else if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new TypeError(`${name} is invalid`);
+    result = BigInt(value);
+  } else if (typeof value === "string" && (/^0x[0-9a-fA-F]+$/.test(value) || /^[0-9]+$/.test(value))) {
+    result = BigInt(value);
+  } else throw new TypeError(`${name} is invalid`);
+  if (result < 0n) throw new TypeError(`${name} is invalid`);
   return result;
 }
 function timestamp(value) {
@@ -59,6 +82,39 @@ function sameLog(left, right) {
       && JSON.stringify(left.topics) === JSON.stringify(right.topics);
   } catch { return false; }
 }
+// Reconciliation between two independent RPC views of the same log (eth_getLogs and
+// eth_getBlockReceipts) compares canonical bytes, so a provider that differs only in hex
+// casing is not treated as a contradiction.
+function logIdentity(log) { return `${hash(log.transactionHash, "log transaction hash")}:${logIndex(log)}`; }
+function logFingerprint(log) {
+  return JSON.stringify([
+    hash(log.transactionHash, "log transaction hash"), logIndex(log), Number(log.blockNumber),
+    hash(log.blockHash, "log block hash"), address(log.address, "log address"),
+    String(log.data).toLowerCase(), log.topics.map((topic) => String(topic).toLowerCase()),
+  ]);
+}
+function isRangeLimitError(error) {
+  const message = `${error?.message || ""} ${error?.error?.message || ""} ${error?.code || ""}`;
+  return RANGE_LIMIT_HINT.test(message);
+}
+async function mapBounded(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failure;
+  const lanes = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    for (;;) {
+      if (failure !== undefined) return;
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      try { results[index] = await worker(items[index], index); }
+      catch (error) { if (failure === undefined) failure = error; return; }
+    }
+  }));
+  if (failure !== undefined) throw failure;
+  return results;
+}
 
 function settlementConfigFromEnv(env = process.env) {
   const confirmationDepth = positive(env.GAVEL_GATE_CONFIRMATION_DEPTH, "GAVEL_GATE_CONFIRMATION_DEPTH", DEFAULT_CONFIRMATION_DEPTH);
@@ -68,28 +124,43 @@ function settlementConfigFromEnv(env = process.env) {
     overlap: positive(env.GAVEL_GATE_REORG_OVERLAP_BLOCKS, "GAVEL_GATE_REORG_OVERLAP_BLOCKS", DEFAULT_SCANNER_OVERLAP),
     maxBlockRange: positive(env.GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE,
       "GAVEL_GATE_SETTLEMENT_MAX_BLOCK_RANGE", DEFAULT_MAX_BLOCK_RANGE),
+    maxLogRange: positive(env.GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE,
+      "GAVEL_GATE_SETTLEMENT_MAX_LOG_RANGE", DEFAULT_MAX_LOG_RANGE),
+    headerConcurrency: positive(env.GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY,
+      "GAVEL_GATE_SETTLEMENT_HEADER_CONCURRENCY", DEFAULT_HEADER_CONCURRENCY),
   });
 }
 
 function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDepth = DEFAULT_CONFIRMATION_DEPTH,
-  overlap = DEFAULT_SCANNER_OVERLAP, maxBlockRange = DEFAULT_MAX_BLOCK_RANGE, rpcTimeoutMs = 10_000,
+  overlap = DEFAULT_SCANNER_OVERLAP, maxBlockRange = DEFAULT_MAX_BLOCK_RANGE, maxLogRange = DEFAULT_MAX_LOG_RANGE,
+  headerConcurrency = DEFAULT_HEADER_CONCURRENCY, rpcTimeoutMs = 10_000,
   clock = () => new Date() } = {}) {
-  for (const method of ["getChainId", "getBlockNumber", "getBlock", "getBlockTransactionCount", "getBlockReceipts",
-    "getTransactionReceipt", "getTransaction"]) {
+  for (const method of ["getChainId", "getBlockNumber", "getBlockHeader", "getLogs", "getBlockTransactionCount",
+    "getBlockReceipts", "getTransactionReceipt", "getTransaction"]) {
     if (!client || typeof client[method] !== "function") throw new TypeError(`client.${method} is required`);
   }
   const configuredChain = BigInt(chainId).toString();
   if (BigInt(configuredChain) < 1n) throw new TypeError("chainId must be positive");
   const configuredSplitter = address(splitter, "splitter");
+  const configuredTopic = QUOTE_SETTLED_TOPIC.toLowerCase();
   const depth = positive(confirmationDepth, "confirmationDepth", DEFAULT_CONFIRMATION_DEPTH);
   if (depth !== 1) throw new TypeError("confirmationDepth must be exactly 1 for the MVP");
   const trailing = positive(overlap, "overlap", DEFAULT_SCANNER_OVERLAP);
   const rangeLimit = positive(maxBlockRange, "maxBlockRange", DEFAULT_MAX_BLOCK_RANGE);
+  const logRangeLimit = positive(maxLogRange, "maxLogRange", DEFAULT_MAX_LOG_RANGE);
+  const headerLanes = positive(headerConcurrency, "headerConcurrency", DEFAULT_HEADER_CONCURRENCY);
+  if (headerLanes > MAX_HEADER_CONCURRENCY) throw new TypeError(`headerConcurrency must not exceed ${MAX_HEADER_CONCURRENCY}`);
   const rpcLimit = positive(rpcTimeoutMs, "rpcTimeoutMs", 10_000);
   if (rpcLimit > 60_000) throw new TypeError("rpcTimeoutMs must not exceed 60000");
   if (rangeLimit <= trailing) throw new TypeError("maxBlockRange must be greater than overlap");
 
+  // Central RPC counter: every adapter RPC goes through rpcCall, so per-scan call shape is
+  // measured at one place rather than sprinkled through the discovery code.
+  let meter;
+  function measure(name) { if (meter) meter[name] = (meter[name] || 0) + 1; }
+
   async function rpcCall(name, operation) {
+    measure(name);
     let timer;
     try {
       return await Promise.race([
@@ -107,23 +178,148 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   async function getCanonicalHead() { await assertChain(); return BigInt(await rpcCall("getBlockNumber", () => client.getBlockNumber())); }
   async function getSafeHead() { return safeHead(await getCanonicalHead(), depth); }
 
-  async function canonicalBlock(number, includeTransactions = false) {
-    const block = await rpcCall("getBlock", () => client.getBlock(Number(number)));
-    if (!block || Number(block.number) !== Number(number)) throw new Error("canonical block unavailable");
+  // One eth_getBlockByNumber(number, false) per canonical block. It carries every field the
+  // checkpoint invariant needs (hash, parentHash, timestamp), the transaction hash set, and
+  // the logsBloom that proves whether the block can hold a QuoteSettled log at all.
+  async function canonicalBlock(number) {
+    const header = await rpcCall("getBlock", () => client.getBlockHeader(Number(number)));
+    if (!header || quantity(header.number, "canonical block number") !== BigInt(number)) {
+      throw new Error("canonical block unavailable");
+    }
+    if (!isLogsBloom(header.logsBloom)) throw new Error("canonical block header is incomplete");
+    if (!Array.isArray(header.transactions)) throw new Error("canonical block transaction set is incomplete");
     let transactionHashes;
-    if (includeTransactions) {
-      if (!Array.isArray(block.transactions)) throw new Error("canonical block transaction set is incomplete");
+    try {
+      transactionHashes = header.transactions.map((transaction) => hash(
+        typeof transaction === "string" ? transaction : transaction?.hash, "block transaction hash"));
+    } catch { throw new Error("canonical block transaction set is incomplete"); }
+    if (new Set(transactionHashes).size !== transactionHashes.length) {
+      throw new Error("canonical block transaction set is incomplete");
+    }
+    return { blockNumber: BigInt(number).toString(), blockHash: hash(header.hash, "block hash"),
+      parentHash: hash(header.parentHash, "block parent hash"),
+      blockTimestamp: timestamp(Number(quantity(header.timestamp, "block timestamp"))),
+      logsBloom: header.logsBloom.toLowerCase(), transactionHashes };
+  }
+
+  // The shape persisted by recordScannerRange. Kept byte-identical to the pre-optimization
+  // payload so stored scanner_result metadata and replay comparisons do not change.
+  function checkpointShape(block) {
+    return { blockNumber: block.blockNumber, blockHash: block.blockHash, parentHash: block.parentHash,
+      blockTimestamp: block.blockTimestamp };
+  }
+
+  function mayHoldSettlement(block) {
+    return logsBloomMayContainEvent(block.logsBloom, configuredSplitter, configuredTopic);
+  }
+
+  // Strict eth_getLogs discovery: exact splitter, exact QuoteSettled topic0, exact span.
+  // Chunked up front, and halved adaptively when a provider rejects a span for being too
+  // wide or returning too many results. A chunk is never skipped: it either resolves or throws.
+  async function discoverLogs(from, through) {
+    const found = [];
+    const seen = new Map();
+    async function query(start, end) {
+      let logs;
       try {
-        transactionHashes = block.transactions.map((transaction) => hash(
-          typeof transaction === "string" ? transaction : transaction?.hash, "block transaction hash"));
-      } catch { throw new Error("canonical block transaction set is incomplete"); }
-      if (new Set(transactionHashes).size !== transactionHashes.length) {
-        throw new Error("canonical block transaction set is incomplete");
+        logs = await rpcCall("getLogs", () => client.getLogs({
+          fromBlock: `0x${start.toString(16)}`, toBlock: `0x${end.toString(16)}`,
+          address: configuredSplitter, topics: [QUOTE_SETTLED_TOPIC],
+        }));
+      } catch (error) {
+        if (start >= end || !isRangeLimitError(error)) {
+          throw Object.assign(new Error(`settlement log discovery failed for blocks ${start}-${end}: ${error?.message || error}`),
+            { cause: error });
+        }
+        const middle = start + (end - start) / 2n;
+        await query(start, middle);
+        await query(middle + 1n, end);
+        return;
+      }
+      if (!Array.isArray(logs)) throw new Error("settlement log discovery result is incomplete");
+      for (const log of logs) {
+        if (!log || !completeReceiptLog(log)) throw new Error("settlement log discovery result is incomplete");
+        if (address(log.address, "log address") !== configuredSplitter) {
+          throw new Error("settlement log discovery returned a log from another contract");
+        }
+        if (String(log.topics[0]).toLowerCase() !== configuredTopic) {
+          throw new Error("settlement log discovery returned an unrelated event topic");
+        }
+        const number = quantity(log.blockNumber, "log block number");
+        if (number < start || number > end) throw new Error("settlement log discovery returned an out-of-range log");
+        const identity = logIdentity(log);
+        const fingerprint = logFingerprint(log);
+        const previous = seen.get(identity);
+        if (previous !== undefined) {
+          // A duplicated but byte-identical log is a benign provider repeat; a duplicated
+          // identity with different content is a contradiction and fails closed.
+          if (previous !== fingerprint) throw new Error("settlement log discovery returned conflicting duplicate logs");
+          continue;
+        }
+        seen.set(identity, fingerprint);
+        found.push(log);
       }
     }
-    return { blockNumber: BigInt(number).toString(), blockHash: hash(block.hash, "block hash"),
-      parentHash: hash(block.parentHash, "block parent hash"), blockTimestamp: timestamp(block.timestamp),
-      ...(includeTransactions ? { transactionHashes } : {}) };
+    for (let start = from; start <= through; start += BigInt(logRangeLimit)) {
+      const end = start + BigInt(logRangeLimit) - 1n > through ? through : start + BigInt(logRangeLimit) - 1n;
+      await query(start, end);
+    }
+    // eth_getLogs makes no ordering guarantee across providers; the scanner sorts so that
+    // observation ordering is a function of the chain, not of the provider's response order.
+    found.sort((left, right) => {
+      const leftBlock = Number(left.blockNumber);
+      const rightBlock = Number(right.blockNumber);
+      return leftBlock === rightBlock ? logIndex(left) - logIndex(right) : leftBlock - rightBlock;
+    });
+    return found;
+  }
+
+  // Full canonical receipt enumeration for one block: unchanged from the pre-optimization
+  // scanner, and still the ONLY source of accepted settlement evidence.
+  async function canonicalMatchingLogs(block) {
+    const transactionCount = Number(await rpcCall("getBlockTransactionCount",
+      () => client.getBlockTransactionCount(Number(block.blockNumber))));
+    if (!Number.isSafeInteger(transactionCount) || transactionCount < 0) {
+      throw new Error("block transaction count RPC result is incomplete");
+    }
+    const receipts = await rpcCall("getBlockReceipts", () => client.getBlockReceipts(Number(block.blockNumber)));
+    if (transactionCount !== block.transactionHashes.length || !Array.isArray(receipts)
+        || receipts.length !== transactionCount) {
+      throw new Error("block receipt count RPC result is incomplete");
+    }
+    const receiptTransactionHashes = [];
+    const matches = [];
+    for (const receipt of receipts) {
+      if (!receipt || (!receiptSucceeded(receipt) && !receiptFailed(receipt)) || !Array.isArray(receipt.logs)
+          || receipt.logs.some((entry) => !completeReceiptLog(entry))) {
+        throw new Error("block receipts RPC result is incomplete");
+      }
+      try {
+        receiptTransactionHashes.push(hash(receipt.transactionHash, "receipt transaction hash"));
+        if (Number(receipt.blockNumber) !== Number(block.blockNumber)
+            || hash(receipt.blockHash, "receipt block hash") !== block.blockHash) {
+          throw new Error("block receipts RPC result is not canonical");
+        }
+      } catch (error) {
+        if (error.message === "block receipts RPC result is not canonical") throw error;
+        throw new Error("block receipts RPC result is incomplete");
+      }
+      for (const log of receipt.logs) {
+        if (hash(log.transactionHash, "log transaction hash") !== receiptTransactionHashes.at(-1)) {
+          throw new Error("block receipts RPC result is incomplete");
+        }
+        if (address(log.address, "log address") === configuredSplitter
+            && log.topics[0].toLowerCase() === configuredTopic) {
+          matches.push({ log, receipt });
+        }
+      }
+    }
+    const expectedTransactions = [...block.transactionHashes].sort();
+    const observedTransactions = [...receiptTransactionHashes].sort();
+    if (JSON.stringify(observedTransactions) !== JSON.stringify(expectedTransactions)) {
+      throw new Error("block receipt transaction set RPC result is incomplete");
+    }
+    return matches;
   }
 
   async function verify(log, blocks, suppliedReceipt) {
@@ -156,79 +352,121 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   }
 
   async function scanRange({ fromBlock, throughBlock } = {}) {
-    await assertChain();
-    const from = BigInt(fromBlock); const through = BigInt(throughBlock);
-    if (from < 0n || through < from) throw new TypeError("invalid scan range");
-    const canonicalBlocks = [];
-    const byNumber = new Map();
-    for (let number = from; number <= through; number += 1n) {
-      const block = await canonicalBlock(number, true);
-      const previous = canonicalBlocks.at(-1);
-      if (previous && block.parentHash !== previous.blockHash) throw new Error("canonical block parent ancestry is inconsistent");
-      canonicalBlocks.push(block); byNumber.set(block.blockNumber, block);
-    }
-    const logsWithReceipts = [];
-    for (const block of canonicalBlocks) {
-      const transactionCount = Number(await rpcCall("getBlockTransactionCount",
-        () => client.getBlockTransactionCount(Number(block.blockNumber))));
-      if (!Number.isSafeInteger(transactionCount) || transactionCount < 0) {
-        throw new Error("block transaction count RPC result is incomplete");
+    const stats = {};
+    const previousMeter = meter;
+    meter = stats;
+    const started = process.hrtime.bigint();
+    try {
+      await assertChain();
+      const from = BigInt(fromBlock); const through = BigInt(throughBlock);
+      if (from < 0n || through < from) throw new TypeError("invalid scan range");
+
+      // 1. Discovery: one strictly filtered eth_getLogs span (chunked only if the provider
+      //    refuses the width). This is an accelerator and an integrity probe, never the
+      //    evidence a settlement or a capacity release rests on.
+      const discovered = await discoverLogs(from, through);
+
+      // 2. Canonical headers for EVERY block in the range. record_scanner_range requires
+      //    jsonb_array_length(canonicalBlocks) = through - from + 1 with parentHash chaining,
+      //    so contiguous coverage cannot be proven with fewer headers.
+      const numbers = [];
+      for (let number = from; number <= through; number += 1n) numbers.push(number);
+      const fetched = await mapBounded(numbers, headerLanes, (number) => canonicalBlock(number));
+      const canonicalBlocks = [];
+      const byNumber = new Map();
+      for (const [index, block] of fetched.entries()) {
+        if (!block || block.blockNumber !== numbers[index].toString()) throw new Error("canonical block unavailable");
+        const previous = canonicalBlocks.at(-1);
+        if (previous && block.parentHash !== previous.blockHash) throw new Error("canonical block parent ancestry is inconsistent");
+        canonicalBlocks.push(block); byNumber.set(block.blockNumber, block);
       }
-      const receipts = await rpcCall("getBlockReceipts", () => client.getBlockReceipts(Number(block.blockNumber)));
-      if (transactionCount !== block.transactionHashes.length || !Array.isArray(receipts)
-          || receipts.length !== transactionCount) {
-        throw new Error("block receipt count RPC result is incomplete");
-      }
-      const receiptTransactionHashes = [];
-      for (const receipt of receipts) {
-        if (!receipt || (!receiptSucceeded(receipt) && !receiptFailed(receipt)) || !Array.isArray(receipt.logs)
-            || receipt.logs.some((entry) => !completeReceiptLog(entry))) {
-          throw new Error("block receipts RPC result is incomplete");
+
+      // 3. Reconcile discovery against the headers. A log sitting on a block hash that is not
+      //    the canonical one is evidence from an orphaned sibling block and is dropped, exactly
+      //    as the receipt path already drops it. A log the canonical header's own logsBloom
+      //    denies is a contradiction between two provider answers and fails closed.
+      const discoveredByBlock = new Map();
+      let nonCanonicalLogs = 0;
+      for (const log of discovered) {
+        const key = quantity(log.blockNumber, "log block number").toString();
+        const block = byNumber.get(key);
+        if (!block) throw new Error("settlement log discovery returned an out-of-range log");
+        if (hash(log.blockHash, "log block hash") !== block.blockHash) { nonCanonicalLogs += 1; continue; }
+        if (!mayHoldSettlement(block)) {
+          throw new Error("canonical block header contradicts settlement log discovery");
         }
-        try {
-          receiptTransactionHashes.push(hash(receipt.transactionHash, "receipt transaction hash"));
-          if (Number(receipt.blockNumber) !== Number(block.blockNumber)
-              || hash(receipt.blockHash, "receipt block hash") !== block.blockHash) {
-            throw new Error("block receipts RPC result is not canonical");
+        if (!discoveredByBlock.has(key)) discoveredByBlock.set(key, []);
+        discoveredByBlock.get(key).push(log);
+      }
+
+      // 4. Canonical enumeration for every block whose header bloom admits the event. Blocks the
+      //    bloom rejects are PROVEN to hold no QuoteSettled log (blooms have no false negatives),
+      //    so their no-match coverage rests on the same canonical header evidence as before and
+      //    never on an empty eth_getLogs answer.
+      const relevantBlocks = canonicalBlocks.filter(mayHoldSettlement);
+      const logsWithReceipts = [];
+      let discoveryOmissions = 0;
+      for (const block of relevantBlocks) {
+        const matches = await canonicalMatchingLogs(block);
+        // The receipt set is authoritative in both directions that matter. A log eth_getLogs
+        // reported that the receipts do not contain is an injection and fails closed; a log the
+        // receipts contain that eth_getLogs omitted is merely a lossy index, and the scanner
+        // still accepts it, because the bloom already forced this block's receipts to be read.
+        const canonicalIdentities = new Map(matches.map(({ log }) => [logIdentity(log), logFingerprint(log)]));
+        const discoveredIdentities = new Map((discoveredByBlock.get(block.blockNumber) || [])
+          .map((log) => [logIdentity(log), logFingerprint(log)]));
+        for (const [identity, fingerprint] of discoveredIdentities) {
+          if (canonicalIdentities.get(identity) !== fingerprint) {
+            throw new Error("settlement log discovery is inconsistent with canonical receipts");
           }
-        } catch (error) {
-          if (error.message === "block receipts RPC result is not canonical") throw error;
-          throw new Error("block receipts RPC result is incomplete");
         }
-        for (const log of receipt.logs) {
-          if (hash(log.transactionHash, "log transaction hash") !== receiptTransactionHashes.at(-1)) {
-            throw new Error("block receipts RPC result is incomplete");
-          }
-          if (address(log.address, "log address") === configuredSplitter
-              && log.topics[0].toLowerCase() === QUOTE_SETTLED_TOPIC.toLowerCase()) {
-            logsWithReceipts.push({ log, receipt });
-          }
+        discoveryOmissions += canonicalIdentities.size - discoveredIdentities.size;
+        logsWithReceipts.push(...matches);
+      }
+
+      const candidates = []; const anomalies = [];
+      for (const { log, receipt } of logsWithReceipts) {
+        try { candidates.push(await verify(log, byNumber, receipt)); }
+        catch (error) {
+          if (!(error instanceof InvalidSettlementEvidence)) throw error;
+          anomalies.push({ code: "INVALID_SETTLEMENT_EVIDENCE", txHash: HASH.test(log?.transactionHash || "") ? log.transactionHash.toLowerCase() : `0x${"0".repeat(64)}`,
+          logIndex: Number.isSafeInteger(Number(log?.index ?? log?.logIndex)) && Number(log?.index ?? log?.logIndex) >= 0 ? Number(log.index ?? log.logIndex) : 0,
+          blockNumber: String(log?.blockNumber ?? from), blockHash: HASH.test(log?.blockHash || "") ? log.blockHash.toLowerCase() : byNumber.get(String(log?.blockNumber))?.blockHash,
+          blockTimestamp: byNumber.get(String(log?.blockNumber))?.blockTimestamp ?? canonicalBlocks[0].blockTimestamp });
         }
       }
-      const expectedTransactions = [...block.transactionHashes].sort();
-      const observedTransactions = [...receiptTransactionHashes].sort();
-      if (JSON.stringify(observedTransactions) !== JSON.stringify(expectedTransactions)) {
-        throw new Error("block receipt transaction set RPC result is incomplete");
+
+      // 5. Re-read the range boundaries last: a canonical rewrite during the scan invalidates
+      //    the whole range rather than checkpointing half-reorged evidence.
+      const boundaries = [canonicalBlocks[0]];
+      if (canonicalBlocks.length > 1) boundaries.push(canonicalBlocks.at(-1));
+      for (const original of boundaries) {
+        const current = await canonicalBlock(original.blockNumber);
+        if (current.blockHash !== original.blockHash) throw new Error("canonical boundary changed during scan");
       }
-    }
-    const candidates = []; const anomalies = [];
-    for (const { log, receipt } of logsWithReceipts) {
-      try { candidates.push(await verify(log, byNumber, receipt)); }
-      catch (error) {
-        if (!(error instanceof InvalidSettlementEvidence)) throw error;
-        anomalies.push({ code: "INVALID_SETTLEMENT_EVIDENCE", txHash: HASH.test(log?.transactionHash || "") ? log.transactionHash.toLowerCase() : `0x${"0".repeat(64)}`,
-        logIndex: Number.isSafeInteger(Number(log?.index ?? log?.logIndex)) && Number(log?.index ?? log?.logIndex) >= 0 ? Number(log.index ?? log.logIndex) : 0,
-        blockNumber: String(log?.blockNumber ?? from), blockHash: HASH.test(log?.blockHash || "") ? log.blockHash.toLowerCase() : byNumber.get(String(log?.blockNumber))?.blockHash,
-        blockTimestamp: byNumber.get(String(log?.blockNumber))?.blockTimestamp ?? canonicalBlocks[0].blockTimestamp });
-      }
-    }
-    const boundaries = [canonicalBlocks[0]];
-    if (canonicalBlocks.length > 1) boundaries.push(canonicalBlocks.at(-1));
-    for (const original of boundaries) {
-      const current = await canonicalBlock(original.blockNumber);
-      if (current.blockHash !== original.blockHash) throw new Error("canonical boundary changed during scan");
-    }
-    return { canonicalBlocks, candidates, anomalies };
+
+      const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+      return {
+        canonicalBlocks: canonicalBlocks.map(checkpointShape),
+        candidates,
+        anomalies,
+        // Privacy-safe scan shape: counts and timings only, no wallet, quote or submission content.
+        rpcStats: Object.freeze({
+          rangeBlocks: canonicalBlocks.length,
+          rpcCalls: Object.values(stats).reduce((total, value) => total + value, 0),
+          getLogsCalls: stats.getLogs || 0,
+          headerCalls: stats.getBlock || 0,
+          receiptCalls: (stats.getBlockReceipts || 0) + (stats.getBlockTransactionCount || 0)
+            + (stats.getTransactionReceipt || 0),
+          relevantLogs: logsWithReceipts.length,
+          relevantBlocks: relevantBlocks.length,
+          discoveredLogs: discovered.length,
+          discoveryOmissions,
+          nonCanonicalLogs,
+          elapsedMs: Math.round(elapsedMs),
+        }),
+      };
+    } finally { meter = previousMeter; }
   }
 
   async function inspectTransaction(txHash) {
@@ -242,7 +480,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     const head = await getSafeHead();
     if (BigInt(receipt.blockNumber) > head) return { state: "unconfirmed" };
     const matching = (receipt.logs || []).filter((entry) => address(entry.address, "log address") === configuredSplitter
-      && entry.topics?.[0]?.toLowerCase() === QUOTE_SETTLED_TOPIC.toLowerCase());
+      && entry.topics?.[0]?.toLowerCase() === configuredTopic);
     if (matching.length !== 1) return { state: "mismatched" };
     try { return { state: "matched", candidate: await verify(matching[0], new Map()) }; }
     catch (error) {
@@ -272,7 +510,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   }
 
   return Object.freeze({ chainId: configuredChain, splitter: configuredSplitter, confirmationDepth: depth, overlap: trailing,
-    maxBlockRange: rangeLimit,
+    maxBlockRange: rangeLimit, maxLogRange: logRangeLimit, headerConcurrency: headerLanes,
     getCanonicalHead, getSafeHead, scanRange, inspectTransaction, revalidateMonitor });
 }
 

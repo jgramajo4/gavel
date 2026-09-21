@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { Interface } = require("ethers");
 const { QUOTE_SETTLED_EVENT_ABI } = require("@gavel/gate");
+const { bloomAdd, bloomHex } = require("./support/base-rpc-mock");
 const { createBaseSettlementAdapter } = require("../src/gate/base-settlement-adapter");
 const { SettlementRequestError, createSettlementService } = require("../src/gate/settlement-service");
 const { QuoteExpiredError } = require("../src/gate/store-errors");
@@ -19,23 +20,49 @@ function chainLog(overrides = {}) {
   return { address: SPLITTER, topics: encoded.topics, data: encoded.data, transactionHash: TX, index: 2,
     blockNumber: 10, blockHash: BLOCK_HASH, ...overrides };
 }
+// The synthetic chain's ground truth: block 10 carries exactly one QuoteSettled log.
+// getBlockHeader's logsBloom and getLogs are derived from that truth, while getBlockReceipts /
+// getTransactionReceipt are the provider views a test can corrupt. That separation is what lets
+// a test model "the provider lies about receipts" without also silently rewriting the header.
+function trueSettlementLogs(number) { return Number(number) === 10 ? [chainLog()] : []; }
+function blockBloom(number, logs = trueSettlementLogs) {
+  const bloom = new Uint8Array(256);
+  for (const entry of logs(number)) {
+    bloomAdd(bloom, entry.address);
+    for (const topic of entry.topics) bloomAdd(bloom, topic);
+  }
+  return bloomHex(bloom);
+}
 function rpc(overrides = {}) {
   const log = chainLog();
-  return {
+  const base = {
     async getChainId() { return 8453; },
     async getBlockNumber() { return 12; },
     async getBlock(number) { return { number: Number(number), hash: rpcBlockHash(number),
       parentHash: rpcBlockHash(Number(number) - 1), timestamp: 100,
       transactions: Number(number) === 10 ? [TX] : [] }; },
     async getBlockTransactionCount(number) { return Number(number) === 10 ? 1 : 0; },
-    async getLogs() { return [log]; },
     async getBlockReceipts(number) {
       return Number(number) === 10 ? [await this.getTransactionReceipt(TX)] : [];
     },
     async getTransactionReceipt() { return { status: 1, transactionHash: TX, blockNumber: 10, blockHash: BLOCK_HASH, logs: [log] }; },
     async getTransaction() { return { hash: TX }; },
-    ...overrides,
   };
+  const client = { ...base, ...overrides };
+  // settlementLogs redefines the chain's ground truth for a test; it is not a client method.
+  const truth = overrides.settlementLogs || trueSettlementLogs;
+  delete client.settlementLogs;
+  if (!overrides.getBlockHeader) {
+    client.getBlockHeader = async (number) => ({ ...(await client.getBlock(number)), logsBloom: blockBloom(number, truth) });
+  }
+  if (!overrides.getLogs) {
+    client.getLogs = async ({ fromBlock, toBlock }) => {
+      const found = [];
+      for (let number = Number(fromBlock); number <= Number(toBlock); number += 1) found.push(...truth(number));
+      return found;
+    };
+  }
+  return client;
 }
 function quote(overrides = {}) {
   return { quoteId: QUOTE_ID, payer: PAYER, voter: VOTER, attentionAmount: "1000000", feeAmount: "250000",
@@ -177,9 +204,10 @@ test("7. Base adapter records malformed or failed target receipt evidence as ano
   for (const client of [
     rpc({ getTransactionReceipt: async () => ({ status: 0, transactionHash: TX,
       blockNumber: 10, blockHash: BLOCK_HASH, logs: [chainLog()] }) }),
-    rpc({ getTransactionReceipt: async () => ({ status: 1, transactionHash: TX,
-      blockNumber: 10, blockHash: BLOCK_HASH,
-      logs: [chainLog({ data: "0x12" })] }) }),
+    rpc({ settlementLogs: (number) => (Number(number) === 10 ? [chainLog({ data: "0x12" })] : []),
+      getTransactionReceipt: async () => ({ status: 1, transactionHash: TX,
+        blockNumber: 10, blockHash: BLOCK_HASH,
+        logs: [chainLog({ data: "0x12" })] }) }),
   ]) {
     const adapter = createBaseSettlementAdapter({ client, chainId: 8453, splitter: SPLITTER });
     const result = await adapter.scanRange({ fromBlock: 10n, throughBlock: 10n });
@@ -246,7 +274,6 @@ test("7d. Base adapter aborts when a range boundary changes during collection", 
   let blockReads = 0;
   const adapter = createBaseSettlementAdapter({
     client: rpc({
-      getLogs: async () => [],
       getBlock: async (number) => {
         blockReads += 1;
         if (Number(number) === 10) return { number: 10, hash: blockReads > 2 ? H("b") : H("9"),

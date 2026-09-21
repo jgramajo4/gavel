@@ -126,6 +126,15 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
           gauge("gate_reservation_released_current", result?.releasedRows);
           gauge("gate_reservation_consumed_current", result?.consumedRows);
           gauge("gate_reservation_oldest_pending_age_seconds", result?.oldestPendingAgeSeconds);
+          // Scanner RPC shape. Counts and timings only: no wallet, quote or submission content.
+          count("gate_scanner_rpc_calls_total", result?.rpcCalls);
+          count("gate_scanner_rpc_calls_total_get_logs", result?.getLogsCalls);
+          count("gate_scanner_rpc_calls_total_headers", result?.headerCalls);
+          count("gate_scanner_rpc_calls_total_receipts", result?.receiptCalls);
+          gauge("gate_scanner_range_blocks", result?.scanned);
+          gauge("gate_scanner_relevant_blocks", result?.relevantBlocks);
+          gauge("gate_scanner_relevant_logs", result?.relevantLogs);
+          gauge("gate_scanner_elapsed_ms", result?.scanElapsedMs);
         }
         if (job === "monitor") {
           count("gate_settlement_reorg_total", result?.reorged, { phase: "post_acceptance", source: "monitor" });

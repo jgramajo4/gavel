@@ -230,8 +230,19 @@ function createSettlementService({ store, adapter, lifecycleReader, lifecycleTim
     if (Number(persisted?.unknownQuotes) > 0) await operatorAlert({ code: "UNKNOWN_QUOTE", source: "scanner_overlap" });
     if (Number(persisted?.mismatches) > 0) await operatorAlert({ code: "MISMATCHED_SETTLEMENT", source: "scanner_overlap" });
     accepted += await settleDurableObservations();
+    // Privacy-safe scanner performance shape: counts and elapsed time only.
+    const rpc = scanned.rpcStats && typeof scanned.rpcStats === "object" ? scanned.rpcStats : {};
+    const metric = (value) => (Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : undefined);
+    const rpcTelemetry = {};
+    for (const [field, value] of [["rpcCalls", rpc.rpcCalls], ["getLogsCalls", rpc.getLogsCalls],
+      ["headerCalls", rpc.headerCalls], ["receiptCalls", rpc.receiptCalls], ["relevantLogs", rpc.relevantLogs],
+      ["relevantBlocks", rpc.relevantBlocks], ["scanElapsedMs", rpc.elapsedMs]]) {
+      const numeric = metric(value);
+      if (numeric !== undefined) rpcTelemetry[field] = numeric;
+    }
     return reservationTelemetry({
       scanned: scanned.canonicalBlocks.length,
+      ...rpcTelemetry,
       accepted,
       anomalies: Number(persisted?.unknownQuotes || 0) + Number(persisted?.mismatches || 0),
       unknownQuotes: Number(persisted?.unknownQuotes || 0),
