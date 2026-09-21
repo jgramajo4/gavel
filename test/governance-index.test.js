@@ -454,7 +454,7 @@ test("history fetch honors Retry-After on 429", async () => {
   const client = new IndexApiClient({
     baseUrl: "http://index.example",
     sleep: async (ms) => { sleeps.push(ms); },
-    random: () => 1,
+    random: () => 0.5,
     fetch: async (url) => {
       if (url.includes("/sync-status")) return jsonOk(freshSources());
       if (url.includes("/history")) {
@@ -491,10 +491,39 @@ test("repeated 429s exhaust the retry budget with a rate-limit error", async () 
   const error = await client.fetchHistory("nouns", ADDRESS).catch((caught) => caught);
   assert.ok(error instanceof IndexRateLimitedError);
   assert.equal(error.code, "GAVEL_INDEX_RATE_LIMITED");
-  assert.match(error.message, /public history source is temporarily rate-limited/i);
+  assert.match(error.message, /history source is temporarily rate-limited/i);
   assert.match(error.message, /no vote can be prepared until history sync completes/i);
+  assert.doesNotMatch(error.message, /GAVEL_INDEX_API_URL/);
   assert.equal(historyCalls, 3);
   assert.equal(sleeps.length, 2);
+});
+
+test("a Retry-After wait does not abort later attempts with a reused timeout signal", async () => {
+  const { IndexApiClient, IndexRateLimitedError } = require("../packages/governance-index");
+  const signals = [];
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    requestTimeoutMs: 40,
+    baseBackoffMs: 50,
+    maxRetries: 2,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    random: () => 0.5,
+    fetch: async (url, init) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (init?.signal?.aborted) {
+        const error = new Error("The operation was aborted");
+        error.name = "TimeoutError";
+        throw error;
+      }
+      signals.push(init.signal);
+      return http429("0.08");
+    },
+  });
+  const error = await client.fetchHistory("nouns", ADDRESS).catch((caught) => caught);
+  assert.ok(error instanceof IndexRateLimitedError, error);
+  assert.doesNotMatch(String(error.message), /aborted|timeout/i);
+  assert.equal(signals.length, 3);
+  assert.equal(new Set(signals).size, 3);
 });
 
 test("a rate-limited later history page does not return partial history", async () => {
@@ -526,4 +555,167 @@ test("a rate-limited later history page does not return partial history", async 
   }, (caught) => caught);
   assert.ok(error instanceof IndexRateLimitedError);
   assert.equal(returned, null);
+});
+
+function proposalDoc(id) {
+  return {
+    id: String(id), contentHash: "ab".repeat(32), title: `Proposal ${id}`, description: "body",
+    proposer: ADDRESS, state: "ACTIVE", outcome: "ACTIVE", createdBlock: "0",
+    createdAt: "2023-11-14T22:13:20.000Z", startBlock: "0", endBlock: "0",
+    quorumVotes: "1", forVotes: "1", againstVotes: "0", abstainVotes: "0",
+    actions: [], dao: "nouns", chainId: 1,
+  };
+}
+
+function voteEvent(proposalId, logIndex) {
+  return {
+    chainId: 1, proposalId: String(proposalId), voter: ADDRESS, support: "FOR", reason: null, voteWeight: "1",
+    blockNumber: String(10 + logIndex), timestamp: "2023-11-14T22:13:20.000Z",
+    transactionHash: logIndex ? TX2 : TX, logIndex,
+    sourceKind: "nouns-subgraph", sourceEndpoint: "https://subgraph.example", observedHead: "10",
+    entityId: `vote-${proposalId}-${logIndex}`,
+  };
+}
+
+test("history fetch honors HTTP-date Retry-After", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const now = Date.parse("Wed, 21 Oct 2015 07:28:00 GMT");
+  const sleeps = [];
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    now: () => new Date(now),
+    sleep: async (ms) => { sleeps.push(ms); },
+    random: () => 0.5,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        if (sleeps.length === 0) return http429("Wed, 21 Oct 2015 07:28:04 GMT");
+        return jsonOk({ items: [], nextCursor: null });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  await client.fetchHistory("nouns", ADDRESS);
+  assert.deepEqual(sleeps, [4_000]);
+});
+
+test("malformed Retry-After falls back to bounded exponential backoff", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const client = new IndexApiClient({ baseUrl: "http://index.example", random: () => 0.5, fetch: async () => jsonOk({}) });
+  assert.equal(client.retryDelayMs(http429("nope"), 0), 250);
+  assert.equal(client.retryDelayMs(http429(""), 1), 500);
+});
+
+test("Retry-After of zero or a past HTTP-date still waits the base backoff", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const now = Date.parse("Wed, 21 Oct 2015 07:28:00 GMT");
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    now: () => new Date(now),
+    random: () => 0.5,
+    fetch: async () => jsonOk({}),
+  });
+  assert.equal(client.retryDelayMs(http429("0"), 0), 250);
+  assert.equal(client.retryDelayMs(http429("Wed, 21 Oct 2015 07:27:00 GMT"), 0), 250);
+});
+
+test("a non-429 index error fails immediately without retrying", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const sleeps = [];
+  let historyCalls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        historyCalls += 1;
+        return { ok: false, status: 503, headers: { get() { return null; } }, async json() { return {}; } };
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  await assert.rejects(client.fetchHistory("nouns", ADDRESS), /HTTP 503/);
+  assert.equal(historyCalls, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("a later history page can recover from 429 without duplicating earlier votes", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const first = voteEvent("1", 0);
+  const second = voteEvent("2", 1);
+  let page2Calls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    pageSize: 1,
+    sleep: async () => {},
+    random: () => 0.5,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/proposals/")) return jsonOk(proposalDoc(url.split("/proposals/")[1]));
+      if (url.includes("/history") && !url.includes("cursor=")) return jsonOk({ items: [first], nextCursor: "page-2" });
+      if (url.includes("/history")) {
+        page2Calls += 1;
+        if (page2Calls === 1) return http429("1");
+        return jsonOk({ items: [second], nextCursor: null });
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  const history = await client.fetchHistory("nouns", ADDRESS);
+  assert.equal(history.voteCount, 2);
+  assert.deepEqual(history.votes.map((vote) => vote.proposalId), ["1", "2"]);
+  assert.deepEqual(history.votes.map((vote) => vote.source.entityId), ["vote-1-0", "vote-2-1"]);
+  assert.equal(page2Calls, 2);
+});
+
+test("exponential backoff jitter is capped after the spread is applied", async () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    baseBackoffMs: 250,
+    maxBackoffMs: 1_000,
+    maxRetryAfterMs: 1_000,
+    random: () => 1,
+    fetch: async () => jsonOk({}),
+  });
+  assert.equal(client.retryDelayMs(http429(), 10), 1_000);
+  assert.equal(client.retryDelayMs(http429("7"), 0), 1_000);
+});
+
+test("history sync stops with a rate-limit error when the operation deadline would be exceeded", async () => {
+  const { IndexApiClient, IndexRateLimitedError } = require("../packages/governance-index");
+  let now = 1_700_000_000_000;
+  const sleeps = [];
+  let historyCalls = 0;
+  const client = new IndexApiClient({
+    baseUrl: "http://index.example",
+    operationDeadlineMs: 400,
+    baseBackoffMs: 250,
+    maxRetries: 5,
+    now: () => new Date(now),
+    sleep: async (ms) => { sleeps.push(ms); now += ms; },
+    random: () => 0.5,
+    fetch: async (url) => {
+      if (url.includes("/sync-status")) return jsonOk(freshSources());
+      if (url.includes("/history")) {
+        historyCalls += 1;
+        return http429();
+      }
+      throw new Error(`unexpected ${url}`);
+    },
+  });
+  const error = await client.fetchHistory("nouns", ADDRESS).catch((caught) => caught);
+  assert.ok(error instanceof IndexRateLimitedError);
+  assert.equal(historyCalls, 2);
+  assert.deepEqual(sleeps, [250]);
+});
+
+test("retry configuration is validated", () => {
+  const { IndexApiClient } = require("../packages/governance-index");
+  const fetch = async () => jsonOk({});
+  assert.throws(() => new IndexApiClient({ fetch, maxRetries: -1 }), /maxRetries/);
+  assert.throws(() => new IndexApiClient({ fetch, baseBackoffMs: 0 }), /baseBackoffMs/);
+  assert.throws(() => new IndexApiClient({ fetch, baseBackoffMs: 500, maxBackoffMs: 100 }), /maxBackoffMs/);
+  assert.throws(() => new IndexApiClient({ fetch, requestTimeoutMs: Number.NaN }), /requestTimeoutMs/);
 });

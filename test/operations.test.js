@@ -25,7 +25,7 @@ test("classifies every governance index freshness refusal as stale data", () => 
 });
 
 test("exhausted index rate limits are retryable infrastructure, not a software defect", () => {
-  const error = new Error("The public history source is temporarily rate-limited. History sync did not complete, so no vote can be prepared until history sync completes. Try again in a moment.");
+  const error = new Error("The history source is temporarily rate-limited. Try again in a moment. No vote can be prepared until history sync completes.");
   error.code = "GAVEL_INDEX_RATE_LIMITED";
   const failure = classifyOperationalFailure("history", error);
   assert.equal(failure.category, "RETRYABLE_INFRASTRUCTURE");

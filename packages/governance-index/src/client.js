@@ -12,6 +12,11 @@ const DEFAULT_MAX_RETRIES = 5;
 const DEFAULT_BASE_BACKOFF_MS = 250;
 const DEFAULT_MAX_BACKOFF_MS = 8_000;
 const DEFAULT_MAX_RETRY_AFTER_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+// Caps a whole history sync (pages + proposal joins + 429 waits). Long enough
+// for a few rate-limit pauses, short enough that a busy index cannot hang the
+// CLI for tens of minutes.
+const DEFAULT_OPERATION_DEADLINE_MS = 90_000;
 
 class IndexStaleError extends Error {
   constructor(message) { super(message); this.name = "IndexStaleError"; this.code = "GAVEL_INDEX_STALE"; }
@@ -25,7 +30,19 @@ class IndexRateLimitedError extends Error {
   }
 }
 
-const RATE_LIMITED_MESSAGE = "The public history source is temporarily rate-limited. History sync did not complete, so no vote can be prepared until history sync completes. Try again in a moment.";
+const RATE_LIMITED_MESSAGE = "The history source is temporarily rate-limited. Try again in a moment. No vote can be prepared until history sync completes.";
+
+function positiveNumber(value, name) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) throw new RangeError(`${name} must be a positive number`);
+  return n;
+}
+
+function nonNegativeInteger(value, name) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) throw new RangeError(`${name} must be a non-negative integer`);
+  return n;
+}
 
 class IndexApiClient {
   constructor(options = {}) {
@@ -48,14 +65,19 @@ class IndexApiClient {
     this.now = options.now || (() => new Date());
     this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.random = options.random || Math.random;
-    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
-    this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
-    this.maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.maxRetries = nonNegativeInteger(options.maxRetries ?? DEFAULT_MAX_RETRIES, "maxRetries");
+    this.baseBackoffMs = positiveNumber(options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS, "baseBackoffMs");
+    this.maxBackoffMs = positiveNumber(options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS, "maxBackoffMs");
+    this.maxRetryAfterMs = positiveNumber(options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS, "maxRetryAfterMs");
+    this.requestTimeoutMs = positiveNumber(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, "requestTimeoutMs");
+    this.operationDeadlineMs = positiveNumber(options.operationDeadlineMs ?? DEFAULT_OPERATION_DEADLINE_MS, "operationDeadlineMs");
+    if (this.maxBackoffMs < this.baseBackoffMs) throw new RangeError("maxBackoffMs must be >= baseBackoffMs");
+    if (this.maxRetryAfterMs < this.baseBackoffMs) throw new RangeError("maxRetryAfterMs must be >= baseBackoffMs");
     // Recorded provenance is origin-only: a private endpoint's path and query
     // never reach a history document.
     this.publicBaseUrl = sanitizeEndpoint(this.baseUrl);
     this._freshness = new Map();
+    this._deadlineAt = null;
   }
 
   static dao(value) {
@@ -64,32 +86,59 @@ class IndexApiClient {
     return dao;
   }
 
-  retryDelayMs(response, attempt) {
+  parseRetryAfterMs(response) {
     const raw = typeof response.headers?.get === "function" ? response.headers.get("retry-after") : null;
-    if (raw != null && raw !== "") {
-      const trimmed = String(raw).trim();
-      let delayMs = null;
-      if (/^\d+(\.\d+)?$/.test(trimmed)) delayMs = Number(trimmed) * 1000;
-      else {
-        const at = Date.parse(trimmed);
-        if (Number.isFinite(at)) delayMs = at - this.now().getTime();
-      }
-      if (delayMs != null && Number.isFinite(delayMs)) {
-        return Math.min(this.maxRetryAfterMs, Math.max(0, delayMs));
-      }
+    if (raw == null || raw === "") return null;
+    const trimmed = String(raw).trim();
+    if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed) * 1000;
+    const at = Date.parse(trimmed);
+    if (Number.isFinite(at)) return at - this.now().getTime();
+    return null;
+  }
+
+  retryDelayMs(response, attempt) {
+    const parsed = this.parseRetryAfterMs(response);
+    let delay;
+    let cap;
+    if (parsed != null && Number.isFinite(parsed)) {
+      delay = parsed * (0.9 + 0.2 * this.random());
+      cap = this.maxRetryAfterMs;
+    } else {
+      delay = this.baseBackoffMs * (2 ** attempt) * (0.5 + this.random());
+      cap = this.maxBackoffMs;
     }
-    const capped = Math.min(this.maxBackoffMs, this.baseBackoffMs * (2 ** attempt));
-    return capped * (0.5 + this.random());
+    return Math.min(cap, Math.max(this.baseBackoffMs, delay));
+  }
+
+  assertWithinDeadline(upcomingDelayMs = 0) {
+    if (this._deadlineAt == null) return;
+    if (this.now().getTime() + upcomingDelayMs >= this._deadlineAt) {
+      throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
+    }
+  }
+
+  async runOperation(fn) {
+    if (this._deadlineAt != null) return fn();
+    this._deadlineAt = this.now().getTime() + this.operationDeadlineMs;
+    try {
+      return await fn();
+    } finally {
+      this._deadlineAt = null;
+    }
   }
 
   async request(path) {
     const url = `${this.baseUrl}${path}`;
-    const init = { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) };
     const override = this.isDefaultEndpoint ? "; set GAVEL_INDEX_API_URL to read a different index" : "";
     for (let attempt = 0; ; attempt++) {
+      this.assertWithinDeadline();
       let response;
       try {
-        response = await this.fetch(url, init);
+        // Fresh timeout per attempt so a Retry-After sleep cannot abort the next request.
+        response = await this.fetch(url, {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
+        });
       } catch (error) {
         // Name the endpoint that failed. The default one is chosen silently, so a
         // bare transport error leaves the caller nothing to act on. The sanitized
@@ -97,11 +146,11 @@ class IndexApiClient {
         throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
       }
       if (response.status === 429) {
-        if (attempt < this.maxRetries) {
-          await this.sleep(this.retryDelayMs(response, attempt));
-          continue;
-        }
-        throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
+        if (attempt >= this.maxRetries) throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);
+        const delay = this.retryDelayMs(response, attempt);
+        this.assertWithinDeadline(delay);
+        await this.sleep(delay);
+        continue;
       }
       if (!response.ok) throw new Error(`Governance index HTTP ${response.status} from ${this.publicBaseUrl}`);
       return response.json();
@@ -139,13 +188,16 @@ class IndexApiClient {
   }
 
   async fetchProposal(dao, id) {
-    const daoId = IndexApiClient.dao(dao);
-    if (!/^\d+$/.test(String(id)) || String(id).length > 78) throw new TypeError("invalid proposal id");
-    await this.assertFresh(daoId);
-    return this.request(`/v1/daos/${daoId}/proposals/${id}`);
+    return this.runOperation(async () => {
+      const daoId = IndexApiClient.dao(dao);
+      if (!/^\d+$/.test(String(id)) || String(id).length > 78) throw new TypeError("invalid proposal id");
+      await this.assertFresh(daoId);
+      return this.request(`/v1/daos/${daoId}/proposals/${id}`);
+    });
   }
 
   async fetchHistory(dao, voter) {
+    return this.runOperation(async () => {
     const daoId = IndexApiClient.dao(dao);
     const freshness = await this.assertFresh(daoId);
     const address = getAddress(voter);
@@ -203,6 +255,7 @@ class IndexApiClient {
       source: { kind: "gavel-governance-index", endpoint: this.publicBaseUrl, subgraphBlock: freshness.finalizedHead },
       voteCount: votes.length,
       votes,
+    });
     });
   }
 }

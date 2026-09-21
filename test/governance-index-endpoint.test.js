@@ -151,18 +151,22 @@ test("CLI history does not persist a partial artifact after a rate-limited index
   const { server, url } = await startRateLimitedIndex();
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-index-429-"));
   t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
-  const output = path.join(temporary, "history.json");
-  const dataDir = path.join(temporary, "state");
+  const env = { ...process.env, GAVEL_INDEX_API_URL: url };
+  delete env.GAVEL_DATA_DIR;
   await assert.rejects(
-    execFileAsync(process.execPath, [cli, "history", VOTER, "--dao", "nouns", "--output", output], {
-      cwd: temporary, encoding: "utf8",
-      env: { ...process.env, GAVEL_INDEX_API_URL: url, GAVEL_DATA_DIR: dataDir },
+    execFileAsync(process.execPath, [cli, "history", VOTER, "--dao", "nouns"], {
+      cwd: temporary, encoding: "utf8", env,
     }),
-    (error) => /public history source is temporarily rate-limited/.test(error.stderr)
-      && /no vote can be prepared until history sync completes/.test(error.stderr),
+    (error) => {
+      const text = `${error.stderr || ""}\n${error.message || ""}`;
+      return /history source is temporarily rate-limited/i.test(text)
+        && /no vote can be prepared until history sync completes/i.test(text)
+        && !/GAVEL_INDEX_API_URL/.test(text);
+    },
   );
-  assert.equal(fs.existsSync(output), false);
-  assert.equal(fs.existsSync(path.join(dataDir, "nouns", `${VOTER.toLowerCase()}.json`)), false);
+  const defaultHistory = path.join(temporary, "data", "private", "nouns", `${VOTER.toLowerCase()}.json`);
+  assert.equal(fs.existsSync(defaultHistory), false);
+  assert.equal(fs.existsSync(path.join(temporary, "data", "private")), false);
 });
 
 test("the TUI default index endpoint matches the client's", () => {
