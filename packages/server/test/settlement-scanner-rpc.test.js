@@ -343,18 +343,21 @@ test("18. concurrency is bounded and never exceeds the configured limit", async 
 });
 
 test("19. a concurrent failure reports the lowest-indexed block, matching sequential scan order", async () => {
-  // Two blocks are broken. The sequential scanner would have raised the earlier one; concurrency
-  // must not make which error surfaces depend on scheduling.
+  // Two blocks are broken, and the EARLIER one is deliberately made to fail LATER, so completion
+  // order is the opposite of request order. The sequential scanner would always have raised the
+  // earlier block's error; concurrency must not make that depend on scheduling.
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const h = harness({ from: 1_000n, through: 1_049n,
       overrides: { async getBlockHeader(number) {
-        const header = await createCountingClient(h.chain).client.getBlockHeader(number);
-        if (Number(number) === 1_010) return { ...header, hash: "not-a-hash" };
-        if (Number(number) === 1_040) return null;
-        return header;
+        if (Number(number) === 1_010) {
+          await new Promise((resolve) => { setTimeout(resolve, 40); });
+          throw new Error("late failure on the earlier block");
+        }
+        if (Number(number) === 1_040) throw new Error("immediate failure on the later block");
+        return createCountingClient(h.chain).client.getBlockHeader(number);
       } } });
-    await assert.rejects(h.scan(), /block hash must be bytes32/,
-      "the earlier broken block must always be the reported failure");
+    await assert.rejects(h.scan(), /late failure on the earlier block/,
+      "the earlier broken block must be reported even though it failed last");
   }
 });
 
