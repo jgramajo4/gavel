@@ -265,3 +265,45 @@ test("Gate packaging is isolated from the existing index compose and exposes one
     assert.match(runbook.toLowerCase(), new RegExp(required));
   }
 });
+
+test("scanner header reads bypass the provider cache and encode block tags as canonical QUANTITY", async () => {
+  const { createRpcClient } = require("../bin/gavel-server");
+  const sends = [];
+  const performs = [];
+  const client = createRpcClient("http://rpc.invalid", "8453", {
+    async send(method, params) {
+      sends.push([method, params]);
+      if (method === "eth_getBlockByNumber") return { number: params[0], hash: `0x${"1".repeat(64)}` };
+      return null;
+    },
+    // getBlockHeader must NOT reach any of AbstractProvider's cached getBlock plumbing.
+    async getBlock(...rest) { performs.push(rest); return null; },
+    async _perform(request) { performs.push(request); return null; },
+  });
+
+  await client.getBlockHeader(36_000_000);
+  // A raw send: AbstractProvider caches getBlock results for cacheTimeout (250 ms), which would
+  // serve the scanner's end-of-scan boundary re-read from cache and make its reorg check vacuous.
+  assert.deepEqual(performs, []);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0][0], "eth_getBlockByNumber");
+  assert.equal(sends[0][1][1], false, "transaction hashes only, never full transaction objects");
+
+  // JSON-RPC QUANTITY forbids leading zeros; toBeHex pads to whole bytes and go-ethereum rejects
+  // the result. Every current Base height is an odd number of nibbles, so this always mattered.
+  for (const [input, expected] of [[36_000_000, "0x2255100"], [1, "0x1"], [10, "0xa"], [0, "0x0"]]) {
+    sends.length = 0;
+    await client.getBlockHeader(input);
+    assert.equal(sends[0][1][0], expected);
+    assert.doesNotMatch(sends[0][1][0], /^0x0./, "QUANTITY must not carry a leading zero");
+  }
+
+  // The two sibling raw reads the scanner makes per block share the same encoding requirement.
+  sends.length = 0;
+  await client.getBlockTransactionCount(36_000_000);
+  await client.getBlockReceipts(36_000_000);
+  assert.deepEqual(sends.map(([method, params]) => [method, params[0]]), [
+    ["eth_getBlockTransactionCountByNumber", "0x2255100"],
+    ["eth_getBlockReceipts", "0x2255100"],
+  ]);
+});

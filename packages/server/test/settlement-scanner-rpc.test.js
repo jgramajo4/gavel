@@ -243,6 +243,11 @@ test("14. a failed settlement transaction is still an anomaly, with a decimal bl
   // Receipts carry hex quantities; observations persist as numeric(78,0).
   assert.match(String(result.anomalies[0].blockNumber), /^\d{1,78}$/);
   assert.equal(result.anomalies[0].blockNumber, "1005");
+  // main resolved this through a decimal-keyed map with a hex key, silently falling back to the
+  // FIRST block's timestamp, which the stores then reject as not matching its canonical block.
+  assert.equal(result.anomalies[0].blockTimestamp.valueOf(),
+    result.canonicalBlocks.find((item) => item.blockNumber === "1005").blockTimestamp.valueOf());
+  assert.equal(result.anomalies[0].blockHash, h.chain.blocks.get("1005").hash);
   assert.equal(result.canonicalBlocks.length, 10);
 });
 
@@ -371,7 +376,7 @@ test("20. a chain identity mismatch aborts before any block work", async () => {
 test("21. hung header or receipt reads time out and abort the range", async () => {
   const hungHeader = harness({ from: 1_000n, through: 1_009n, options: { rpcTimeoutMs: 20 },
     overrides: { getBlockHeader() { return new Promise(() => {}); } } });
-  await assert.rejects(hungHeader.scan(), /Base RPC getBlock timed out/);
+  await assert.rejects(hungHeader.scan(), /Base RPC getBlockHeader timed out/);
 
   const hungReceipts = harness({ from: 1_000n, through: 1_009n, options: { rpcTimeoutMs: 20 },
     overrides: { getBlockReceipts() { return new Promise(() => {}); } } });

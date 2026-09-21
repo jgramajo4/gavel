@@ -201,7 +201,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
    * cache while still going through the batching queue.
    */
   async function canonicalBlock(number, includeTransactions = false) {
-    const header = await rpcCall("getBlock", () => client.getBlockHeader(Number(number)));
+    const header = await rpcCall("getBlockHeader", () => client.getBlockHeader(Number(number)));
     // A missing, mismatched or unparseable block number is all one condition, reported with the
     // same message the sequential scanner used, rather than leaking a validator TypeError.
     let reported;
@@ -395,7 +395,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
       rpcStats: Object.freeze({
         rangeBlocks: canonicalBlocks.length,
         rpcMethodCalls: Object.values(stats).reduce((total, value) => total + value, 0),
-        headerMethodCalls: stats.getBlock || 0,
+        headerMethodCalls: stats.getBlockHeader || 0,
         receiptMethodCalls: (stats.getBlockReceipts || 0) + (stats.getBlockTransactionCount || 0)
           + (stats.getTransactionReceipt || 0),
         logQueryMethodCalls: 0,
