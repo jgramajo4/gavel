@@ -97,6 +97,7 @@ test("Gate privilege audit has one exact migration-matched table matrix", () => 
     proposal_snapshots: ["SELECT", "INSERT"],
     quotes: ["SELECT", "INSERT", "UPDATE"],
     rate_limit_events: ["SELECT"],
+    relay_attempts: [],
     sender_blocks: ["SELECT"],
     settlement_cursors: ["SELECT", "INSERT", "UPDATE"],
     settlement_scan_blocks: [],

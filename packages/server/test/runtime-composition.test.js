@@ -772,7 +772,11 @@ function relayServices() {
   const input = services();
   // A raw relayer key broadcasts through the Base provider this process
   // already holds; it never opens an endpoint of its own.
-  input.baseClient = { ...input.baseClient, provider: { getTransactionCount: async () => 0 } };
+  input.baseClient = { ...input.baseClient, provider: {
+    getTransactionCount: async () => 0,
+    call: async () => "0x",
+    broadcastTransaction: async () => ({ hash: `0x${"ab".repeat(32)}` }),
+  } };
   return input;
 }
 
@@ -805,6 +809,7 @@ test("a configured relayer composes the relay service from the attested deployme
   assert.equal(runtime.relayService, relayService);
   const [, relayOptions] = calls.find(([kind]) => kind === "relay");
   assert.equal(relayOptions.relayer.address, RELAYER_ADDRESS);
+  assert.equal(relayOptions.relayStore, input.store);
   assert.equal(relayOptions.submissionService, input.submissionService);
   assert.deepEqual(relayOptions.deployment, {
     chainId: "8453", splitter: SPLITTER, token: CANONICAL_BASE_USDC.toLowerCase(), quoteSigner: SIGNER,

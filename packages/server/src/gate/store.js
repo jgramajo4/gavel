@@ -77,6 +77,35 @@ function publicIdFrom(value) {
 }
 function sameTimestamp(a, b) { return new Date(a).valueOf() === new Date(b).valueOf(); }
 function invariant(condition, message) { if (!condition) throw new Error(message); }
+function relayClaimToken(value) {
+  const token = positiveBigint(value, "claimToken");
+  return token;
+}
+function rawTransaction(value) {
+  if (typeof value !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(value)) {
+    throw new TypeError("rawTransaction must be hex bytes");
+  }
+  return value.toLowerCase();
+}
+function relayAttempt(row) {
+  if (!row) return null;
+  return clone({
+    quoteId: row.quoteId ?? row.quote_id,
+    authorizationNonce: row.authorizationNonce ?? row.authorization_nonce,
+    deployment: {
+      chainId: String(row.chainId ?? row.chain_id),
+      splitter: row.splitter,
+      token: row.token,
+    },
+    status: row.status,
+    claimGeneration: Number(row.claimGeneration ?? row.claim_generation),
+    claimExpiresAt: row.claimExpiresAt ?? row.claim_expires_at,
+    txHash: row.txHash ?? row.tx_hash,
+    rawTransaction: row.rawTransaction ?? row.raw_transaction,
+    ...(Object.hasOwn(row, "disposition") ? { disposition: row.disposition } : {}),
+    ...(Object.hasOwn(row, "claimToken") ? { claimToken: row.claimToken } : {}),
+  });
+}
 function explicitDeploymentEnvironment(deployment) {
   const environment = deployment?.config?.environment;
   const chainId = String(deployment?.chain_id ?? deployment?.chainId);
@@ -719,6 +748,43 @@ class PostgresGateStore {
   async countLiabilities(profileId) {
     const row = (await this.pool.query("SELECT count(*)::text AS total FROM gate.capacity_reservations WHERE profile_id=$1 AND state IN('active','expiry_pending_reconciliation')", [profileId])).rows[0];
     return BigInt(row.total);
+  }
+
+  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const nonce = bytes32(authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
+    const row = (await this.pool.query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", [
+      id, nonce, positiveBigint(chainId, "chainId"), address(splitter, "splitter"), address(token, "token"), leaseMs,
+    ])).rows[0];
+    invariant(row, "relay attempt is unavailable");
+    return relayAttempt(row);
+  }
+
+  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction: transaction } = {}) {
+    const row = (await this.pool.query("SELECT r.* FROM gate.mark_relay_broadcasting($1,$2,$3,$4) r", [
+      bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), bytes32(txHash, "txHash"), rawTransaction(transaction),
+    ])).rows[0];
+    invariant(row, "relay claim is unavailable");
+    return relayAttempt(row);
+  }
+
+  async completeRelayBroadcast({ quoteId, txHash } = {}) {
+    const row = (await this.pool.query("SELECT r.* FROM gate.complete_relay_broadcast($1,$2) r", [
+      bytes32(quoteId, "quoteId"), bytes32(txHash, "txHash"),
+    ])).rows[0];
+    invariant(row, "relay broadcast is unavailable");
+    return relayAttempt(row);
+  }
+
+  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false } = {}) {
+    if (typeof definitelyNotSent !== "boolean") throw new TypeError("definitelyNotSent must be boolean");
+    const row = (await this.pool.query("SELECT r.* FROM gate.fail_relay_attempt($1,$2,$3) r", [
+      bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), definitelyNotSent,
+    ])).rows[0];
+    invariant(row, "relay attempt is unavailable");
+    return relayAttempt(row);
   }
 
   async getScannerState({ chainId, splitter } = {}) {

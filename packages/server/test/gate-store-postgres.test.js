@@ -479,7 +479,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
       { enabled: true, accept_pre_vote: true, accept_voting: false });
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v4-runtime-privilege-audit",
+      migration_checksum: "sha256:gate-001-v4-durable-relay",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -1241,6 +1241,103 @@ test("runtime role scans, settles, reads public projections, and fails readiness
       WHERE NOT granted ORDER BY requirement`)).rows,
     [{ requirement: "function:gate.public_profile(text):EXECUTE" }]);
     await assert.rejects(assertDatabaseReady(rolePool), /runtime privilege.*public_profile/i);
+  } finally {
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query("SELECT pg_advisory_unlock(hashtext('gavel-gate-destructive-integration'))").catch(() => {});
+    await pool.end();
+  }
+});
+
+
+test("least-privilege PostgreSQL relay claims converge and survive migration rerun and restart", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
+  try {
+    await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
+    await pool.query("DROP SCHEMA IF EXISTS gate CASCADE");
+    await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE");
+    await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});
+    await pool.query(`DO $$ BEGIN
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_gate') THEN CREATE ROLE gavel_gate NOLOGIN; END IF;
+      IF NOT EXISTS(SELECT FROM pg_roles WHERE rolname='gavel_api') THEN CREATE ROLE gavel_api NOLOGIN; END IF;
+    END $$`);
+    await pool.query(migration);
+    await pool.query(migration);
+
+    const rolePool = effectiveRolePool(pool, "gavel_gate");
+    const store = new PostgresGateStore({ pool: rolePool });
+    await store.mutateProfile({ profile: { id: "profile-1", wallet: WALLET, walletKind: "eoa", availability: "accepting_now" },
+      policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: true, acceptVoting: true,
+        attentionAmount: "1000000", pendingReservationCapacity: 12, settledCapacity: 25, tags: [] } });
+    await store.configureDeployment({ id: "deployment-1", chainId: "8453", splitter: SPLITTER, signer: SIGNER,
+      token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "1", contractCodeHash: CODE_HASH,
+      issuanceActive: true, config: { environment: "production", overlap: 64 } });
+
+    const makeIdentity = async (suffix) => {
+      const input = issuance(suffix);
+      const payer = suffix === "a" ? PAYER : addr(suffix === "b" ? "8" : "9");
+      input.context.authenticatedSender = payer;
+      input.submission.payer = payer;
+      input.submission.signedSender = payer;
+      input.quote.payer = payer;
+      const issued = await store.issue(input);
+      return { quoteId: issued.quote.quoteId, authorizationNonce: issued.quote.quoteId,
+        chainId: "8453", splitter: SPLITTER, token: TOKEN };
+    };
+    const identity = await makeIdentity("a");
+    const claims = await Promise.all([store.claimRelayAttempt(identity), store.claimRelayAttempt(identity)]);
+    assert.equal(claims.filter(({ disposition }) => disposition === "claimed").length, 1);
+    assert.equal(claims.filter(({ disposition }) => disposition === "existing").length, 1);
+    const claim = claims.find(({ disposition }) => disposition === "claimed");
+    const txHash = hash("b");
+    const rawTransaction = `0x02${"12".repeat(100)}`;
+    await store.markRelayBroadcasting({ quoteId: identity.quoteId, claimToken: claim.claimToken, txHash, rawTransaction });
+
+    const restarted = new PostgresGateStore({ pool: rolePool });
+    const recovered = await restarted.claimRelayAttempt(identity);
+    assert.equal(recovered.disposition, "existing");
+    assert.equal(recovered.status, "broadcasting");
+    assert.equal(recovered.txHash, txHash);
+    assert.equal(recovered.rawTransaction, rawTransaction);
+    await restarted.completeRelayBroadcast({ quoteId: identity.quoteId, txHash });
+    assert.equal((await restarted.claimRelayAttempt(identity)).status, "broadcast");
+
+    const retryIdentity = await makeIdentity("b");
+    const retryClaim = await store.claimRelayAttempt(retryIdentity);
+    await pool.query(migration);
+    await store.failRelayAttempt({ quoteId: retryIdentity.quoteId, claimToken: retryClaim.claimToken, definitelyNotSent: true });
+    const reclaimed = await restarted.claimRelayAttempt(retryIdentity);
+    assert.equal(reclaimed.disposition, "claimed");
+    assert.equal(reclaimed.claimToken, "2");
+
+    const ambiguousIdentity = await makeIdentity("c");
+    const ambiguousClaim = await store.claimRelayAttempt(ambiguousIdentity);
+    await store.markRelayBroadcasting({ quoteId: ambiguousIdentity.quoteId, claimToken: ambiguousClaim.claimToken,
+      txHash: hash("d"), rawTransaction });
+    await store.failRelayAttempt({ quoteId: ambiguousIdentity.quoteId,
+      claimToken: ambiguousClaim.claimToken, definitelyNotSent: false });
+    const ambiguous = await restarted.claimRelayAttempt(ambiguousIdentity);
+    assert.equal(ambiguous.status, "reconciliation_required");
+    assert.equal(ambiguous.txHash, hash("d"));
+
+    assert.equal(await denied(pool, "gavel_gate", "SELECT * FROM gate.relay_attempts"), true);
+    const functions = (await pool.query(`SELECT p.proname,p.prosecdef,p.proconfig,
+      has_function_privilege('public',p.oid,'EXECUTE') AS public_execute,
+      has_function_privilege('gavel_gate',p.oid,'EXECUTE') AS gate_execute
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='gate' AND p.proname=ANY($1::text[]) ORDER BY p.proname`, [[
+      "claim_relay_attempt", "complete_relay_broadcast", "fail_relay_attempt", "mark_relay_broadcasting",
+    ]])).rows;
+    assert.equal(functions.length, 4);
+    for (const row of functions) assert.deepEqual(
+      { definer: row.prosecdef, config: row.proconfig, public: row.public_execute, gate: row.gate_execute },
+      { definer: true, config: ["search_path=pg_catalog, gate"], public: false, gate: true }, row.proname,
+    );
+    assert.deepEqual((await rolePool.query("SELECT requirement FROM gate.runtime_privilege_audit() WHERE NOT granted")).rows, []);
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});

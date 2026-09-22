@@ -42,6 +42,7 @@ const GATE_TABLE_PRIVILEGES = Object.freeze({
   proposal_snapshots: freezePrivileges(["SELECT", "INSERT"]),
   quotes: freezePrivileges(["SELECT", "INSERT", "UPDATE"]),
   rate_limit_events: freezePrivileges(["SELECT"]),
+  relay_attempts: freezePrivileges([]),
   sender_blocks: freezePrivileges(["SELECT"]),
   settlement_cursors: freezePrivileges(["SELECT", "INSERT", "UPDATE"]),
   // Scanner evidence is append-only and may be written only through the
@@ -76,6 +77,10 @@ const GATE_REQUIRED_FUNCTIONS = Object.freeze([
   "gate.release_expired_reservation(text,text)",
   "gate.runtime_migration_status()",
   "gate.runtime_privilege_audit()",
+  "gate.claim_relay_attempt(text,text,bigint,text,text,integer)",
+  "gate.mark_relay_broadcasting(text,bigint,text,text)",
+  "gate.complete_relay_broadcast(text,text)",
+  "gate.fail_relay_attempt(text,bigint,boolean)",
 ]);
 
 function assertRoleName(role) {

@@ -120,6 +120,7 @@ class MemoryGateStore {
   #monitors;
   #authNonces;
   #authSessions;
+  #relayAttempts;
   #notificationRetryLimit;
 
   constructor(options = {}) {
@@ -150,6 +151,7 @@ class MemoryGateStore {
     this.#monitors = new Map();
     this.#authNonces = new Map();
     this.#authSessions = new Map();
+    this.#relayAttempts = new Map();
   }
 
   #allocatePublicIdUnsafe() {
@@ -1436,6 +1438,100 @@ class MemoryGateStore {
       if (row.archivedAt == null) row.archivedAt = instant(this.#clock(), "clock");
       return this.#inboxRecord(row);
     });
+  }
+
+  /**
+   * Relay deduplication is keyed by the quote's EIP-3009 nonce (`quoteId`) and
+   * its authoritative deployment tuple. The caller's public id or signature
+   * bytes are deliberately not identity: two valid ECDSA encodings of the same
+   * authorization authorize the same nonce and therefore the same transaction.
+   */
+  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const nonce = bytes32(authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    const deployment = {
+      chainId: block(chainId, "chainId").raw,
+      splitter: address(splitter, "splitter"),
+      token: address(token, "token"),
+    };
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      let row = this.#relayAttempts.get(id);
+      if (row && (row.authorizationNonce !== nonce || compareShape(row.deployment) !== compareShape(deployment))) {
+        throw new Error("relay identity does not match the authoritative quote authorization");
+      }
+      if (!row) {
+        row = { quoteId: id, authorizationNonce: nonce, deployment, status: "claimed", claimGeneration: 1,
+          claimExpiresAt: new Date(now.getTime() + leaseMs), txHash: null, rawTransaction: null };
+        this.#relayAttempts.set(id, row);
+        return { ...clone(row), disposition: "claimed", claimToken: "1" };
+      }
+      if (row.status === "retryable" || (row.status === "claimed" && row.claimExpiresAt <= now)) {
+        row.status = "claimed";
+        row.claimGeneration += 1;
+        row.claimExpiresAt = new Date(now.getTime() + leaseMs);
+        return { ...clone(row), disposition: "claimed", claimToken: String(row.claimGeneration) };
+      }
+      return { ...clone(row), disposition: "existing", claimToken: null };
+    });
+  }
+
+  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const hash = bytes32(txHash, "txHash");
+    if (typeof rawTransaction !== "string" || !/^0x[0-9a-fA-F]+$/.test(rawTransaction)) {
+      throw new TypeError("rawTransaction must be hex bytes");
+    }
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row || row.status !== "claimed" || String(row.claimGeneration) !== String(claimToken)) {
+        throw new Error("relay claim is unavailable");
+      }
+      row.status = "broadcasting";
+      row.txHash = hash;
+      row.rawTransaction = rawTransaction.toLowerCase();
+      row.claimExpiresAt = null;
+      return clone(row);
+    });
+  }
+
+  async completeRelayBroadcast({ quoteId, txHash } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const hash = bytes32(txHash, "txHash");
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row || row.txHash !== hash || !["broadcasting", "broadcast"].includes(row.status)) {
+        throw new Error("relay broadcast is unavailable");
+      }
+      row.status = "broadcast";
+      return clone(row);
+    });
+  }
+
+  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row) throw new Error("relay attempt is unavailable");
+      if (definitelyNotSent) {
+        if (row.status !== "claimed" || String(row.claimGeneration) !== String(claimToken)) {
+          throw new Error("relay claim is unavailable");
+        }
+        row.status = "retryable";
+        row.claimExpiresAt = null;
+      } else {
+        if (row.status !== "broadcasting" || !row.txHash) throw new Error("relay broadcast is unavailable");
+        row.status = "reconciliation_required";
+      }
+      return clone(row);
+    });
+  }
+
+  async getRelayAttempt({ quoteId } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    return this.#serialized(() => clone(this.#relayAttempts.get(id) ?? null));
   }
 
   async counts() {

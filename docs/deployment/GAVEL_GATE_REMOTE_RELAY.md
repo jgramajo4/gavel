@@ -19,7 +19,9 @@ Bankr          --signs--> EIP-3009 ReceiveWithAuthorization
 Gate server    quote from its OWN owner-bound record of this submission
                -> rebuild settle calldata
                -> assertPreparedSettlement (the shared guard)
-               -> relayer wallet: { to, data, value: 0 }
+               -> simulate, populate, and sign { to, data, value: 0 }
+               -> persist signed tx bytes + deterministic tx hash
+               -> broadcast those exact signed bytes
                                   |
                           200 { txHash, chainId, relayer }   = a HINT
 ```
@@ -154,19 +156,33 @@ with `RELAYER_UNAVAILABLE`, and no other Gate behaviour changes.
 
 ## Operating notes
 
-- **Duplicate relays cost nothing.** One quote broadcasts once; a repeat returns
-  the same transaction hash rather than a second transaction. The EIP-3009
-  nonce is the quote id, so the token would reject a replay anyway.
+- **Relay deduplication survives process restarts.** Gate atomically claims the
+  quote's EIP-3009 nonce, persists the exact signed transaction bytes and their
+  deterministic hash before broadcast, and returns the stored hash for later
+  duplicate calls. Concurrent calls converge on the same durable row. A process
+  restart after the node accepted the transaction cannot create a differently
+  signed replacement or a second settlement.
+- **Failures are split by whether broadcast was possible.** Validation,
+  simulation, population, or signing failures occur before the broadcast
+  primitive and release the claim for a later retry. Once broadcasting starts,
+  an RPC error is ambiguous: Gate persists `reconciliation_required`, refuses
+  automatic rebroadcast, and operators must inspect the stored hash/on-chain
+  state. Never clear or retry that state merely because the HTTP response was
+  lost.
+- **The scanner remains settlement authority.** A persisted or returned relay
+  hash is only a hint. Only the independently observed canonical
+  `QuoteSettled` log can move the submission to `accepted`.
 - **A refusal is free.** Every check — owner binding, quote signature, chain and
   splitter identity, authorization recovery, expiry, the prepared-settlement
-  guard — runs before the wallet is touched. A refused relay spends no gas.
+  guard — runs before the broadcast primitive. A refused relay spends no gas.
 - **`RELAYER_IS_PAYER` (503) is a configuration alarm**, not a user error: it
   means the funded wallet was handed a quote it is itself paying. Investigate
   before restarting.
-- **A settlement that would revert costs nothing.** The relayer estimates gas
-  before it signs, so a spent quote nonce, or a payer who moved the USDC after
-  authorizing, is refused by the node rather than paid for. Watch the relayer's
-  ETH balance anyway; a sustained drop with no matching `QuoteSettled` logs is
-  worth investigating.
+- **A settlement that would revert is normally stopped before broadcast.** The
+  relayer performs a read-only simulation while populating the exact transaction,
+  before it signs or calls the broadcast primitive. A spent EIP-3009 nonce or a
+  payer who moved the USDC should therefore fail without gas. This is defense in
+  depth, not settlement truth; watch the relayer's ETH balance and investigate a
+  sustained drop with no matching `QuoteSettled` logs.
 - **A relay is never acceptance.** If the relay succeeds and Gate stays
   `pending_settlement`, that is the scanner doing its job. Do not re-issue.

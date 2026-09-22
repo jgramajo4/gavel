@@ -39,6 +39,9 @@ const RELAY_BODY_FIELDS = Object.freeze(["authorization"]);
 const RELAY_AUTHORIZATION_FIELDS = Object.freeze(["signature"]);
 
 const DEFAULT_MAX_TRACKED_RELAYS = 256;
+const RELAY_STORE_METHODS = Object.freeze([
+  "claimRelayAttempt", "markRelayBroadcasting", "completeRelayBroadcast", "failRelayAttempt",
+]);
 
 class RelayRequestError extends Error {
   constructor(message, statusCode = 400, code = "INVALID_RELAY", state) {
@@ -80,14 +83,19 @@ function canonicalAddress(value, name) {
  */
 function createGateRelayService({
   relayer,
+  relayStore,
   submissionService,
   deployment,
   tokenDomain,
   now = () => Date.now(),
   maxTrackedRelays = DEFAULT_MAX_TRACKED_RELAYS,
 } = {}) {
-  if (!relayer || typeof relayer.sendSettlement !== "function" || typeof relayer.address !== "string") {
-    throw new TypeError("a Gate relayer exposing address and sendSettlement is required");
+  if (!relayer || typeof relayer.preflightSettlement !== "function"
+      || typeof relayer.broadcastSettlement !== "function" || typeof relayer.address !== "string") {
+    throw new TypeError("a Gate relayer exposing address, preflightSettlement, and broadcastSettlement is required");
+  }
+  if (!relayStore || RELAY_STORE_METHODS.some((method) => typeof relayStore[method] !== "function")) {
+    throw new TypeError("a durable Gate relay store is required");
   }
   if (!submissionService || typeof submissionService.resumeSubmission !== "function") {
     throw new TypeError("submissionService.resumeSubmission is required for the relay service");
@@ -216,7 +224,7 @@ function createGateRelayService({
     return authorization;
   }
 
-  async function broadcast(quote, signature) {
+  function prepareTransaction(quote, signature) {
     let data;
     try {
       data = encodeSettleCall(quote, signature);
@@ -242,8 +250,64 @@ function createGateRelayService({
     if (relayerAddress === getAddress(quote.message.payer)) {
       throw new RelayRequestError("the Gate relayer must be a separate account from the payer", 503, "RELAYER_IS_PAYER");
     }
-    const txHash = await relayer.sendSettlement(safe);
+    return safe;
+  }
+
+  function receipt(txHash) {
     return Object.freeze({ txHash, chainId, relayer: relayerAddress });
+  }
+
+  async function broadcast(quote, signature) {
+    const quoteId = String(quote.message.quoteId).toLowerCase();
+    const identity = {
+      quoteId,
+      // EIP-3009's authoritative authorization identity is its nonce. Gate
+      // freezes that nonce to quoteId; signature bytes and caller text are not
+      // deduplication keys because equivalent valid ECDSA signatures authorize
+      // this same immutable message.
+      authorizationNonce: quoteId,
+      chainId,
+      splitter,
+      token,
+    };
+    const claim = await relayStore.claimRelayAttempt(identity);
+    if (claim.disposition !== "claimed") {
+      if (claim.status === "reconciliation_required") {
+        throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
+          "RELAY_RECONCILIATION_REQUIRED");
+      }
+      if (claim.txHash) return receipt(claim.txHash);
+      throw new RelayRequestError("relay attempt is already in progress", 409, "RELAY_IN_PROGRESS");
+    }
+
+    const transaction = prepareTransaction(quote, signature);
+    let prepared;
+    try {
+      // This boundary may validate, simulate, and estimate gas, but it MUST NOT
+      // invoke any send/broadcast primitive. Its deterministic hash is durable
+      // before the external side effect begins.
+      prepared = await relayer.preflightSettlement(transaction);
+    } catch (error) {
+      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken, definitelyNotSent: true });
+      throw error;
+    }
+    await relayStore.markRelayBroadcasting({ quoteId, claimToken: claim.claimToken,
+      txHash: prepared.txHash, rawTransaction: prepared.rawTransaction });
+    try {
+      const txHash = await relayer.broadcastSettlement(prepared);
+      if (String(txHash).toLowerCase() !== String(prepared.txHash).toLowerCase()) {
+        throw new Error("relayer broadcast hash did not match the prepared transaction");
+      }
+      await relayStore.completeRelayBroadcast({ quoteId, txHash: prepared.txHash });
+      return receipt(prepared.txHash);
+    } catch {
+      // Once broadcast begins, an RPC error cannot prove that the node did not
+      // accept the signed transaction. Keep its deterministic hash and never
+      // blindly send another transaction for this authorization.
+      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken, definitelyNotSent: false });
+      throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
+        "RELAY_RECONCILIATION_REQUIRED");
+    }
   }
 
   /**
@@ -295,7 +359,8 @@ function createGateRelayService({
     try {
       return await attempt;
     } catch (error) {
-      // A failed broadcast is retryable; only a sent transaction is remembered.
+      // Definitely-not-sent preflight failures are released durably. Ambiguous
+      // post-send failures remain reconciliation-required in the store.
       if (broadcasts.get(quoteId) === attempt) broadcasts.delete(quoteId);
       throw error;
     }

@@ -968,7 +968,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /CREATE CONSTRAINT TRIGGER[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
   assert.match(sql, /migration_checksum|catalog_manifest/i);
   assert.match(sql, /ON CONFLICT\s*\(version\)\s*DO UPDATE SET[\s\S]*migration_checksum\s*=\s*EXCLUDED\.migration_checksum[\s\S]*catalog_manifest\s*=\s*EXCLUDED\.catalog_manifest/i);
-  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v4-runtime-privilege-audit'/i);
-  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-nouns-candidates[\s\S]*sha256:gate-001-v4-runtime-privilege-audit[\s\S]*\)/i);
-  assert.match(sql, /migration_checksum='sha256:gate-001-v4-runtime-privilege-audit'/i);
+  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v4-durable-relay'/i);
+  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-runtime-privilege-audit[\s\S]*sha256:gate-001-v4-durable-relay[\s\S]*\)/i);
+  assert.match(sql, /migration_checksum='sha256:gate-001-v4-durable-relay'/i);
 });
