@@ -1455,7 +1455,7 @@ class MemoryGateStore {
    * bytes are deliberately not identity: two valid ECDSA encodings of the same
    * authorization authorize the same nonce and therefore the same transaction.
    */
-  async withRelayAccountLock({ chainId, relayerAddress } = {}, operation) {
+  async withRelayAccountLock({ chainId, relayerAddress, relayIdentity } = {}, operation) {
     const account = `${block(chainId, "chainId").raw}:${address(relayerAddress, "relayerAddress")}`;
     if (typeof operation !== "function") throw new TypeError("relay account operation is required");
     const prior = this.#relayAccountQueues.get(account) ?? Promise.resolve();
@@ -1467,13 +1467,14 @@ class MemoryGateStore {
     try {
       const unresolved = [...this.#relayAttempts.values()].some((attempt) =>
         attempt.deployment.chainId === block(chainId, "chainId").raw
-          && ["broadcasting", "reconciliation_required"].includes(attempt.status));
+          && ["claimed", "broadcasting", "reconciliation_required"].includes(attempt.status));
       if (unresolved) {
         const error = new Error("relay account requires operator reconciliation");
         error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
         throw error;
       }
-      return await operation();
+      const claim = await this.claimRelayAttempt(relayIdentity);
+      return await operation(claim);
     } finally {
       release();
       if (this.#relayAccountQueues.get(account) === queued) this.#relayAccountQueues.delete(account);

@@ -161,8 +161,11 @@ with `RELAYER_UNAVAILABLE`, and no other Gate behaviour changes.
   deterministic hash before broadcast, and returns the stored hash for later
   duplicate calls. Concurrent calls for the same quote converge on the same
   durable row. Across different quotes, a PostgreSQL advisory lock keyed to the
-  funded relayer account serializes nonce selection, simulation, signing,
-  write-ahead, and broadcast across every Gate process.
+  funded relayer account serializes the durable claim, nonce selection,
+  simulation, signing, write-ahead, and broadcast across every Gate process.
+  The claim is created on the lock-owning database session before signing; if
+  that session is lost, the durable `claimed` row fences all later relay work
+  until an operator reconciles it.
 - **Failures are split by whether broadcast was possible.** Validation,
   simulation, population, or signing failures occur before the broadcast
   primitive and release the claim for a later retry. Once broadcasting starts,

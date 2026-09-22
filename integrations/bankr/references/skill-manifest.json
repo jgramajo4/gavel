@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "gavel",
   "version": "0.3.0",
-  "buildId": "sha256:a788cf3073c26d7617f255164ef14c9c2677b17e9bee610a96b1a15c1994e907",
+  "buildId": "sha256:77747ac51e499d3b209eb8ab942052bf757c34007fb6c7915e682c104764c244",
   "build": {
     "kind": "source",
     "gitSha": null

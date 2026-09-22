@@ -257,20 +257,8 @@ function createGateRelayService({
     return Object.freeze({ txHash, chainId, relayer: relayerAddress });
   }
 
-  async function broadcast(quote, signature) {
+  async function broadcast(quote, signature, claim) {
     const quoteId = String(quote.message.quoteId).toLowerCase();
-    const identity = {
-      quoteId,
-      // EIP-3009's authoritative authorization identity is its nonce. Gate
-      // freezes that nonce to quoteId; signature bytes and caller text are not
-      // deduplication keys because equivalent valid ECDSA signatures authorize
-      // this same immutable message.
-      authorizationNonce: quoteId,
-      chainId,
-      splitter,
-      token,
-    };
-    const claim = await relayStore.claimRelayAttempt(identity);
     if (claim.disposition !== "claimed") {
       if (claim.status === "reconciliation_required") {
         throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
@@ -359,9 +347,20 @@ function createGateRelayService({
     const quoteId = String(quote.message.quoteId).toLowerCase();
     const pending = broadcasts.get(quoteId);
     if (pending) return pending;
+    const relayIdentity = {
+      quoteId,
+      // EIP-3009's authoritative authorization identity is its nonce. Gate
+      // freezes that nonce to quoteId; signature bytes and caller text are not
+      // deduplication keys because equivalent valid ECDSA signatures authorize
+      // this same immutable message.
+      authorizationNonce: quoteId,
+      chainId,
+      splitter,
+      token,
+    };
     const attempt = remember(quoteId, relayStore.withRelayAccountLock(
-      { chainId, relayerAddress },
-      () => broadcast(quote, signature),
+      { chainId, relayerAddress, relayIdentity },
+      (claim) => broadcast(quote, signature, claim),
     ).catch((error) => {
       if (error?.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED") {
         throw new RelayRequestError("relay account requires operator reconciliation", 503,

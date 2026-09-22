@@ -479,7 +479,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
       { enabled: true, accept_pre_vote: true, accept_voting: false });
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v5-relay-account-lock",
+      migration_checksum: "sha256:gate-001-v6-relay-lock-fence",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -1279,7 +1279,8 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
 
     const makeIdentity = async (suffix) => {
       const input = issuance(suffix);
-      const payer = suffix === "a" ? PAYER : addr(suffix === "b" ? "8" : "9");
+      const payerDigit = { b: "8", c: "9", d: "4", e: "5", f: "6" }[suffix];
+      const payer = suffix === "a" ? PAYER : addr(payerDigit);
       input.context.authenticatedSender = payer;
       input.submission.payer = payer;
       input.submission.signedSender = payer;
@@ -1313,16 +1314,27 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     const reclaimed = await restarted.claimRelayAttempt(retryIdentity);
     assert.equal(reclaimed.disposition, "claimed");
     assert.equal(reclaimed.claimToken, "2");
+    await restarted.failRelayAttempt({ quoteId: retryIdentity.quoteId,
+      claimToken: reclaimed.claimToken, definitelyNotSent: true });
 
+    const firstLockIdentity = await makeIdentity("d");
+    const secondLockIdentity = await makeIdentity("e");
     let releaseFirst;
     let secondEntered = false;
-    const firstLock = store.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT }, async () => {
+    const firstLock = store.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT,
+      relayIdentity: firstLockIdentity }, async (lockClaim) => {
       await new Promise((resolve) => { releaseFirst = resolve; });
+      await store.failRelayAttempt({ quoteId: firstLockIdentity.quoteId,
+        claimToken: lockClaim.claimToken, definitelyNotSent: true });
     });
     while (!releaseFirst) await new Promise((resolve) => setImmediate(resolve));
     const secondLock = restarted.withRelayAccountLock(
-      { chainId: "8453", relayerAddress: GAVEL_RECIPIENT },
-      async () => { secondEntered = true; },
+      { chainId: "8453", relayerAddress: GAVEL_RECIPIENT, relayIdentity: secondLockIdentity },
+      async (lockClaim) => {
+        secondEntered = true;
+        await restarted.failRelayAttempt({ quoteId: secondLockIdentity.quoteId,
+          claimToken: lockClaim.claimToken, definitelyNotSent: true });
+      },
     );
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(secondEntered, false);
@@ -1341,7 +1353,8 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     assert.equal(ambiguous.txHash, hash("d"));
     let unsafeOperationRan = false;
     await assert.rejects(
-      restarted.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT }, async () => {
+      restarted.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT,
+        relayIdentity: await makeIdentity("f") }, async () => {
         unsafeOperationRan = true;
       }),
       (error) => error.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED",

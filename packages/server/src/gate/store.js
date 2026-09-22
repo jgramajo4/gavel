@@ -763,13 +763,20 @@ class PostgresGateStore {
     return BigInt(row.total);
   }
 
-  async withRelayAccountLock({ chainId, relayerAddress } = {}, operation) {
+  async withRelayAccountLock({ chainId, relayerAddress, relayIdentity } = {}, operation) {
     const chain = positiveBigint(chainId, "chainId");
     const relayer = address(relayerAddress, "relayerAddress");
     if (typeof operation !== "function") throw new TypeError("relay account operation is required");
+    const id = bytes32(relayIdentity?.quoteId, "quoteId");
+    const nonce = bytes32(relayIdentity?.authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    const identity = [id, nonce, positiveBigint(relayIdentity?.chainId, "chainId"),
+      address(relayIdentity?.splitter, "splitter"), address(relayIdentity?.token, "token"), 30_000];
+    if (identity[2] !== chain) throw new TypeError("relay identity chainId must match relayer lock chainId");
     const client = await this.pool.connect();
     const lockKey = `gavel-gate-relay:${chain}:${relayer}`;
     let locked = false;
+    let destroy = null;
     try {
       await client.query("SELECT pg_advisory_lock(hashtextextended($1,0))", [lockKey]);
       locked = true;
@@ -779,12 +786,22 @@ class PostgresGateStore {
         error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
         throw error;
       }
-      return await operation();
+      const row = (await client.query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", identity)).rows[0];
+      invariant(row, "relay attempt is unavailable");
+      return await operation(relayAttempt(row));
     } finally {
       try {
-        if (locked) await client.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [lockKey]);
+        if (locked) {
+          const unlocked = (await client.query(
+            "SELECT pg_advisory_unlock(hashtextextended($1,0)) AS unlocked", [lockKey],
+          )).rows[0]?.unlocked;
+          if (unlocked !== true) throw new Error("relay account advisory lock release was not confirmed");
+        }
+      } catch (error) {
+        destroy = error;
+        throw error;
       } finally {
-        client.release();
+        client.release(destroy ?? undefined);
       }
     }
   }

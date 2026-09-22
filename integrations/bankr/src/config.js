@@ -95,7 +95,7 @@ function chainIds(value) {
  * integration never carries a second copy that could drift from it.
  */
 function resolveConfig(env = process.env, overrides = {}) {
-  const gateUrl = canonicalOrigin(overrides.gateUrl ?? env.GAVEL_GATE_URL, "GAVEL_GATE_URL");
+  const gateUrl = canonicalRelayOrigin(overrides.gateUrl ?? env.GAVEL_GATE_URL, "GAVEL_GATE_URL");
   const indexUrl = canonicalOrigin(
     overrides.indexUrl ?? env.GAVEL_INDEX_API_URL ?? DEFAULT_INDEX_URL,
     "GAVEL_INDEX_API_URL",

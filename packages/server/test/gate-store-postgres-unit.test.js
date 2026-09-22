@@ -900,6 +900,36 @@ test("public reader uses only narrow definer projection functions", async () => 
   assert.doesNotMatch(seen.join("\n"), /FROM gate_public\.|gate\.(?:profiles|dao_policies|submissions|inbox_items)|\bJOIN\b/i);
 });
 
+test("relay account lock claims on the dedicated session and destroys it when unlock is uncertain", async () => {
+  const calls = [];
+  let releasedWith;
+  const identity = { quoteId: H("1"), authorizationNonce: H("1"), chainId: "8453", splitter: A,
+    token: CANONICAL_BASE_USDC };
+  const client = {
+    async query(sql) {
+      sql = String(sql); calls.push(sql);
+      if (/pg_advisory_lock/.test(sql)) return { rows: [{}] };
+      if (/relay_account_ready/.test(sql)) return { rows: [{ ready: true }] };
+      if (/claim_relay_attempt/.test(sql)) return { rows: [{ ...identity, status: "claimed", claimGeneration: "1",
+        claimExpiresAt: new Date(), txHash: null, rawTransaction: null, disposition: "claimed", claimToken: "1" }] };
+      if (/pg_advisory_unlock/.test(sql)) return { rows: [{ unlocked: false }] };
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+    release(error) { releasedWith = error; },
+  };
+  const store = new PostgresGateStore({ pool: { connect: async () => client } });
+  let operationClaim;
+  await assert.rejects(
+    store.withRelayAccountLock({ chainId: "8453", relayerAddress: B, relayIdentity: identity }, async (claim) => {
+      operationClaim = claim;
+    }),
+    /lock release was not confirmed/,
+  );
+  assert.equal(operationClaim.disposition, "claimed");
+  assert.ok(calls.findIndex((sql) => /claim_relay_attempt/.test(sql)) < calls.findIndex((sql) => /pg_advisory_unlock/.test(sql)));
+  assert.match(releasedWith.message, /lock release was not confirmed/);
+});
+
 test("Gate migration encodes strict invariants, immutable evidence, marker, and no DELETE grant", () => {
   const sql = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const storeSource = fs.readFileSync(path.join(__dirname, "../src/gate/store.js"), "utf8");
@@ -938,7 +968,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile\(text,text,text,gate\.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.transition_notification\(text,gate\.notification_state,text,text\) TO gavel_gate/i);
-  assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.relay_account_ready\(p_chain_id bigint\)[\s\S]*status IN\('broadcasting','reconciliation_required'\)/i);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.relay_account_ready\(p_chain_id bigint\)[\s\S]*status IN\('claimed','broadcasting','reconciliation_required'\)/i);
   assert.match(sql, /REVOKE ALL ON FUNCTION gate\.relay_account_ready\(bigint\) FROM PUBLIC/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.relay_account_ready\(bigint\) TO gavel_gate/i);
   assert.match(storeSource, /pg_advisory_lock\(hashtextextended\(\$1,0\)\)[\s\S]*gate\.relay_account_ready\(\$1\)[\s\S]*pg_advisory_unlock/i);
@@ -972,7 +1002,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /CREATE CONSTRAINT TRIGGER[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
   assert.match(sql, /migration_checksum|catalog_manifest/i);
   assert.match(sql, /ON CONFLICT\s*\(version\)\s*DO UPDATE SET[\s\S]*migration_checksum\s*=\s*EXCLUDED\.migration_checksum[\s\S]*catalog_manifest\s*=\s*EXCLUDED\.catalog_manifest/i);
-  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v5-relay-account-lock'/i);
-  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-durable-relay[\s\S]*sha256:gate-001-v5-relay-account-lock[\s\S]*\)/i);
-  assert.match(sql, /migration_checksum='sha256:gate-001-v5-relay-account-lock'/i);
+  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v6-relay-lock-fence'/i);
+  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v5-relay-account-lock[\s\S]*sha256:gate-001-v6-relay-lock-fence[\s\S]*\)/i);
+  assert.match(sql, /migration_checksum='sha256:gate-001-v6-relay-lock-fence'/i);
 });
