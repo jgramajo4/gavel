@@ -1,15 +1,11 @@
 "use strict";
 
 /**
- * The Gavel Gate advocate skill (`integrations/bankr/SKILL.md`) as a *published
- * package*.
+ * The umbrella Gavel skill (`integrations/bankr/SKILL.md`) as a *published
+ * Bankr package*.
  *
- * `test/bankr-skill.test.js` covers the general `gavel` voter/copilot skill in
- * `nouns-dao/`. That file is a different skill with a different install, and
- * nothing here may assume the two ship together — which is exactly the failure
- * this suite exists to prevent: an installed skill is only its own directory,
- * so a reference that climbs out of it resolves in a checkout and resolves
- * nowhere once published.
+ * `nouns-dao/` remains independently composable, but the public Bankr install
+ * must expose voter/copilot and Gate advocate routes from this one directory.
  */
 
 const assert = require("node:assert/strict");
@@ -35,10 +31,12 @@ function frontmatter(source) {
 
 const meta = frontmatter(skill);
 
-test("the advocate skill is its own package, distinct from the voter copilot", () => {
-  assert.equal(meta.name, "gavel-gate");
+test("the Bankr package replaces the old gavel install and exposes both route families", () => {
+  assert.equal(meta.name, "gavel");
   assert.equal(frontmatter(nounsSkill).name, "gavel");
-  assert.notEqual(meta.name, frontmatter(nounsSkill).name);
+  assert.match(skill, /## Deterministic intent routing/);
+  assert.match(skill, /Voter\/copilot/);
+  assert.match(skill, /Gate discovery\/advocacy\/payment/);
 });
 
 test("every reference the advocate skill loads ships inside the advocate skill", () => {
@@ -95,11 +93,15 @@ test("a directory question is answered from Gate, never from generic Nouns knowl
   assert.match(skill, /Do not substitute a list of delegates who\s+have not enrolled/);
 });
 
-test("the voter copilot hands Gate questions over instead of guessing", () => {
-  assert.match(nounsSkill, /## Do not use this skill when/);
-  assert.match(nounsSkill, /`gavel-gate`/);
-  assert.match(nounsSkill, /do not answer it from general Nouns knowledge/i);
-  assert.match(nounsSkill, /neither loads the other/);
+test("the umbrella prioritizes live Gate discovery while keeping voter and Gate modules separate", () => {
+  const gatePriority = skill.indexOf("Gate discovery has priority");
+  const voterRoute = skill.indexOf("Voter/copilot");
+  assert.ok(gatePriority >= 0 && gatePriority < voterRoute,
+    "Gate priority must be stated before the voter route table entry");
+  assert.match(skill, /Do not answer it from general Nouns knowledge/);
+  assert.match(skill, /references\/voter-copilot\.md/);
+  assert.match(skill, /references\/gate-advocate-client\.md/);
+  assert.match(skill, /keep their runtime modules and authority boundaries separate/i);
 });
 
 // --- Base mainnet -----------------------------------------------------------

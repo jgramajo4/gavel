@@ -6,6 +6,11 @@
   "license": "GPL-3.0-only",
   "main": "src/index.js",
   "scripts": {
+    "build:artifact": "node scripts/build-artifact.js",
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@gavel/gate": "0.2.0",
+    "ethers": "^6.15.0"
   }
 }

@@ -33,8 +33,8 @@ DAO API / Ethereum chain
 
 The canonical packages are `packages/core`, `packages/nouns-adapter`,
 `packages/ens-adapter`, `packages/railgun-adapter`, and `packages/cli`. The root
-`bin/gavel.js` and `nouns-dao/` Bankr skill remain as
-verified compatibility entry points. `packages/server` remains a reserved boundary. `packages/tui` now contains the
+`bin/gavel.js` and `nouns-dao/` remain verified compatibility entry points. The
+one public Bankr skill is `integrations/bankr/`. `packages/server` remains a reserved boundary. `packages/tui` now contains the
 first read-only migration slice from the former standalone TUI.
 
 See [`docs/architecture/MONOREPO_AUDIT_AND_PLAN.md`](docs/architecture/MONOREPO_AUDIT_AND_PLAN.md)
@@ -89,7 +89,7 @@ keep private state in a runtime-owned `GAVEL_DATA_DIR`.
 
 | Method | Best for | Current status | Transaction boundary |
 | --- | --- | --- | --- |
-| [Bankr](#bankr) | A conversational governance copilot | Supported through the `nouns-dao` compatibility skill | Unsigned preparation by default; legacy signing scripts are separate |
+| [Bankr](#bankr) | Voter/copilot plus Gate advocate workflows | Supported through one `integrations/bankr` umbrella skill | Unsigned voter preparation; separately routed Gate payment after explicit confirmation |
 | [Hermes Agent](#hermes-agent) | A self-hosted conversational agent | Supported through a first-use bootstrapping skill | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
 | [BYOH](#byoh-bring-your-own-harness) | Any agent framework, shell, scheduler, or local application | Supported through the JSON CLI | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
 | [TUI](#terminal-ui-tui) | Interactive multi-DAO governance in a real terminal | Supported: unified inbox, setup wizard, settings | Read-only, interactive wallet approval, Safe-supervised, or explicitly scoped WaaP |
@@ -153,19 +153,25 @@ read it.
 
 ### Bankr
 
-Bankr supplies the conversation and tool runtime; Gavel remains the governance
-engine. Install or expose [`nouns-dao/`](nouns-dao/) as the Gavel skill. Bankr
-`execute_cli` containers are ephemeral, so each workflow clones the repository
-inside its current sandbox rather than relying on `/cli/gavel` to survive:
+Install the one public Gavel skill by sending Bankr exactly:
 
 ```text
-Install or update the Gavel skill from:
-https://github.com/jgramajo4/gavel/tree/main/nouns-dao
+install the Gavel skill from https://github.com/jgramajo4/gavel/tree/main/integrations/bankr
 ```
 
-Paste the same instruction into Bankr to update an existing installation; Bankr
-replaces the skill with the same name. Start a new conversation afterward.
-Updating the skill does not overwrite Gavel Private Files.
+The same action upgrades or reinstalls: Bankr replaces a skill with the same
+name. Start a new conversation afterward. To inspect what is installed, ask
+Bankr for the Gavel skill version, build kind, and runtime ref; direct GitHub
+directory installs identify themselves as source builds and do not claim a Git
+SHA. Bankr documents removal through the Skills tab, not a natural-language
+uninstall action for GitHub-installed guest skills.
+
+The umbrella routes voter/copilot intents separately from Gate discovery,
+advocacy, and payment. Lobbying questions always use Gate's live directory;
+they are never answered from remembered Nouns delegate knowledge. The installed
+prompt package is self-contained under `integrations/bankr/`. Its executable
+runtime is cloned at the revision described by the package manifest because
+Bankr `execute_cli` containers are ephemeral.
 
 ```bash
 git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
@@ -190,6 +196,8 @@ People can then use natural-language requests such as:
 - “Analyze proposal 123 using my profile.”
 - “Prepare a FOR vote for review; do not submit it.”
 - “Check whether my Safe is ready to vote.”
+- “Which Nouns delegates are accepting lobbying in Gate right now?”
+- “Send this candidate to that enrolled voter and show me the quote before any payment.”
 
 The skill routes those requests to the canonical command form:
 
@@ -204,7 +212,7 @@ An ordinary sandbox write is not durable. The skill requires both zero command
 exits and successful artifact metadata, then verifies restoration from a new
 task. Bankr Agent Profiles and project updates are public and must not store
 private Gavel profiles. See the complete
-[`Bankr runtime guide`](nouns-dao/references/bankr-runtime.md) and
+[`Bankr integration guide`](integrations/bankr/README.md) and
 [`private profile storage policy`](docs/storage/PROFILE_STORAGE.md).
 
 ### Hermes Agent
@@ -712,10 +720,10 @@ Set `GAVEL_STRUCTURED_ERRORS=1` for privacy-scrubbed JSON operational failures.
 
 ## Legacy Nouns tools
 
-The Bankr entry point in [`nouns-dao/SKILL.md`](nouns-dao/SKILL.md) now routes
-natural voter intents through Gavel's personalized onboarding, profile,
-proposal-analysis, correction, backtest, daily briefing, vote-review, and
-delegation workflows. The older chain scripts remain documented in
+The public Bankr entry point in [`integrations/bankr/SKILL.md`](integrations/bankr/SKILL.md)
+routes both personalized voter intents and the separately bounded Gate advocate
+flow. [`nouns-dao/SKILL.md`](nouns-dao/SKILL.md) remains independently composable
+compatibility material rather than a second required install. The older chain scripts remain documented in
 [`nouns-dao/README.md`](nouns-dao/README.md) as secondary developer tools while
 their reusable interactions move behind the Nouns adapter. Direct-broadcast
 scripts are not the default Gavel user experience.

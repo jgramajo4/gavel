@@ -1,7 +1,7 @@
 # Gate remote relay (Base mainnet, gas only)
 
 This runbook turns on the narrow relay route that lets an advocate client with
-no funded key — a Bankr `gavel-gate` sandbox — have the Gate server broadcast a
+no funded key — the Bankr Gavel umbrella's Gate route — have the Gate server broadcast a
 settlement it has already authorized.
 
 It changes nothing about who decides what. Gate still issues and signs the

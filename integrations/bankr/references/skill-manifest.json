@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "gavel",
+  "version": "0.2.0",
+  "build": {
+    "kind": "source",
+    "gitSha": null
+  },
+  "runtime": {
+    "repository": "https://github.com/jgramajo4/gavel.git",
+    "ref": "main"
+  }
+}

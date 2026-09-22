@@ -1,8 +1,8 @@
 ---
-name: gavel-gate
-description: Discover which Nouns DAO delegates and voters are currently enrolled in Gavel Gate and accepting paid lobbying, sponsorship, or attention requests, then pay that voter's published attention price to put a real Nouns Proposal Candidate or active proposal in front of them. Answers "who is accepting lobbying right now" from Gate's live directory, and settles in real USDC on Base mainnet through the Gate splitter after explicit confirmation.
-tags: [nouns, governance, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
-version: 2
+name: gavel
+description: Personalized governance voter copilot for private history, proposals, preferences, hard rules, backtests, votes, and delegation; also discovers Nouns DAO delegates and voters accepting lobbying, sponsorship, candidates, proposals, or paid attention in Gate's live directory and settles real USDC on Base mainnet after explicit confirmation.
+tags: [nouns, ens, railgun, governance, voting, delegation, copilot, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
+version: 0.2.0
 visibility: public
 metadata:
   clawdbot:
@@ -12,7 +12,34 @@ metadata:
       bins: [git, node, npm]
 ---
 
-# Gavel Gate (advocate)
+# Gavel for Bankr
+
+This is the one public Bankr install for Gavel. It routes personalized
+voter/copilot work and Gavel Gate advocate work deterministically. Keep their runtime modules and authority boundaries separate.
+
+Read `references/skill-manifest.json` when asked which version, build, or runtime revision
+is installed. A source install reports build kind `source`; a release artifact
+may carry a verified Git SHA. Never invent a SHA.
+
+## Deterministic intent routing
+
+**Gate discovery has priority.** If a prompt asks who is accepting lobbying,
+sponsorship, advocacy, paid attention, candidates, or proposals right now, query
+Gate's live directory even if it also says "delegate", "voter", or "Nouns".
+Do not answer it from general Nouns knowledge.
+
+| Route | Deterministic triggers | Load |
+| --- | --- | --- |
+| Gate discovery/advocacy/payment | Who is accepting or open to lobbying, sponsorship, paid attention, or advocacy; browse Gate; send a candidate/proposal to an enrolled voter; quote or pay for attention | Continue with the Gate procedure below and load `references/gate-advocate-client.md` as needed |
+| Voter/copilot | Onboard or sync my voter, profile/preferences/rules, analyze/backtest a proposal, daily briefing, prepare my vote, or delegate my voting power | Load `references/voter-copilot.md`, then only the voter reference it selects |
+
+"Delegate my voting power" is voter/copilot. "Which delegates accept lobbying?"
+is Gate discovery. If a request genuinely contains both, complete read-only Gate
+discovery first, then ask which separate workflow to continue. Never pass private
+voter profile state into Gate, and never pass Gate payer credentials or quotes
+into the voter/copilot route.
+
+## Gate advocate route
 
 Use this skill when someone wants to know **which Nouns voters are accepting
 paid attention right now**, or wants to get a Nouns governance item in front of
@@ -27,10 +54,9 @@ ask:
 - "Lobby this voter about this candidate."
 - "Pay to get this Nouns candidate into this voter's Gate inbox."
 
-This skill is the **advocate/payer** side of Gavel Gate. It is separate from the
-general `gavel` voter/copilot skill, which learns a voter's own history and
-prepares their votes. Neither skill loads the other, and a question about who
-is accepting lobbying belongs here.
+This route is the **advocate/payer** side of Gavel Gate. The voter/copilot route
+learns a voter's own history and prepares their votes. Keep the workflows
+separate after routing: a question about who is accepting lobbying belongs here.
 
 Be conversational. Walk the person through
 

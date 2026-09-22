@@ -53,12 +53,11 @@ core and registered DAO adapters; it must not contain governance logic.
 
 ### `integrations/bankr`
 
-The Bankr-specific material is currently `nouns-dao/SKILL.md`,
-`nouns-dao/references/bankr-runtime.md`, the `/cli/gavel` command examples in the
-remaining references, and Bankr-specific UX/routing tests. Create a thin
-integration package that owns installation/persistence guidance and points to
-the canonical CLI. Preserve the root `nouns-dao/` skill for installed-user
-compatibility during the migration.
+The Bankr-specific public package is `integrations/bankr/`: one same-name
+`gavel` umbrella with self-contained references that deterministically routes
+voter/copilot work to the canonical CLI and Gate advocacy to the separately
+bounded Bankr client. The root `nouns-dao/` skill remains independently
+composable compatibility material, not a second required public install.
 
 The scripts under `nouns-dao/scripts/` mix read-only Nouns utilities with legacy
 direct signing (`AGENT_PRIVATE_KEY`). They remain clearly marked legacy; new

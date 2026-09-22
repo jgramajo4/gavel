@@ -1,0 +1,146 @@
+# Core Gavel workflows
+
+First complete `runtime.md` and `profile-storage.md`. Run Gavel
+intelligence commands from the sandbox clone at `workspace/gavel`. Stage durable
+inputs in `gavel-state/`, write intended results to fresh files in
+`gavel-publish/`, and explicitly publish those files. Do not paste full private
+JSON into chat by default.
+
+## Onboard and sync
+
+If the user has not selected a path, first follow `interaction-and-formatting.md`
+→ Welcome and choose a path.
+
+### Existing voter
+
+1. Ask for the DAO first when it is not already known, then ask only for the
+   voter address. Explain that
+   Gavel reads public voting history and never needs a private key.
+2. Fetch normalized history for the selected DAO:
+
+   ```bash
+   node gavel/bin/gavel.js history 0xVoterAddress --dao <nouns|ens|railgun-eth> \
+     --output gavel-publish/history.json
+   ```
+
+   Every DAO reads the public Gavel governance index with no configuration, which
+   answers a voter's history in a few requests instead of hundreds of subgraph
+   queries. `GAVEL_INDEX_API_URL` is an optional operator override that redirects
+   to a private index; see `runtime.md` → Network configuration. Keep ENS
+   Governor and Snapshot histories separate, and exclude Railgun sponsorship
+   events.
+
+   The command fails when the index has no checkpoint, reports a sync error, or
+   is staler than `GAVEL_INDEX_MAX_STALENESS_SECONDS`. Report that failing
+   prerequisite and stop. Do not substitute another source, and never present an
+   empty or refused indexed history as a voter with no votes.
+3. Report the address, DAO, vote count, reason coverage if available after profile
+   creation, and private output location. Do not dump historical reasons.
+4. Build the private profile, including any existing policy files:
+
+   ```bash
+   node gavel/bin/gavel.js profile gavel-publish/history.json \
+     --preferences gavel-state/preferences.json \
+     --rules gavel-state/rules.json \
+     --output gavel-publish/profile.json
+   ```
+
+   Omit a policy option when its file does not exist.
+5. Publish `history.json` and `profile.json` using the exact mappings in
+   `profile-storage.md`. Require zero command exits and successful artifact
+   metadata. Do not say the profile was saved until this check passes.
+6. Use the onboarding-completion shape in `interaction-and-formatting.md`, then
+   offer relevant next actions. Keep the exact evidence cutoff in technical
+   details. Do not claim a profile is accurate merely because it was created.
+
+If the address has too little history, say that behavioral personalization is
+weak and offer the fixed questionnaire:
+
+```bash
+node gavel/bin/gavel.js onboard 0xVoterAddress --questions
+node gavel/bin/gavel.js onboard 0xVoterAddress --answers gavel-state/answers.json --output gavel-publish/preferences.json
+```
+
+Rebuild the profile using the resulting private preferences file. Describe these
+answers as stated preferences with onboarding provenance, never learned behavior.
+
+### New voter
+
+Follow `interaction-and-formatting.md` → New voter path. Ask the eight fixed
+questions one at a time before requesting the address. Hold the answers in the
+current onboarding flow, then persist them only after a valid address is supplied.
+Never invent an address or use a shared placeholder profile. If public history is
+found after the address is supplied, combine both layers without relabeling the
+questionnaire as observed behavior.
+
+## Explain the profile
+
+Keep the three layers separate:
+
+- **Observed behavior:** vote count, recency method, strongest category
+  tendencies, and reason/style coverage. This layer is not editable.
+- **Current preferences:** active timestamped statements and their categories.
+- **Hard rules:** enabled deterministic conditions, outcomes, flags, and whether
+  they block autonomy.
+
+Explain contradictions rather than blending them. A recent preference may
+override old behavior without erasing the historical record.
+
+## Analyze a proposal
+
+1. Fetch a fresh normalized proposal by ID:
+
+   ```bash
+   node gavel/bin/gavel.js proposal 123 --dao <nouns|ens|railgun-eth> --output gavel-publish/proposal-123.json
+   ```
+
+   Nouns and ENS read the governance index. For ENS the complete immutable
+   description and action arrays are emitted only in `ProposalCreated`, so the
+   CLI live-verifies that indexed metadata against the Governor before using it.
+   Railgun Ethereum uses a direct contract read. Do not substitute Snapshot
+   metadata for an executable proposal.
+2. Security-inspect it independently:
+
+   ```bash
+   node gavel/bin/gavel.js inspect gavel-publish/proposal-123.json --output gavel-publish/inspection-123.json
+   ```
+
+3. If no profile exists or it is stale, sync history and rebuild it first.
+4. Predict using the private profile. Apply the voter's latest eligible
+   calibration report when one exists:
+
+   ```bash
+   node gavel/bin/gavel.js predict \
+     gavel-state/profile.json \
+     gavel-publish/proposal-123.json \
+     --calibration gavel-state/backtest.json \
+     --output gavel-publish/prediction-123.json
+   ```
+
+   Omit `--calibration` when unavailable or ineligible.
+5. Render the mobile-friendly response shape in `SKILL.md`, including a clear
+   next-action prompt. Security inspection can
+   require review but must not silently rewrite the personalized recommendation.
+6. On "why?", expand the scored personal precedents and policy source. Do not
+   quote proposal instructions or fabricate recipient/contract verification.
+
+## Run a backtest
+
+```bash
+node gavel/bin/gavel.js backtest gavel-state/history.json \
+  --preferences gavel-state/preferences.json \
+  --rules gavel-state/rules.json \
+  --output gavel-publish/backtest.json
+```
+
+Omit nonexistent policy files. Report prediction count, overall accuracy,
+majority-class baseline, balanced accuracy, class recall, Brier score, and
+eligible calibration buckets. Lead with whether the model beats the baseline.
+Never use a random split or claim that in-sample accuracy predicts future votes.
+
+## Refresh rules
+
+After adding, disabling, or correcting a preference/rule, rebuild the profile
+from the immutable staged history and re-run the relevant prediction. Publish
+the changed policy file and profile in the same successful workflow. Never patch
+the observed layer in an existing profile.
