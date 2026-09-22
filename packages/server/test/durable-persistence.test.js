@@ -166,8 +166,8 @@ test("migration persists only hashed sessions and exposes auth writes through na
   assert.match(sql, /GRANT SELECT ON gate\.auth_nonces,gate\.auth_sessions/i);
   assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE)[^;]*gate\.(?:auth_nonces|auth_sessions)/i);
   assert.doesNotMatch(sql, /gate_public\.(?:auth_nonces|auth_sessions)/i);
-  assert.match(sql, /postgres-parity'[\s\S]*installed_tables <> 19/i);
-  assert.match(sql, /durable-auth-profile'[\s\S]*installed_tables <> 20/i);
+  assert.match(sql, /postgres-parity'[\s\S]*installed_tables NOT IN \(19,21\)/i);
+  assert.match(sql, /durable-auth-profile'[\s\S]*installed_tables NOT IN \(20,21\)/i);
   assert.match(sql, /COALESCE\(\(SELECT migration_checksum[\s\S]*?\),''\)\s+NOT IN/i,
     "a null or unknown marked checksum must fail closed");
 });
