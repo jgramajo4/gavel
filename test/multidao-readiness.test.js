@@ -152,9 +152,25 @@ test("runtime readiness names the failing layer", () => {
     false,
   );
 
+  // This build registers no wallet transport, so interactive approval is
+  // reported unavailable on its own terms -- readiness must describe what can
+  // actually be submitted, not what the config asked for.
+  const interactiveNoTransport = resolveRuntimeReadiness({
+    config: { ...defaultGavelConfig(), execution: { ...defaultGavelConfig().execution, mode: "eoa-supervised" } },
+    dataDirWritable: true,
+  });
+  assert.equal(interactiveNoTransport.signals.execution, ReadinessLevel.UNAVAILABLE);
+  assert.equal(interactiveNoTransport.interactiveAvailable, false);
+  assert.match(
+    interactiveNoTransport.reasons.find((entry) => entry.code === "EXECUTION_INTERACTIVE_UNAVAILABLE").message,
+    /not available in this build/,
+  );
+
+  // Given a transport, the wallet becomes the deciding factor again.
   const interactiveWithoutWallet = resolveRuntimeReadiness({
     config: { ...defaultGavelConfig(), execution: { ...defaultGavelConfig().execution, mode: "eoa-supervised" } },
     dataDirWritable: true,
+    interactive: { available: true, reason: null },
   });
   assert.equal(interactiveWithoutWallet.signals.execution, ReadinessLevel.UNAVAILABLE);
   assert.match(

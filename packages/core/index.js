@@ -35,6 +35,7 @@ module.exports = {
   ...require("./src/dao/contract"),
   ...require("./src/dao/catalog"),
   ...require("./src/dao/proposal-ref"),
+  ...require("./src/dao/resolve"),
   ...require("./src/config/secrets"),
   ...require("./src/config/schema"),
   ...require("./src/config/migrate"),

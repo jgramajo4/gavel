@@ -113,6 +113,8 @@ const SECRET_REFERENCE_KEY_PATTERN =
   /^(variable|source|status|secretSource|secretVariable|secrets|secretAudit|secretStatus)$/;
 
 const REDACTED = "[redacted]";
+/** URL-safe stand-in, swapped for REDACTED after serialization. */
+const REDACTED_TOKEN = "gavelredactedvalue";
 
 /**
  * Value shapes that are secrets wherever they appear: a 32-byte hex key, a
@@ -121,6 +123,54 @@ const REDACTED = "[redacted]";
  */
 const RAW_PRIVATE_KEY_PATTERN = /\b0x?[0-9a-fA-F]{64}\b/;
 const MNEMONIC_PATTERN = /\b(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}\b/i;
+
+/** Any http(s) URL, wherever it appears -- in a field, a message, a log line. */
+const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>]+/gi;
+
+/**
+ * Strip credentials out of a URL without trying to guess which parameter
+ * names are sensitive.
+ *
+ * A URL can carry a secret in two places: userinfo (`https://user:pw@host`)
+ * and the query string. Maintaining an allowlist of "safe" parameter names is
+ * not security -- `?banana=<token>` defeats it -- so *every* query value is
+ * replaced and only the parameter names survive. Origin and path are kept,
+ * because those are what make the redacted line useful.
+ */
+function redactUrl(text) {
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return text;
+  }
+  let changed = false;
+  if (url.username || url.password) {
+    url.username = REDACTED_TOKEN;
+    url.password = "";
+    changed = true;
+  }
+  for (const key of [...url.searchParams.keys()]) {
+    url.searchParams.set(key, REDACTED_TOKEN);
+    changed = true;
+  }
+  if (!changed) return text;
+  return url.toString().replace(new RegExp(REDACTED_TOKEN, "g"), REDACTED);
+}
+
+function redactUrlsIn(text) {
+  return text.replace(URL_PATTERN, (match) => redactUrl(match));
+}
+
+/** Does this URL carry anything that could be a credential? */
+function urlCarriesCredentials(value) {
+  try {
+    const url = new URL(String(value));
+    return Boolean(url.username || url.password || [...url.searchParams.keys()].length > 0);
+  } catch {
+    return false;
+  }
+}
 
 function looksLikeSecretValue(value) {
   if (typeof value !== "string") return false;
@@ -136,7 +186,10 @@ function looksLikeSecretValue(value) {
  * cyclic object shows up.
  */
 function redactSecrets(value, seen = new WeakSet()) {
-  if (typeof value === "string") return looksLikeSecretValue(value) ? REDACTED : value;
+  if (typeof value === "string") {
+    if (looksLikeSecretValue(value)) return REDACTED;
+    return redactUrlsIn(value);
+  }
   if (value === null || typeof value !== "object") return value;
   if (seen.has(value)) return "[circular]";
   seen.add(value);
@@ -154,7 +207,7 @@ function redactSecrets(value, seen = new WeakSet()) {
 
 /** Redact a message before it is logged or thrown. */
 function redactMessage(message) {
-  return String(message ?? "")
+  return redactUrlsIn(String(message ?? ""))
     .replace(new RegExp(RAW_PRIVATE_KEY_PATTERN.source, "g"), REDACTED)
     .replace(new RegExp(MNEMONIC_PATTERN.source, "gi"), REDACTED)
     .replace(
@@ -245,6 +298,8 @@ module.exports = {
   looksLikeSecretValue,
   redactMessage,
   redactSecrets,
+  redactUrl,
+  urlCarriesCredentials,
   resolveSecretAudit,
   resolveSecretStatus,
 };

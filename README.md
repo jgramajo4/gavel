@@ -120,6 +120,10 @@ vocabulary -- Nouns counts `Votes`, ENS counts `Voting power`, Railgun counts
 Following a DAO you cannot vote in is a supported, ordinary configuration:
 zero voting power is reported as a fact, never as an application error.
 
+`--dao` never defaults to one of them. Omit it only when you follow exactly one
+DAO; with several followed, Gavel names them and asks which you meant, because
+proposal IDs are per-DAO and `nouns:123` is not `ens:123`.
+
 ENS Governor and Snapshot records remain separate; Gavel prepares executable ENS
 Governor votes only. Railgun supports FOR/Yay and AGAINST/Nay, has no abstain or
 reason field, and treats sponsorship as distinct from voting. Polygon and BSC

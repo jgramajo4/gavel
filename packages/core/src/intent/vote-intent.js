@@ -11,6 +11,7 @@ const { getAddress } = require("ethers");
 
 const { voteIntentSchema, VoteSupport } = require("../schema/intent");
 const {
+  deepFreeze,
   domainHash,
   normalizeChainId,
   normalizeReason,
@@ -38,7 +39,11 @@ function createVoteIntent(input) {
     }
     document.metadata = input.metadata;
   }
-  return voteIntentSchema.parse(document);
+  // Frozen at construction. A governance intent's DAO, proposal and support
+  // are decided once; nothing downstream -- a changed inbox filter, a changed
+  // followed-DAO list -- may retarget an intent that already exists. The
+  // validated boundary deep-freezes too, so this closes the window before it.
+  return deepFreeze(voteIntentSchema.parse(document));
 }
 
 /**

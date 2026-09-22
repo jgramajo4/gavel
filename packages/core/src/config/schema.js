@@ -27,6 +27,7 @@ const { z } = require("zod");
 
 const { ExecutionMode } = require("../schema/execution");
 const { listDaoIds } = require("../dao/catalog");
+const { urlCarriesCredentials } = require("./secrets");
 const { WalletConnectionType } = require("../wallet/provider");
 
 const CONFIG_SCHEMA_VERSION = "2.0.0";
@@ -63,8 +64,19 @@ const IMPLEMENTED_NETWORK_MODES = Object.freeze([NetworkMode.DIRECT]);
 const runtimeSchema = z.object({
   /** null means "resolve GAVEL_DATA_DIR at runtime", which is the default. */
   dataDir: z.string().min(1).nullable().default(null),
-  /** Empty string is the explicit opt-out back to a per-DAO public source. */
+  /**
+   * A plain, non-secret index endpoint. Empty string is the explicit opt-out
+   * back to a per-DAO public source.
+   *
+   * Credentials are deliberately not storable here: a URL carrying userinfo
+   * or a query string is refused on write, because configuration is not a
+   * secret store and a token in a URL survives into every status view, log
+   * line and diagnostic that ever prints the endpoint. An authenticated index
+   * is named by `indexApiUrlVariable` instead and read from the environment.
+   */
   indexApiUrl: z.string().nullable().default(null),
+  /** The environment variable holding an authenticated index URL, if any. */
+  indexApiUrlVariable: z.string().regex(/^[A-Z][A-Z0-9_]*$/).nullable().default(null),
 });
 
 const identitySchema = z.object({
@@ -243,6 +255,15 @@ function validateGavelConfig(configInput) {
       "EXECUTION_NEEDS_WALLET",
       "Interactive approval needs a connected wallet; read-only cannot sign",
       "execution.mode",
+    );
+  }
+
+  if (config.runtime.indexApiUrl && urlCarriesCredentials(config.runtime.indexApiUrl)) {
+    issue(
+      "INDEX_URL_CARRIES_CREDENTIALS",
+      "runtime.indexApiUrl must not carry userinfo or query parameters. Put the authenticated URL in an " +
+        "environment variable and name it in runtime.indexApiUrlVariable (for example GAVEL_INDEX_API_URL).",
+      "runtime.indexApiUrl",
     );
   }
 

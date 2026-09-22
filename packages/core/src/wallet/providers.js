@@ -85,6 +85,7 @@ class ReadOnlyWalletProvider extends BaseWalletProvider {
 class LocalSignerWalletProvider extends BaseWalletProvider {
   #signer;
   #broadcaster;
+  #revoked = null;
 
   constructor(options = {}) {
     super(options);
@@ -110,7 +111,14 @@ class LocalSignerWalletProvider extends BaseWalletProvider {
     return `Local signer (environment${this.source.variable ? `: ${this.source.variable}` : ""})`;
   }
 
+  /**
+   * Capabilities follow connection state, exactly as the WalletConnect
+   * provider's do. A disconnected provider that still advertised
+   * `sendTransaction` was the visible half of the bug below: the UI showed
+   * "disconnected" while the capability list said otherwise.
+   */
   getCapabilities() {
+    if (this._state !== WalletConnectionState.CONNECTED) return [WalletCapability.READ];
     const capabilities = [WalletCapability.READ, WalletCapability.SIGN_MESSAGE, WalletCapability.SIGN_TRANSACTION];
     if (this.#broadcaster) capabilities.push(WalletCapability.SEND_TRANSACTION);
     return capabilities;
@@ -127,22 +135,61 @@ class LocalSignerWalletProvider extends BaseWalletProvider {
     return this.getStatus();
   }
 
+  /**
+   * Disconnecting revokes authority, it does not merely relabel it.
+   *
+   * The signer and broadcaster handles are dropped, so nothing reachable from
+   * this object can sign or broadcast afterwards -- and a caller holding the
+   * original signer object cannot get back in through the provider, because
+   * every request goes through the state gate below. Reconnecting requires
+   * the handles to be supplied again, which is what makes the restored
+   * capability an explicit act rather than a leftover.
+   */
   async disconnect() {
     this._state = WalletConnectionState.DISCONNECTED;
+    this.#revoked = { signer: this.#signer, broadcaster: this.#broadcaster };
+    this.#signer = null;
+    this.#broadcaster = null;
     return this.getStatus();
+  }
+
+  /** Restore the dropped handles. Explicit, and only from this provider's own revoked pair. */
+  async reconnect() {
+    if (!this.#revoked) return this.connect();
+    this.#signer = this.#revoked.signer;
+    this.#broadcaster = this.#revoked.broadcaster;
+    this.#revoked = null;
+    this._account = null;
+    return this.connect();
   }
 
   async getStatus() {
     return { ...(await super.getStatus()), signerSource: this.source };
   }
 
+  /**
+   * The gate. Checked before the capability test, so the error names the real
+   * problem ("not connected") rather than the symptom ("cannot sign").
+   */
+  #assertLive() {
+    if (this._state !== WalletConnectionState.CONNECTED || !this.#signer) {
+      throw new WalletError(
+        WalletErrorCode.NOT_CONNECTED,
+        "The local signer is disconnected. Reconnect it before signing or submitting.",
+        { type: this.type },
+      );
+    }
+  }
+
   async requestSignature(payload) {
+    this.#assertLive();
     this.assertCapability(WalletCapability.SIGN_MESSAGE, "sign messages");
     await this.assertChain(payload?.domain?.chainId ?? this.chainId);
     return this.#signer.signTypedData(payload.domain, payload.types, payload.message);
   }
 
   async requestTransaction(request) {
+    this.#assertLive();
     this.assertCapability(WalletCapability.SEND_TRANSACTION, "submit transactions");
     const governance = assertGovernanceTransactionRequest(request);
     await this.assertChain(governance.chainId);
@@ -377,9 +424,67 @@ function createWalletConnectTransport(options = {}) {
   return factory(options);
 }
 
+/**
+ * Interactive wallet providers this build can actually construct.
+ *
+ * Separate from the transport registry above because they answer different
+ * questions. A transport is how WalletConnect reaches a wallet; this is
+ * whether *any* usable interactive signer exists for the production
+ * execution path. Both are empty in this build, so interactive approval is
+ * reported unavailable everywhere rather than offered and then refused at
+ * submit time.
+ *
+ * A factory registered here must return a real provider over a real signer.
+ * Registering a stub to make the mode look functional would be worse than
+ * leaving it unavailable: it would move the failure from setup, where it is
+ * cheap, to the moment of casting a vote, where it is not.
+ */
+const interactiveProviders = new Map();
+
+function registerInteractiveWalletProvider(id, factory) {
+  if (typeof factory !== "function") throw new TypeError("An interactive wallet provider factory is required");
+  interactiveProviders.set(String(id), factory);
+  return id;
+}
+
+function hasInteractiveWalletProvider() {
+  return interactiveProviders.size > 0 || transports.size > 0;
+}
+
+function createInteractiveWalletProvider(options = {}) {
+  const [factory] = [...interactiveProviders.values()];
+  if (factory) return factory(options);
+  if (transports.size > 0) {
+    return new WalletConnectProvider({ ...options, transport: createWalletConnectTransport(options) });
+  }
+  throw new WalletError(
+    WalletErrorCode.TRANSPORT_UNAVAILABLE,
+    "Interactive wallet approval is not available in this build: no wallet transport is registered.",
+  );
+}
+
+/**
+ * Whether interactive approval can be offered at all, and why not.
+ *
+ * Consulted by the wizard, by Settings, by readiness and by the CLI, so all
+ * four give the same answer instead of three of them claiming a capability
+ * the fourth refuses.
+ */
+function interactiveExecutionAvailability(options = {}) {
+  const ready = options.hasProvider ?? hasInteractiveWalletProvider();
+  if (ready) return { available: true, reason: null };
+  return {
+    available: false,
+    reason:
+      "Interactive wallet approval is not available in this build: no WalletConnect transport or " +
+      "interactive signer is registered. Use unsigned preparation, or a Safe.",
+  };
+}
+
 /** Cleared between tests; never called by shipping code. */
 function resetWalletConnectTransports() {
   transports.clear();
+  interactiveProviders.clear();
 }
 
 /**
@@ -451,10 +556,14 @@ module.exports = {
   LocalSignerWalletProvider,
   ReadOnlyWalletProvider,
   WalletConnectProvider,
+  createInteractiveWalletProvider,
   createWalletConnectTransport,
   createWalletProvider,
+  hasInteractiveWalletProvider,
   hasWalletConnectTransport,
+  interactiveExecutionAvailability,
   listWalletMethods,
+  registerInteractiveWalletProvider,
   registerWalletConnectTransport,
   resetWalletConnectTransports,
 };

@@ -25,8 +25,22 @@ const WALLET_METHODS = [
   { type: "read-only", label: "Read-only", summary: "", recommended: false, available: true, blockers: [] },
 ];
 
+/**
+ * `interactive` says whether the build can submit through a wallet. Injected
+ * rather than mocked into existence: shipping code registers no transport, so
+ * the default below is "unavailable" and only tests that are specifically
+ * about a transport-bearing build opt in.
+ */
 const wizard = (options = {}) =>
-  createSetupWizard({ env: {}, walletMethods: WALLET_METHODS, now: () => new Date("2026-02-01T00:00:00.000Z"), ...options });
+  createSetupWizard({
+    env: {},
+    walletMethods: WALLET_METHODS,
+    interactive: { available: false, reason: "no transport in this build" },
+    now: () => new Date("2026-02-01T00:00:00.000Z"),
+    ...options,
+  });
+
+const INTERACTIVE_READY = { available: true, reason: null };
 
 test("the wizard is eleven ordered steps and starts at the beginning", () => {
   const flow = wizard();
@@ -51,7 +65,7 @@ test("the wizard is eleven ordered steps and starts at the beginning", () => {
 });
 
 test("walking the whole flow produces a valid config", () => {
-  const flow = wizard();
+  const flow = wizard({ interactive: INTERACTIVE_READY });
   assert.equal(flow.next().ok, true); // welcome
   assert.equal(flow.stepId, SetupStep.DATA_DIR);
 
@@ -152,8 +166,20 @@ test("Back and resume", () => {
 });
 
 test("execution modes are offered only where they can work", () => {
-  // Read-only cannot sign, so interactive approval is shown disabled with a reason.
-  const readOnly = listExecutionOptions({ walletType: "read-only", followedDaos: ["nouns"] });
+  // This build registers no wallet transport, so interactive approval is
+  // unavailable whatever wallet is chosen -- and the reason says so, rather
+  // than sending the user to connect a wallet that would not help.
+  const noTransport = listExecutionOptions({ walletType: "local", followedDaos: ["nouns"] });
+  const unavailable = noTransport.find((option) => option.mode === "eoa-supervised");
+  assert.equal(unavailable.available, false);
+  assert.match(unavailable.blockers[0], /not available in this build/);
+
+  // With a transport, the wallet becomes the deciding factor again.
+  const readOnly = listExecutionOptions({
+    walletType: "read-only",
+    followedDaos: ["nouns"],
+    interactive: { available: true, reason: null },
+  });
   const interactive = readOnly.find((option) => option.mode === "eoa-supervised");
   assert.equal(interactive.available, false);
   assert.match(interactive.blockers[0], /Connect a wallet/);
@@ -188,6 +214,26 @@ test("execution modes are offered only where they can work", () => {
   );
 });
 
+test("interactive approval is not selectable when this build cannot submit", () => {
+  // The mismatch this guards: a mode the config accepts but the CLI then
+  // refuses at submit time. Onboarding must not offer it in the first place.
+  const flow = wizard();
+  flow.goto(SetupStep.DAOS);
+  flow.apply(SetupStep.DAOS, { daos: ["nouns"] });
+  flow.goto(SetupStep.WALLET);
+  flow.apply(SetupStep.WALLET, { type: "walletconnect", address: IDENTITY });
+  flow.goto(SetupStep.EXECUTION);
+
+  const offered = flow.options().modes.find((mode) => mode.mode === "eoa-supervised");
+  assert.equal(offered.available, false);
+  assert.match(offered.blockers[0], /no transport in this build/);
+
+  const rejected = flow.apply(SetupStep.EXECUTION, { mode: "eoa-supervised" });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.issues[0].code, "EXECUTION_MODE_UNAVAILABLE");
+  assert.equal(flow.draft.execution.mode, "unsigned");
+});
+
 test("an impossible execution mode cannot be selected", () => {
   const flow = wizard();
   flow.goto(SetupStep.DAOS);
@@ -205,7 +251,7 @@ test("an impossible execution mode cannot be selected", () => {
 });
 
 test("changing wallet or DAOs downgrades an execution mode that no longer works", () => {
-  const flow = wizard();
+  const flow = wizard({ interactive: INTERACTIVE_READY });
   flow.goto(SetupStep.DAOS);
   flow.apply(SetupStep.DAOS, { daos: ["nouns"] });
   flow.goto(SetupStep.WALLET);

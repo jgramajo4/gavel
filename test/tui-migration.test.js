@@ -56,6 +56,20 @@ test("TUI index adapter displays effectiveStatus when the API exposes it", () =>
   assert.match(adapter, /trackingState\?:/);
 });
 
+test("commands the TUI prints always name their DAO", () => {
+  // A copyable `gavel proposal 123` means different proposals to different
+  // readers. Every command the vote panel shows carries --dao.
+  const panel = fs.readFileSync(path.join(tuiRoot, "src", "components", "VoteFlow.tsx"), "utf8");
+  // Comments explain why the rule exists and may quote a bad command, so the
+  // check runs over rendered code only.
+  const rendered = panel.replace(/\{\/\*[\s\S]*?\*\/\}/g, "").replace(/\/\/.*$/gm, "");
+  for (const line of rendered.split("\n")) {
+    if (!/gavel [a-z]/.test(line)) continue;
+    assert.match(line, /--dao/, `printed command without a DAO: ${line.trim()}`);
+  }
+  assert.match(panel, /gavel proposal \{proposal\.id\} --dao \{proposal\.dao\}/);
+});
+
 test("the TUI has no single implicit DAO", () => {
   // The whole point of the multi-DAO refactor: no screen may default to one
   // governance system, and the home route is the unified inbox rather than

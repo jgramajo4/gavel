@@ -17,7 +17,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const { privatePath, resolveDataDir } = require("../storage/private-state");
-const { isPlaintextSecret, redactSecrets } = require("./secrets");
+const { isPlaintextSecret, redactSecrets, urlCarriesCredentials } = require("./secrets");
 const { defaultGavelConfig, parseGavelConfig } = require("./schema");
 const { migrateGavelConfig, needsMigration } = require("./migrate");
 
@@ -38,6 +38,16 @@ function configPath(dataDirInput) {
  */
 function assertNoSecrets(value, trail = []) {
   if (typeof value === "string") {
+    // A URL is the other way a credential reaches configuration, and it does
+    // not look like a key: `https://index.example/?banana=<token>` is a
+    // perfectly ordinary string. Userinfo and query values are refused by
+    // shape rather than by guessing which parameter names matter.
+    if (urlCarriesCredentials(value)) {
+      throw new Error(
+        `Refusing to write a credential-bearing URL to Gavel configuration at ${trail.join(".") || "<root>"}. ` +
+          "A URL with userinfo or query parameters may carry a token; name an environment variable instead.",
+      );
+    }
     if (isPlaintextSecret(value)) {
       throw new Error(
         `Refusing to write a secret to Gavel configuration at ${trail.join(".") || "<root>"}. ` +

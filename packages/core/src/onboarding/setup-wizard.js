@@ -22,7 +22,7 @@ const { getAddress } = require("ethers");
 const { ExecutionMode } = require("../schema/execution");
 const { getExecutionMode, listExecutionModes } = require("../execution/modes");
 const { WalletConnectionType } = require("../wallet/provider");
-const { listWalletMethods } = require("../wallet/providers");
+const { interactiveExecutionAvailability, listWalletMethods } = require("../wallet/providers");
 const { daoSupports, getDaoDescriptor, listDaoDescriptors, normalizeDaoSelection } = require("../dao/catalog");
 const { InferenceMode, NetworkMode, IMPLEMENTED_NETWORK_MODES, validateGavelConfig } = require("../config/schema");
 const { resolveSecretAudit } = require("../config/secrets");
@@ -107,13 +107,18 @@ function listExecutionOptions(input = {}) {
   const walletType = input.walletType || WalletConnectionType.READ_ONLY;
   const followedDaos = input.followedDaos || [];
   const canSign = walletType !== WalletConnectionType.READ_ONLY;
+  const interactive = input.interactive || interactiveExecutionAvailability();
 
   return listExecutionModes()
     .filter((mode) => mode.implemented)
     .map((mode) => {
       const blockers = [];
-      if (mode.mode === ExecutionMode.EOA_SUPERVISED && !canSign) {
-        blockers.push("Connect a wallet to approve votes interactively.");
+      if (mode.mode === ExecutionMode.EOA_SUPERVISED) {
+        // Availability first: a build with no wallet transport cannot submit
+        // interactively no matter which wallet the user picks, so saying
+        // "connect a wallet" would send them to fix the wrong thing.
+        if (!interactive.available) blockers.push(interactive.reason);
+        else if (!canSign) blockers.push("Connect a wallet to approve votes interactively.");
       }
       if (mode.capability !== "prepareVote") {
         const supporting = followedDaos.filter((dao) => daoSupports(dao, mode.capability));
@@ -183,6 +188,43 @@ function listNetworkOptions() {
   }));
 }
 
+/**
+ * Apply a change to the followed-DAO set, and reconcile execution with it.
+ *
+ * This is the single policy engine for "the user changed which DAOs they
+ * follow". The wizard's DAO step and the Settings screen both call it, so a
+ * user cannot reach a state through Settings that the wizard would have
+ * refused -- which is exactly what happened when Settings only wrote
+ * `followedDaos` and left `execution.mode` pointing at a mode no remaining
+ * DAO supports.
+ *
+ * The reconciliation only ever *reduces* authority. An execution mode that
+ * has become impossible falls back to unsigned; nothing here ever promotes a
+ * config into a more powerful mode, however many capable DAOs get added.
+ */
+function applyFollowedDaoSelection(configInput, nextDaos, options = {}) {
+  const config = parseGavelConfig(configInput);
+  const { selected, unknown } = normalizeDaoSelection(nextDaos || []);
+  const issues = unknown.map((id) => issue("UNKNOWN_DAO", `Unknown DAO: ${id}`, "followedDaos"));
+
+  const draft = structuredClone(config);
+  draft.followedDaos = selected;
+
+  const option = listExecutionOptions({
+    walletType: draft.wallet.type,
+    followedDaos: selected,
+    autonomousAcknowledged: Boolean(draft.execution.autonomous?.acknowledgedAt),
+    interactive: options.interactive,
+  }).find((entry) => entry.mode === draft.execution.mode);
+
+  // An unrecognized mode is left alone rather than silently rewritten: it is
+  // reported by validation, and rewriting it here would hide the problem.
+  const downgraded = Boolean(option && !option.available);
+  if (downgraded) draft.execution.mode = ExecutionMode.UNSIGNED;
+
+  return { config: parseGavelConfig(draft), issues, downgraded, selected, unknown };
+}
+
 function issue(code, message, path) {
   return path ? { code, message, path } : { code, message };
 }
@@ -222,6 +264,11 @@ class SetupWizard {
     const index = STEP_IDS.indexOf(resumeAt);
     this.index = index >= 0 ? index : 0;
     this.walletMethods = options.walletMethods || listWalletMethods({ env: this.env, ...options.walletContext });
+    // Whether this build can submit through an interactive wallet. Injected
+    // so a host that registers a real transport lights the mode up, and so
+    // tests can exercise the wizard's own logic without a fake transport
+    // existing anywhere in shipping code.
+    this.interactive = options.interactive || interactiveExecutionAvailability();
     // Verification results, injected: probing a DAO is a network operation and
     // the wizard is pure.
     this.verification = options.verification || [];
@@ -275,6 +322,7 @@ class SetupWizard {
             walletType: this.draft.wallet.type,
             followedDaos: this.draft.followedDaos,
             autonomousAcknowledged: Boolean(this.draft.execution.autonomous?.acknowledgedAt),
+            interactive: this.interactive,
           }),
           selected: this.draft.execution.mode,
         };
@@ -312,16 +360,12 @@ class SetupWizard {
         break;
       }
       case SetupStep.DAOS: {
-        const { selected, unknown } = normalizeDaoSelection(value?.daos || []);
-        for (const id of unknown) issues.push(issue("UNKNOWN_DAO", `Unknown DAO: ${id}`));
-        draft.followedDaos = selected;
-        // Dropping a DAO can invalidate the execution mode that depended on it.
-        const stillSupported = listExecutionOptions({
-          walletType: draft.wallet.type,
-          followedDaos: selected,
-          autonomousAcknowledged: Boolean(draft.execution.autonomous?.acknowledgedAt),
-        }).find((option) => option.mode === draft.execution.mode);
-        if (stillSupported && !stillSupported.available) draft.execution.mode = ExecutionMode.UNSIGNED;
+        // Shared with Settings, so both surfaces reconcile execution the same
+        // way when the followed set changes.
+        const transition = applyFollowedDaoSelection(draft, value?.daos || [], { interactive: this.interactive });
+        issues.push(...transition.issues);
+        draft.followedDaos = transition.config.followedDaos;
+        draft.execution = transition.config.execution;
         break;
       }
       case SetupStep.WALLET: {
@@ -370,6 +414,7 @@ class SetupWizard {
           walletType: draft.wallet.type,
           followedDaos: draft.followedDaos,
           autonomousAcknowledged: Boolean(draft.execution.autonomous?.acknowledgedAt),
+          interactive: this.interactive,
         }).find((entry) => entry.mode === draft.execution.mode);
         if (option && !option.available) draft.execution.mode = ExecutionMode.UNSIGNED;
         break;
@@ -380,6 +425,7 @@ class SetupWizard {
           walletType: draft.wallet.type,
           followedDaos: draft.followedDaos,
           autonomousAcknowledged: value?.acknowledgeAutonomous === true,
+          interactive: this.interactive,
         }).find((entry) => entry.mode === mode);
         if (!option) {
           issues.push(issue("UNKNOWN_EXECUTION_MODE", `Unknown execution mode: ${mode}`));
@@ -540,6 +586,7 @@ class SetupWizard {
       walletType: wallet.type,
       followedDaos: this.draft.followedDaos,
       autonomousAcknowledged: Boolean(this.draft.execution.autonomous?.acknowledgedAt),
+      interactive: this.interactive,
     }).find((entry) => entry.mode === this.draft.execution.mode);
 
     const daos = listDaoDescriptors()
@@ -605,6 +652,7 @@ function createSetupWizard(options) {
 
 module.exports = {
   DATA_DIR_CONTENTS,
+  applyFollowedDaoSelection,
   SETUP_STEPS,
   STEP_IDS,
   SetupStep,

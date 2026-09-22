@@ -57,8 +57,19 @@ export function VoteFlow({ proposal, onExit }: { proposal: Proposal; onExit: () 
           </Box>
           <Box marginTop={1} flexDirection="column">
             <Text dimColor>Prepare this vote through the canonical path:</Text>
+            {/*
+              Every printed command names the DAO. A copyable
+              `gavel proposal 123` would mean a different proposal depending on
+              which DAOs the reader follows, and `ens:123` is not `nouns:123`.
+              The DAO enters at the fetch and is then carried by the documents;
+              `--dao` on prepare only asserts it.
+            */}
             <Text color="cyan">
-              {'  '}gavel execution prepare &lt;prediction.json&gt; &lt;proposal.json&gt; --support FOR
+              {'  '}gavel proposal {proposal.id} --dao {proposal.dao}
+            </Text>
+            <Text color="cyan">
+              {'  '}gavel execution prepare &lt;prediction.json&gt; &lt;proposal.json&gt; --dao{' '}
+              {proposal.dao} --support FOR
             </Text>
             <Text dimColor>
               {'  '}The adapter re-validates live chain state, so a stored intent is an audit

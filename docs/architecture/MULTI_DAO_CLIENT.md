@@ -61,6 +61,28 @@ ens          Voting power / Delegation
 railgun-eth  Staked voting power / Voting key
 ```
 
+## Choosing a DAO on the command line
+
+`--dao` never defaults. Every DAO-scoped command resolves through one helper,
+`resolveDaoContext()`:
+
+| Followed DAOs | `--dao` omitted | Result |
+|---|---|---|
+| Nouns | yes | resolves to `nouns` |
+| ENS | yes | resolves to `ens` |
+| Nouns + ENS | yes | refuses: `DAO is required because multiple DAOs are followed: nouns, ens. Pass --dao <id>.` |
+| Nouns + ENS | `--dao ens` | resolves to `ens` |
+| none | yes | refuses, and says to run `gavel daos follow <id>` |
+
+Picking "the first one" and picking Nouns are both guesses about which
+governance system the user meant, and `nouns:123` is not `ens:123`. A refusal
+costs a flag; a wrong guess costs a vote in the wrong DAO.
+
+`gavel execution prepare` takes `--dao` too, but only as an assertion: the DAO
+binding lives in the prediction and proposal documents, and a `--dao` that
+disagrees is refused rather than honoured. Nothing on a command line can
+retarget an intent that already exists.
+
 ## Proposal identity
 
 Proposal ids are per-DAO counters, so `(dao, proposalId)` is the only identity
@@ -161,11 +183,20 @@ pair. `registerWalletConnectTransport()` is the seam a host plugs into.
 
 ## Execution
 
-`eoa-supervised` is promoted from a declared-but-unimplemented mode to an
-implemented one, backed by `InteractiveWalletExecutionAdapter`. It holds no
-credential at all -- its `identityRole` is `null` -- because the key lives in
-the user's wallet app and Gavel only ever presents a request. A rejection is a
-normal outcome (`CANCELLED` with a reason), not a thrown failure.
+`eoa-supervised` has an adapter -- `InteractiveWalletExecutionAdapter`, which
+holds no credential at all, because the key lives in the user's wallet app and
+Gavel only ever presents a request. A rejection is a normal outcome
+(`CANCELLED` with a reason), not a thrown failure.
+
+**It is unavailable in this build.** No WalletConnect transport and no
+interactive signer are registered, so nothing can submit through it. Rather
+than accept the mode and fail at the moment of casting a vote, every surface
+says so up front and with the same reason: the wizard and Settings show it
+disabled, `gavel readiness` reports
+`EXECUTION_INTERACTIVE_UNAVAILABLE`, and the CLI refuses
+`--mode eoa-supervised` by name. `registerInteractiveWalletProvider()` and
+`registerWalletConnectTransport()` are the seams that light it up; nothing is
+mocked to make it look functional.
 
 Offered modes are filtered by what can actually work: interactive approval
 needs a connected wallet, Safe-supervised needs a followed DAO that supports
@@ -190,6 +221,12 @@ separable questions per DAO:
 }
 ```
 
+A DAO the build does not know -- a hand-edited config, a catalog change across
+an upgrade, a removed adapter -- is one unavailable row carrying
+`UNKNOWN_DAO`, not an exception. It is never silently dropped and never
+reinterpreted, the healthy DAOs beside it are still answered, and no execution
+mode is ever offered for it.
+
 `monitor`, `analyze` and `vote` degrade independently. **Zero voting power is
 not an error**: `vote` is unavailable with an `info`-severity reason, and
 monitoring and analysis stay ready. One unreachable indexer degrades one row;
@@ -202,6 +239,14 @@ Configuration holds references. `resolveSecretAudit()` answers with
 backstop applied to config writes, JSON output, status views, logs, errors and
 diagnostics. Tests assert with sentinel values that raw secrets never appear in
 any of them.
+
+A URL is the other way a credential reaches configuration, and it does not look
+like a key: `https://index.example/?banana=<token>` is an ordinary string. So
+`runtime.indexApiUrl` refuses userinfo and query parameters outright on write,
+and an authenticated index is named by `runtime.indexApiUrlVariable` and read
+from the environment. Redaction does not keep a list of "sensitive" parameter
+names -- every query value is replaced and only the names survive, because any
+allowlist is defeated by renaming the parameter.
 
 ## GAVEL_DATA_DIR
 

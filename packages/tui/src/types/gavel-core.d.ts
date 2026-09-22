@@ -48,13 +48,26 @@ declare module '@gavel/core' {
     capabilities: Array<{ capability: string; supported: boolean }>;
   }>;
   export function normalizeDaoSelection(ids: string[]): { selected: string[]; unknown: string[] };
+  export function applyFollowedDaoSelection(
+    config: unknown,
+    nextDaos: string[],
+    options?: Record<string, unknown>,
+  ): { config: GavelConfig; issues: ConfigIssue[]; downgraded: boolean; selected: string[]; unknown: string[] };
+  export function resolveDaoContext(input: {
+    explicitDao?: string | null;
+    followedDaos?: string[];
+  }): { dao: string; descriptor: DaoDescriptor; source: string };
+  export function interactiveExecutionAvailability(options?: Record<string, unknown>): {
+    available: boolean;
+    reason: string | null;
+  };
 
   export function daoProposalKey(dao: string, proposalId: string | number | bigint): string;
   export function formatDaoProposal(dao: string, proposalId: string | number | bigint): string;
 
   export interface GavelConfig {
     schemaVersion: string;
-    runtime: { dataDir: string | null; indexApiUrl: string | null };
+    runtime: { dataDir: string | null; indexApiUrl: string | null; indexApiUrlVariable: string | null };
     identity: { address: string | null; label: string | null };
     wallet: {
       type: 'read-only' | 'local' | 'walletconnect';
@@ -177,7 +190,9 @@ declare module '@gavel/core' {
   export interface DaoReadiness {
     dao: string;
     displayName: string;
-    chainId: number;
+    chainId: number | null;
+    /** false when this build does not know the DAO at all. */
+    known: boolean;
     signals: { index: string; identity: string; vote: string };
     monitor: string;
     analyze: string;
@@ -198,6 +213,7 @@ declare module '@gavel/core' {
     reasons: ReadinessReason[];
     executionMode: string;
     humanApprovalRequired: boolean;
+    interactiveAvailable: boolean;
     walletType: string;
   };
   export function summarizeGavelReadiness(input: Record<string, unknown>): {

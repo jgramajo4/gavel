@@ -22,7 +22,8 @@
 const { ExecutionMode } = require("../schema/execution");
 const { ExecutionModeKind, getExecutionMode } = require("../execution/modes");
 const { WalletConnectionType } = require("../wallet/provider");
-const { findDaoDescriptor, getDaoDescriptor } = require("../dao/catalog");
+const { interactiveExecutionAvailability } = require("../wallet/providers");
+const { findDaoDescriptor } = require("../dao/catalog");
 const { InferenceMode } = require("../config/schema");
 
 const ReadinessLevel = Object.freeze({
@@ -134,12 +135,19 @@ function resolveRuntimeReadiness(input = {}) {
   // throw, so no caller has to repeat it -- repeating it is how a guarded
   // lookup becomes an unguarded one somewhere else.
   let humanApprovalRequired = true;
+  const interactive = input.interactive || interactiveExecutionAvailability();
   try {
     const definition = getExecutionMode(mode);
     humanApprovalRequired = definition.kind !== ExecutionModeKind.AUTONOMOUS;
     if (!definition.implemented) {
       executionLevel = ReadinessLevel.UNAVAILABLE;
       reasons.push(reason("EXECUTION_MODE_UNIMPLEMENTED", `Execution mode ${mode} is not implemented.`, ReasonSeverity.ERROR));
+    } else if (mode === ExecutionMode.EOA_SUPERVISED && !interactive.available) {
+      // Readiness reports what this build can actually submit, not what the
+      // config asked for. Saying "ready" here and failing at submit time is
+      // the mismatch this check exists to remove.
+      executionLevel = ReadinessLevel.UNAVAILABLE;
+      reasons.push(reason("EXECUTION_INTERACTIVE_UNAVAILABLE", interactive.reason, ReasonSeverity.ERROR));
     } else if (
       definition.kind !== ExecutionModeKind.OFFLINE &&
       walletType === WalletConnectionType.READ_ONLY &&
@@ -171,6 +179,7 @@ function resolveRuntimeReadiness(input = {}) {
     reasons,
     executionMode: mode,
     humanApprovalRequired,
+    interactiveAvailable: interactive.available,
     walletType,
   };
 }
@@ -184,7 +193,43 @@ function resolveRuntimeReadiness(input = {}) {
  * which is what keeps one unreachable indexer from taking the process down.
  */
 function resolveDaoReadiness(input = {}) {
-  const descriptor = getDaoDescriptor(input.dao);
+  const dao = String(input.dao || "");
+  const descriptor = findDaoDescriptor(dao);
+  // A followed DAO this build does not know -- a hand-edited config, a
+  // catalog change across an upgrade, a removed adapter -- is a fact to
+  // report, not a crash. It stays in the list, visibly unavailable, so the
+  // healthy DAOs beside it are still answered and the user can see what to
+  // fix. It is never silently dropped and never reinterpreted as another DAO.
+  if (!descriptor) {
+    return {
+      dao,
+      displayName: dao,
+      chainId: null,
+      known: false,
+      signals: {
+        index: ReadinessLevel.UNAVAILABLE,
+        identity: ReadinessLevel.UNAVAILABLE,
+        vote: ReadinessLevel.UNAVAILABLE,
+      },
+      monitor: ReadinessLevel.UNAVAILABLE,
+      analyze: ReadinessLevel.UNAVAILABLE,
+      vote: ReadinessLevel.UNAVAILABLE,
+      votingPower: null,
+      votingPowerLabel: "Voting power",
+      delegation: null,
+      delegationLabel: "Delegation",
+      usable: false,
+      level: ReadinessLevel.UNAVAILABLE,
+      reasons: [
+        reason(
+          "UNKNOWN_DAO",
+          `${dao} is followed but is not supported by this build. Remove it with ` +
+            `\`gavel daos unfollow ${dao}\`, or upgrade to a build that supports it.`,
+          ReasonSeverity.ERROR,
+        ),
+      ],
+    };
+  }
   const probe = input.probe || {};
   const reasons = [];
 
@@ -279,6 +324,7 @@ function resolveDaoReadiness(input = {}) {
     dao: descriptor.id,
     displayName: descriptor.displayName,
     chainId: descriptor.chainId,
+    known: true,
     signals: { index, identity, vote },
     monitor,
     analyze,

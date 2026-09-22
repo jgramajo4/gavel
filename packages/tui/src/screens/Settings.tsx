@@ -12,11 +12,11 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import {
+  applyFollowedDaoSelection,
   daoDisplayName,
   listDaoDescriptors,
   listExecutionOptions,
   listWalletMethods,
-  normalizeDaoSelection,
   resolveSecretAudit,
   validateGavelConfig,
   type GavelConfig,
@@ -127,8 +127,18 @@ export function Settings({ onBack }: { onBack: () => void }) {
       const next = gavel.followedDaos.includes(choice.value)
         ? gavel.followedDaos.filter((id) => id !== choice.value)
         : [...gavel.followedDaos, choice.value];
-      const { selected } = normalizeDaoSelection(next);
-      void save({ ...gavel, followedDaos: selected });
+      // The same transition the wizard's DAO step runs, so Settings cannot
+      // reach a state the wizard would refuse -- previously this wrote
+      // `followedDaos` alone and left an execution mode no remaining DAO
+      // could support.
+      const transition = applyFollowedDaoSelection(gavel, next);
+      if (transition.downgraded) {
+        setMessage(
+          `No followed DAO supports ${gavel.execution.mode}; execution is now unsigned. ` +
+            'Re-select a mode in Execution mode.',
+        );
+      }
+      void save(transition.config);
     } else if (input === ' ' && section === 'notifications') {
       const choice = choices[cursor];
       if (!choice) return;
