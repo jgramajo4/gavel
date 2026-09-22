@@ -489,7 +489,7 @@ test("profile update verifies and consumes enrollment inside the shared profile 
   assert.equal(events[2][1], true);
   assert.equal(events[4][1], true);
   assert.deepEqual(result, {
-    wallet: WALLET, ens: "noun.eth", availability: "accepting_now", acceptingSubmissions: true,
+    wallet: WALLET, label: "noun.eth", availability: "accepting_now", acceptingSubmissions: true,
     message: "Reviewing public goods",
     policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: ["public-goods"] }],
@@ -624,7 +624,7 @@ test("profile update returns a safe committed projection when post-commit index 
   const result = await service.updateProfile({ session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof({ availability: "paused" }) });
   assert.equal(committed, true);
   assert.deepEqual(result, {
-    wallet: WALLET, ens: "noun.eth", availability: "paused", acceptingSubmissions: false,
+    wallet: WALLET, label: "noun.eth", availability: "paused", acceptingSubmissions: false,
     message: "Not currently accepting new submissions",
     policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: [] }],
@@ -998,6 +998,7 @@ test("Node HTTP server delegates auth and exposes only the profile service route
   const profileService = {
     async updateProfile(input) { calls.push(["update", input]); return { wallet: WALLET, availability: "accepting_now" }; },
     async listPublicProfiles(filters) { calls.push(["list", filters]); return [{ wallet: WALLET, availability: "accepting_now" }]; },
+    async findPublicProfilesByLabel(filters) { calls.push(["matches", filters]); return [{ wallet: WALLET, label: "noun.eth" }]; },
     async getPublicProfile(wallet) { calls.push(["get", wallet]); return wallet === WALLET ? { wallet, availability: "accepting_now" } : null; },
   };
   const server = createGateHttpServer({ authService, profileService });
@@ -1051,6 +1052,12 @@ test("Node HTTP server delegates auth and exposes only the profile service route
     assert.deepEqual(directory.body, { items: [{ wallet: WALLET, availability: "accepting_now" }] });
     assert.deepEqual(calls.find((call) => call[0] === "list")[1], {
       dao: "nouns", availability: "accepting_now", minVotingPower: "0", sort: "power",
+    });
+
+    const matches = await requestJson(baseUrl, "/v1/gates/matches?dao=nouns&label=noun.eth&stage=VOTING");
+    assert.deepEqual(matches.body, { items: [{ wallet: WALLET, label: "noun.eth" }] });
+    assert.deepEqual(calls.find((call) => call[0] === "matches")[1], {
+      dao: "nouns", label: "noun.eth", stage: "VOTING",
     });
 
     const direct = await requestJson(baseUrl, `/v1/gates/${WALLET}`);

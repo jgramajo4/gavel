@@ -60,7 +60,7 @@ test("a paused or closed Gate profile is never selectable", () => {
 });
 
 test("human display prefers Gate's label while machine identity stays the canonical wallet", async () => {
-  const labeled = gateProfile({ ens: null, label: "delegate.gramajo.eth" });
+  const labeled = gateProfile({ label: "delegate.gramajo.eth" });
   const { api, calls } = gateApiFor([
     { match: (url) => url.includes(`/v1/gates/${VOTER.toLowerCase()}`), body: labeled },
   ]);
@@ -73,7 +73,7 @@ test("human display prefers Gate's label while machine identity stays the canoni
 });
 
 test("human display falls back cleanly to the shortened canonical wallet", () => {
-  const voter = projectVoter(gateProfile({ ens: null, label: null }), { stage: "PRE_VOTE" });
+  const voter = projectVoter(gateProfile({ label: null }), { stage: "PRE_VOTE" });
   const lower = VOTER.toLowerCase();
   assert.equal(voter.wallet, lower);
   assert.equal(voter.label, `${lower.slice(0, 6)}…${lower.slice(-4)}`);
@@ -82,11 +82,10 @@ test("human display falls back cleanly to the shortened canonical wallet", () =>
 test("an explicit Gate label wins over the Bankr profile wallet and resolves only through live Gate data", async () => {
   const targetProfile = gateProfile({
     wallet: TARGET_VOTER,
-    ens: null,
     label: "delegate.gramajo.eth",
   });
   const { api, calls } = gateApiFor([
-    { match: (url) => url.includes("/v1/gates?"), body: { items: [targetProfile] } },
+    { match: (url) => url.includes("/v1/gates/matches?"), body: { items: [targetProfile] } },
     { match: (url) => url.endsWith(`/v1/gates/${TARGET_VOTER}`), body: targetProfile },
   ]);
 
@@ -99,7 +98,9 @@ test("an explicit Gate label wins over the Bankr profile wallet and resolves onl
 
   assert.equal(voter.wallet, TARGET_VOTER);
   assert.equal(voter.label, "delegate.gramajo.eth (0xc180…5425)");
-  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates", `/v1/gates/${TARGET_VOTER}`]);
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates/matches", `/v1/gates/${TARGET_VOTER}`]);
+  assert.equal(new URL(calls[0].url).searchParams.get("label"), "delegate.gramajo.eth");
+  assert.equal(new URL(calls[0].url).searchParams.get("stage"), "PRE_VOTE");
 });
 
 test("an explicit wallet wins over the Bankr profile wallet without directory inference", async () => {
@@ -119,10 +120,10 @@ test("an explicit wallet wins over the Bankr profile wallet without directory in
 });
 
 test("an ambiguous explicit Gate label fails closed instead of choosing by directory order", async () => {
-  const duplicate = gateProfile({ wallet: TARGET_VOTER, ens: null, label: "delegate.gramajo.eth" });
-  const other = gateProfile({ wallet: VOTER, ens: null, label: "delegate.gramajo.eth" });
+  const duplicate = gateProfile({ wallet: TARGET_VOTER, label: "delegate.gramajo.eth" });
+  const other = gateProfile({ wallet: VOTER, label: "delegate.gramajo.eth" });
   const { api, calls } = gateApiFor([
-    { match: (url) => url.includes("/v1/gates?"), body: { items: [duplicate, other] } },
+    { match: (url) => url.includes("/v1/gates/matches?"), body: { items: [duplicate, other] } },
   ]);
 
   await assert.rejects(
@@ -134,17 +135,32 @@ test("an ambiguous explicit Gate label fails closed instead of choosing by direc
     }),
     (error) => error.code === "AMBIGUOUS_VOTER",
   );
-  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates"]);
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates/matches"]);
+});
+
+test("explicit label selection uses Gate's complete exact-label lookup, not the bounded discovery page", async () => {
+  const targetProfile = gateProfile({ wallet: TARGET_VOTER, label: "page-two.delegate" });
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.includes("/v1/gates/matches?"), body: { items: [targetProfile] } },
+    { match: (url) => url.endsWith(`/v1/gates/${TARGET_VOTER}`), body: targetProfile },
+  ]);
+
+  const voter = await selectTargetVoter(api, {
+    explicitTarget: "page-two.delegate", profileWallet: VOTER, stage: "PRE_VOTE",
+  });
+
+  assert.equal(voter.wallet, TARGET_VOTER);
+  assert.equal(calls.some(({ url }) => new URL(url).pathname === "/v1/gates"), false);
 });
 
 test("an unknown explicit label fails without falling back or gaining an ENS resolver capability", async () => {
   const calls = [];
   const gateApi = new Proxy({
-    async listGates() { calls.push("listGates"); return [gateProfile()]; },
+    async findGatesByLabel() { calls.push("findGatesByLabel"); return []; },
     async getGate() { calls.push("getGate"); return gateProfile(); },
   }, {
     get(target, property, receiver) {
-      assert.ok(property === "listGates" || property === "getGate",
+      assert.ok(property === "findGatesByLabel" || property === "getGate",
         `unexpected voter-resolution capability: ${String(property)}`);
       return Reflect.get(target, property, receiver);
     },
@@ -158,7 +174,7 @@ test("an unknown explicit label fails without falling back or gaining an ENS res
     }),
     (error) => error.code === "VOTER_NOT_ACCEPTING",
   );
-  assert.deepEqual(calls, ["listGates"]);
+  assert.deepEqual(calls, ["findGatesByLabel"]);
 });
 
 test("an invalid explicit target fails instead of falling back to the Bankr profile wallet", async () => {

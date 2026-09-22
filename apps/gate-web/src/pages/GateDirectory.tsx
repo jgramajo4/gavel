@@ -34,7 +34,7 @@ function GateCard({ profile }: { profile: PublicGateProfile }) {
     <li className="gate-card">
       <h2 className="gate-card-title">
         <Link to={`/gates/${profile.wallet}`}>
-          <WalletIdentity address={profile.wallet} ens={profile.ens} />
+          <WalletIdentity address={profile.wallet} ens={profile.label} />
         </Link>
       </h2>
       <AvailabilityBadge

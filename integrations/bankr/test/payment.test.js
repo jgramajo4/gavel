@@ -55,6 +55,17 @@ test("a quote for a chain outside the allow-list never reaches the wallet", asyn
   assert.equal(calls.signTypedData.length, 0);
 });
 
+test("a Base quote for a non-canonical token is refused before token reads or signing", async () => {
+  const { wallet, calls } = createWalletStub();
+  const customToken = parseIssuedQuote(issuedQuote({ message: { token: `0x${"6".repeat(40)}` } }));
+  await assert.rejects(
+    payQuote({ wallet, relayer: createRelayerStub().relayer, quote: customToken, confirmed: true, now }),
+    (error) => error.code === "TOKEN_NOT_ALLOWED",
+  );
+  assert.equal(calls.call.length, 0);
+  assert.equal(calls.signTypedData.length, 0);
+});
+
 test("a wallet on the wrong chain is switched to the quote's chain", async () => {
   const { wallet, calls } = createWalletStub({ chainId: 11_155_111 });
   await payQuote({ wallet, relayer: createRelayerStub().relayer, quote: quoteFixture(), confirmed: true, now });

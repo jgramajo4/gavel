@@ -12,7 +12,6 @@ const { pollUntilTerminal, submitSettlementHint } = require("./settlement");
 const { resolveTarget } = require("./targets");
 const { resolveConfig } = require("./config");
 const { assertWalletCapabilities } = require("./wallet");
-const { assertRelayerCapabilities } = require("./relayer");
 const { createRemoteRelay } = require("./remote-relay");
 
 /**
@@ -50,10 +49,15 @@ function createBankrGateFlow({
     timeoutMs: resolved.requestTimeoutMs,
   });
   if (wallet) assertWalletCapabilities(wallet);
-  if (relayer) assertRelayerCapabilities(relayer);
-  // The funded account is either in process or on the Gate server. A Bankr
-  // sandbox is ephemeral and holds no key, so the remote relay is the normal
-  // production path; an in-process relayer stays supported and takes priority.
+  if (relayer) {
+    throw new BankrGateError(
+      "LOCAL_RELAYER_DISABLED",
+      "The public Bankr flow requires Gate's durable remote relay; an injected in-process relayer is unavailable.",
+    );
+  }
+  // Payment is remote-only so every broadcast passes through Gate's durable
+  // write-ahead and reconciliation boundary. Discovery remains available when
+  // no relay is configured.
   const relay = remoteRelay || (resolved.relayerUrl
     ? createRemoteRelay({ relayUrl: resolved.relayerUrl, fetchImpl, timeoutMs: resolved.requestTimeoutMs })
     : null);
@@ -63,8 +67,8 @@ function createBankrGateFlow({
     config: resolved,
     gateApi: gate,
     indexApi: index,
-    /** Where the gas gets paid: "local", "remote", or null when neither exists. */
-    relayMode: relayer ? "local" : (relay ? "remote" : null),
+    /** Where the gas gets paid: "remote", or null when payment is unavailable. */
+    relayMode: relay ? "remote" : null,
 
     /** 1. Resolve a REAL Nouns candidate or proposal through canonical data. */
     resolveTarget(input) {
@@ -156,14 +160,13 @@ function createBankrGateFlow({
      * resolves the quote from its OWN owner-bound record of this submission.
      */
     broadcast({ prepared, quote, session, publicId, onPhase }) {
-      return broadcastPayment({ relayer, remoteRelay: relay, session, publicId, prepared, quote, onPhase, now });
+      return broadcastPayment({ remoteRelay: relay, session, publicId, prepared, quote, onPhase, now });
     },
 
     /** 6. Authorize then broadcast. A broadcast is never success. */
     pay({ quote, confirmed, session, publicId, onPhase }) {
       return payQuote({
         wallet,
-        relayer,
         remoteRelay: relay,
         session,
         publicId,

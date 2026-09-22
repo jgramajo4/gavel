@@ -147,13 +147,17 @@ function profileServiceWith({ ensResolver, display }) {
   });
 }
 
-test("a verified name reaches both the profile route and the directory", async () => {
+test("a verified name reaches both public surfaces as the generic label, never an ENS field", async () => {
   const service = profileServiceWith({
     ensResolver: createEnsNameResolver({ provider: stubProvider(async () => "gavel.eth") }),
   });
 
-  assert.equal((await service.getPublicProfile(WALLET)).ens, "gavel.eth");
-  assert.equal((await service.listPublicProfiles({}))[0].ens, "gavel.eth");
+  const direct = await service.getPublicProfile(WALLET);
+  const listed = (await service.listPublicProfiles({}))[0];
+  assert.equal(direct.label, "gavel.eth");
+  assert.equal(listed.label, "gavel.eth");
+  assert.equal(Object.hasOwn(direct, "ens"), false);
+  assert.equal(Object.hasOwn(listed, "ens"), false);
 });
 
 test("a verified miss publishes null instead of a wallet's self-declared name", async () => {
@@ -162,7 +166,7 @@ test("a verified miss publishes null instead of a wallet's self-declared name", 
     display: { ens: "vitalik.eth" },
   });
 
-  assert.equal((await service.getPublicProfile(WALLET)).ens, null);
+  assert.equal((await service.getPublicProfile(WALLET)).label, null);
 });
 
 test("a verified name overrides a wallet's self-declared name", async () => {
@@ -171,14 +175,14 @@ test("a verified name overrides a wallet's self-declared name", async () => {
     display: { ens: "vitalik.eth" },
   });
 
-  assert.equal((await service.getPublicProfile(WALLET)).ens, "gavel.eth");
+  assert.equal((await service.getPublicProfile(WALLET)).label, "gavel.eth");
 });
 
-test("with no resolver configured the projection is byte-for-byte what it was before", async () => {
+test("with no resolver configured a stored display name is exposed only as a generic label", async () => {
   assert.equal((await profileServiceWith({ ensResolver: null, display: { ens: "stored.eth" } })
-    .getPublicProfile(WALLET)).ens, "stored.eth");
+    .getPublicProfile(WALLET)).label, "stored.eth");
   assert.ok(!Object.hasOwn(
-    await profileServiceWith({ ensResolver: null }).getPublicProfile(WALLET), "ens"));
+    await profileServiceWith({ ensResolver: null }).getPublicProfile(WALLET), "label"));
 });
 
 test("an unreachable ENS endpoint never fails a Gate read", async () => {
@@ -189,7 +193,37 @@ test("an unreachable ENS endpoint never fails a Gate read", async () => {
 
   const profile = await service.getPublicProfile(WALLET);
   assert.equal(profile.wallet, WALLET.toLowerCase());
-  assert.equal(profile.ens, "stored.eth", "an unavailable lookup leaves the stored value alone");
+  assert.equal(profile.label, "stored.eth", "an unavailable lookup leaves the stored value alone");
+});
+
+test("exact label lookup scans past page one and returns at most two matches for ambiguity", async () => {
+  const profiles = Array.from({ length: 53 }, (_, index) => ({
+    id: `profile-${String(index).padStart(3, "0")}`,
+    wallet: `0x${String(index + 1).padStart(40, "0")}`,
+    availability: "accepting_now",
+    updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 53 - index)).toISOString(),
+    display: { ens: index >= 51 ? "deep.delegate" : `delegate-${index}.eth` },
+  }));
+  const policy = { dao: "nouns", enabled: true, acceptPreVote: true, acceptVoting: true,
+    attentionAmount: "1000000", tags: [] };
+  const repository = {
+    withProfileTransaction() { throw new Error("unused"); },
+    async listProfiles({ limit, after }) {
+      const start = after ? profiles.findIndex((profile) => profile.id === after.id) + 1 : 0;
+      return profiles.slice(start, start + limit);
+    },
+    async getPolicy() { return policy; },
+    async isProfileAccepting() { return true; },
+  };
+  const service = createProfileService({ repository,
+    authService: { verifyProfileProofs() {}, consumeProfileProofs() {} },
+    indexClient: { async getVotingPower() { return { amount: "1", asOf: "2026-01-01T00:00:00.000Z" }; } },
+    baseChainId: "8453",
+  });
+
+  const matches = await service.findPublicProfilesByLabel({ label: "DEEP.DELEGATE", stage: "PRE_VOTE" });
+  assert.equal(matches.length, 2);
+  assert.deepEqual(matches.map(({ wallet }) => wallet), profiles.slice(51).map(({ wallet }) => wallet));
 });
 
 test("a resolver that throws outright is still only decoration", async () => {

@@ -60,7 +60,7 @@ export const duplicateReceipt: DuplicateReceipt = {
 
 export const acceptingProfile: PublicGateProfile = {
   wallet: VOTER,
-  ens: 'voter.eth',
+  label: 'voter.eth',
   availability: 'accepting_now',
   acceptingSubmissions: true,
   policies: [
@@ -80,14 +80,14 @@ export const acceptingProfile: PublicGateProfile = {
 export const zeroPowerProfile: PublicGateProfile = {
   ...acceptingProfile,
   wallet: '0x5555555555555555555555555555555555555555',
-  ens: null,
+  label: null,
   governancePower: { dao: 'nouns', amount: '0', asOf: '2026-09-16T09:45:00.000Z' },
 };
 
 export const highPowerProfile: PublicGateProfile = {
   ...acceptingProfile,
   wallet: '0x6666666666666666666666666666666666666666',
-  ens: 'whale.eth',
+  label: 'whale.eth',
   governancePower: { dao: 'nouns', amount: '412', asOf: '2026-09-16T09:45:00.000Z' },
 };
 

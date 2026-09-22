@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const test = require("node:test");
+const { packageContentId } = require("../integrations/bankr/scripts/content-id");
 
 const root = path.resolve(__dirname, "..");
 const skillDir = path.join(root, "integrations", "bankr");
@@ -38,14 +39,15 @@ test("the installed prompt package is self-contained and every loaded reference 
   }
 });
 
-test("the source manifest exposes a version and distinguishes source from stamped builds", () => {
+test("the source manifest exposes a content-derived build ID and distinguishes source from stamped builds", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(skillDir, "package.json"), "utf8"));
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const skill = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8");
 
   assert.equal(manifest.name, "gavel");
   assert.equal(manifest.version, pkg.version);
-  assert.equal(manifest.buildId, "bankr-umbrella-v1");
+  assert.match(manifest.buildId, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(manifest.buildId, packageContentId({ repoRoot: root, skillDir }));
   assert.deepEqual(manifest.build, { kind: "source", gitSha: null });
   assert.equal(manifest.runtime.ref, "main");
   assert.match(skill, /references\/skill-manifest\.json/);

@@ -10,7 +10,7 @@ import { JsonRpcProvider, getAddress } from 'ethers';
  *    paths, quote material, or any security decision. Every route, every
  *    request body, and every signed payload keeps the canonical checksummed
  *    wallet address; a name is a label drawn next to it and nothing more.
- *  - **The server's value wins.** `PublicGateProfile.ens` is the indexed,
+ *  - **The server's value wins.** `PublicGateProfile.label` is the generic,
  *    server-owned display field. When it is present nothing is resolved in the
  *    browser at all. Frontend resolution is the fallback for addresses the
  *    server has no name for (the connected wallet in the header, for example).

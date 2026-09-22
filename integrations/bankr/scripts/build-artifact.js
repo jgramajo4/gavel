@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { packageContentId } = require("./content-id");
 
 const skillDir = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(skillDir, "..", "..");
@@ -20,6 +21,13 @@ const output = path.resolve(process.cwd(), outputArg);
 const buildSha = valueFor("--build-sha");
 if (buildSha && !/^[0-9a-f]{40}$/.test(buildSha)) {
   throw new Error("--build-sha must be a lowercase 40-character Git SHA");
+}
+
+const sourceManifestPath = path.join(skillDir, "references", "skill-manifest.json");
+const sourceManifest = JSON.parse(fs.readFileSync(sourceManifestPath, "utf8"));
+const expectedContentId = packageContentId({ repoRoot, skillDir });
+if (sourceManifest.buildId !== expectedContentId) {
+  throw new Error(`skill-manifest buildId is stale: expected ${expectedContentId}`);
 }
 
 fs.mkdirSync(output, { recursive: true });

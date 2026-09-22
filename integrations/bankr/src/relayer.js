@@ -19,11 +19,10 @@ const { assertTxHash } = require("./wallet");
  * path is not. Bankr signs; a funded relayer on Base mainnet broadcasts the
  * exact prepared transaction and nothing else.
  *
- * There are two shapes a relayer can take, and both are this narrow:
- *
- *   - an in-process relayer object, used here;
- *   - the Gate server's remote relay endpoint, used through `remote-relay.js`,
- *     where the funded wallet lives server-side and Bankr never holds a key.
+ * This in-process seam exists for isolated transaction-guard tests. The public
+ * Bankr flow rejects it and uses Gate's durable remote relay endpoint through
+ * `remote-relay.js`, where the funded wallet lives server-side and Bankr never
+ * holds a key.
  *
  * The interface is intentionally narrow. There is no arbitrary-call
  * abstraction: a relayer receives one already-prepared splitter settlement and

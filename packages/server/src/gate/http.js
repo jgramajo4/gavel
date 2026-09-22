@@ -222,6 +222,18 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         };
         return sendJson(response, 200, { items: await profileService.listPublicProfiles(filters) });
       }
+      if (request.method === "GET" && path === "/v1/gates/matches") {
+        if (typeof profileService.findPublicProfilesByLabel !== "function") {
+          throw new TypeError("profileService.findPublicProfilesByLabel is required");
+        }
+        const label = url.searchParams.get("label");
+        const stage = url.searchParams.get("stage");
+        return sendJson(response, 200, { items: await profileService.findPublicProfilesByLabel({
+          label,
+          dao: url.searchParams.get("dao") || "nouns",
+          ...(stage === null || stage === "" ? {} : { stage }),
+        }) });
+      }
       const submissions = /^\/v1\/gates\/(0x[0-9a-fA-F]{40})\/submissions$/.exec(path);
       if (submissionService && request.method === "POST" && submissions) {
         quoteRequest = true;

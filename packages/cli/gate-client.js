@@ -4,7 +4,7 @@ const INBOX_FIELDS = Object.freeze([
   "issuanceLifecycle", "currentLifecycle", "stateChangedAfterQuote",
 ]);
 const PROFILE_FIELDS = Object.freeze([
-  "wallet", "ens", "availability", "acceptingSubmissions", "message", "policies", "governancePower",
+  "wallet", "label", "availability", "acceptingSubmissions", "message", "policies", "governancePower",
 ]);
 
 class GateClientError extends Error {

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "name": "gavel",
   "version": "0.3.0",
-  "buildId": "bankr-umbrella-v1",
+  "buildId": "sha256:a788cf3073c26d7617f255164ef14c9c2677b17e9bee610a96b1a15c1994e907",
   "build": {
     "kind": "source",
     "gitSha": null

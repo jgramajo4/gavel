@@ -92,6 +92,17 @@ function createGateApi({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = DEFA
       return isRecord(body) && Array.isArray(body.items) ? body.items : [];
     },
 
+    /** Complete server-side exact lookup; response is capped at two for ambiguity. */
+    async findGatesByLabel(label, { dao = "nouns", stage } = {}) {
+      if (typeof label !== "string" || !label.trim()) {
+        throw new BankrGateError("INVALID_REQUEST", "A Gate label is required.");
+      }
+      const params = new URLSearchParams({ dao, label: label.trim() });
+      if (stage !== undefined) params.set("stage", stage);
+      const body = await expectOk("GET", `/v1/gates/matches?${params.toString()}`);
+      return isRecord(body) && Array.isArray(body.items) ? body.items : [];
+    },
+
     async getGate(wallet) {
       if (typeof wallet !== "string" || !ADDRESS.test(wallet)) {
         throw new BankrGateError("INVALID_REQUEST", "A voter wallet address is required.");

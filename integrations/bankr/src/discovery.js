@@ -14,7 +14,7 @@ function decimalOrNull(value) {
  * Projects one public Gate profile into an advocate-facing voter row.
  *
  * Every field comes from Gate's own public projection. This integration keeps
- * no parallel voter directory, resolves no ENS of its own, and never infers
+ * no parallel voter directory, resolves no names of its own, and never infers
  * that a voter is enrolled: a wallet that Gate does not list as accepting is
  * simply not selectable here.
  *
@@ -38,7 +38,6 @@ function projectVoter(profile, { stage, chainId } = {}) {
     && (stage === undefined || acceptedStages.includes(stage));
   return Object.freeze({
     wallet: profile.wallet.toLowerCase(),
-    ens: typeof profile.ens === "string" ? sanitizeDisplayText(profile.ens) : null,
     label: voterLabel(profile),
     availability: profile.availability,
     acceptingSubmissions: profile.acceptingSubmissions === true,
@@ -131,12 +130,9 @@ async function selectTargetVoter(gateApi, {
     const target = explicitTarget.trim();
     if (ADDRESS.test(target)) return selectVoter(gateApi, target, { stage, chainId });
 
-    const folded = target.toLocaleLowerCase("en-US");
-    const voters = await discoverVoters(gateApi, { stage, chainId, dao });
-    const matches = voters.filter((voter) => {
-      const label = voter.label.toLocaleLowerCase("en-US");
-      return label === folded || label.startsWith(`${folded} (`);
-    });
+    const matches = (await gateApi.findGatesByLabel(target, { stage, dao }))
+      .map((profile) => projectVoter(profile, { stage, chainId }))
+      .filter((voter) => voter && voter.acceptsStage);
     if (matches.length === 0) {
       throw new BankrGateError(
         "VOTER_NOT_ACCEPTING",

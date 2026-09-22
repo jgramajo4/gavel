@@ -45,11 +45,11 @@ replaces a canonical address in a path, a request body, or a signed payload.
 
 Resolution order:
 
-1. `PublicGateProfile.ens` — the server's resolved display field. The Gate API
+1. `PublicGateProfile.label` — the server's generic resolved display field. The Gate API
    performs the reverse + forward lookup itself over
    `GAVEL_GATE_ETHEREUM_RPC_URL`, so every Gate in the directory and on a
    profile arrives already named and the browser resolves nothing. A server
-   that resolved and found no primary name sends `ens: null`, which is an
+   that resolved and found no primary name sends `label: null`, which is an
    answer, not a gap: the browser does not go looking for a name behind it.
 2. `VITE_ENS_RPC_URL` — an optional mainnet JSON-RPC endpoint for reverse
    lookups of addresses the projection never covers, which after the change

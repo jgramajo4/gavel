@@ -325,11 +325,24 @@ class PostgresGateStore {
 
   async getProfileByWallet(wallet) { return this.#getProfileByWallet(this.pool, wallet); }
 
-  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0, after } = {}) {
     const normalizedDao = dao === undefined ? null : daoSlug(dao);
     if (availability !== undefined && !["accepting_now", "paused", "closed"].includes(availability)) throw new TypeError("invalid availability");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
+    if (after !== undefined) {
+      if (offset !== 0 || !after || typeof after.id !== "string" || !after.id
+          || Number.isNaN(new Date(after.updatedAt).getTime())) throw new TypeError("profile cursor is invalid");
+      const rows = (await this.pool.query(`SELECT DISTINCT p.id,p.wallet,p.wallet_kind AS "walletKind",p.availability,
+        p.profile_version AS "profileVersion",p.enrolled_at AS "enrolledAt",p.updated_at AS "updatedAt",
+        p.base_payout_verified_at AS "basePayoutVerifiedAt",p.base_payout_code_hash AS "basePayoutCodeHash",p.display_cache AS display
+        FROM gate.profiles p LEFT JOIN gate.dao_policies d ON d.profile_id=p.id
+        WHERE ($1::text IS NULL OR d.dao=$1) AND ($2::gate.availability IS NULL OR p.availability=$2)
+          AND (p.updated_at<$3 OR (p.updated_at=$3 AND p.id>$4))
+        ORDER BY p.updated_at DESC,p.id ASC LIMIT $5`,
+      [normalizedDao, availability ?? null, new Date(after.updatedAt), after.id, limit])).rows;
+      return clone(rows);
+    }
     const rows = (await this.pool.query(`SELECT DISTINCT p.id,p.wallet,p.wallet_kind AS "walletKind",p.availability,
       p.profile_version AS "profileVersion",p.enrolled_at AS "enrolledAt",p.updated_at AS "updatedAt",
       p.base_payout_verified_at AS "basePayoutVerifiedAt",p.base_payout_code_hash AS "basePayoutCodeHash",p.display_cache AS display

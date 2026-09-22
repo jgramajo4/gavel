@@ -38,7 +38,7 @@ export interface GovernancePower {
 
 export interface PublicGateProfile {
   wallet: string;
-  ens?: string | null;
+  label?: string | null;
   availability: Availability;
   /** Server-owned. The browser never derives acceptance from availability alone. */
   acceptingSubmissions: boolean;

@@ -8,7 +8,7 @@ const { GAVEL_FEE_AMOUNT, QUOTE_VERSION, hashSubmission } = require("@gavel/gate
 const BASE_MAINNET = 8453;
 const BASE_SEPOLIA = 84532;
 const SPLITTER = getAddress("0x00000000000000000000000000000000000005ea");
-const TOKEN = getAddress("0x000000000000000000000000000000000000c0de");
+const TOKEN = getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 const VOTER = getAddress("0x00000000000000000000000000000000000ab1e5");
 const PAYER_KEY = `0x${"11".repeat(32)}`;
 const payerWallet = new Wallet(PAYER_KEY);
@@ -151,7 +151,7 @@ function proposalRow(overrides = {}) {
 function gateProfile(overrides = {}) {
   return {
     wallet: VOTER.toLowerCase(),
-    ens: "voter.eth",
+    label: "voter.eth",
     availability: "accepting_now",
     acceptingSubmissions: true,
     message: null,

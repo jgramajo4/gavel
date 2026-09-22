@@ -221,7 +221,7 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
     <div className="page page-composer">
       <h1>Paid submission</h1>
       <p className="page-intro">
-        One immutable pitch to <span className="composer-target">{profile?.ens || wallet}</span>.
+        One immutable pitch to <span className="composer-target">{profile?.label || wallet}</span>.
         {policy ? ` Attention price ${formatUsdc(policy.attentionAmount)} plus a ${formatUsdc(policy.gavelFeeAmount)} Gavel service fee.` : ''}
       </p>
 

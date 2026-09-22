@@ -50,12 +50,10 @@ function shortWallet(wallet) {
  *
  * Gate's `label` is a server-supplied display string, not a name this client
  * resolved, so it is stripped of control characters before it reaches a
- * terminal. The legacy `ens` projection remains a display-only fallback.
+ * terminal. No client-side name resolver or alternate name field exists here.
  */
 function voterLabel(profile) {
-  const supplied = typeof profile?.label === "string"
-    ? profile.label
-    : (typeof profile?.ens === "string" ? profile.ens : "");
+  const supplied = typeof profile?.label === "string" ? profile.label : "";
   const label = sanitizeDisplayText(supplied).trim();
   const wallet = shortWallet(profile?.wallet);
   return label ? `${label} (${wallet})` : wallet;

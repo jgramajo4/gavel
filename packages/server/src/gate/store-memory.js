@@ -372,16 +372,23 @@ class MemoryGateStore {
 
   async getProfileByWallet(wallet) { return this.#getProfileByWallet(wallet); }
 
-  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0, after } = {}) {
     const normalizedDao = dao === undefined ? undefined : daoSlug(dao);
     if (availability !== undefined && !AVAILABILITIES.has(availability)) throw new TypeError("invalid availability");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
-    return [...this.#profiles.values()]
+    if (after !== undefined && (offset !== 0 || !after || typeof after.id !== "string"
+        || Number.isNaN(new Date(after.updatedAt).getTime()))) throw new TypeError("profile cursor is invalid");
+    const rows = [...this.#profiles.values()]
       .filter((profile) => availability === undefined || profile.availability === availability)
       .filter((profile) => normalizedDao === undefined || this.#policies.has(`${profile.id}:${normalizedDao}`))
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime() || left.id.localeCompare(right.id))
-      .slice(offset, offset + limit)
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime() || left.id.localeCompare(right.id));
+    const start = after === undefined ? offset : rows.findIndex((profile) => (
+      new Date(profile.updatedAt).getTime() < new Date(after.updatedAt).getTime()
+      || (new Date(profile.updatedAt).getTime() === new Date(after.updatedAt).getTime() && profile.id > after.id)
+    ));
+    return rows
+      .slice(start < 0 ? rows.length : start, (start < 0 ? rows.length : start) + limit)
       .map(clone);
   }
 

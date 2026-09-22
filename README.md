@@ -161,9 +161,11 @@ install the Gavel skill from https://github.com/jgramajo4/gavel/tree/main/integr
 
 The same action upgrades or reinstalls: Bankr replaces a skill with the same
 name. Start a new conversation afterward. To inspect what is installed, ask
-Bankr for the Gavel skill version, build kind, and runtime ref; direct GitHub
-directory installs identify themselves as source builds and do not claim a Git
-SHA. Bankr documents removal through the Skills tab, not a natural-language
+Bankr for the Gavel skill version, content-derived build ID, build kind, and
+runtime ref. Direct GitHub directory installs identify themselves as source
+builds with a deterministic package-content ID; they do not claim a Git SHA or
+pretend the mutable `main` runtime ref is immutable. Bankr documents removal
+through the Skills tab, not a natural-language
 uninstall action for GitHub-installed guest skills.
 
 The umbrella routes voter/copilot intents separately from Gate discovery,

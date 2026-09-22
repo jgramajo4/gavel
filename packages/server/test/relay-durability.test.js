@@ -132,6 +132,40 @@ test("restart recovers a durably stored relay hash without broadcasting again", 
   assert.equal(secondRelayer.calls.broadcast, 0);
 });
 
+test("restart after the write-ahead record refuses a false receipt and never broadcasts a replacement", async () => {
+  const durableStore = new MemoryGateStore();
+  const crashingStore = new Proxy(durableStore, {
+    get(target, property) {
+      if (property !== "markRelayBroadcasting") {
+        const value = target[property];
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (record) => {
+        await target.markRelayBroadcasting(record);
+        throw new Error("simulated process crash after durable write-ahead");
+      };
+    },
+  });
+  const original = relayer();
+  const instanceA = await service({ store: crashingStore, relay: original });
+  const body = await request();
+
+  await assert.rejects(invoke(instanceA, body), /simulated process crash/);
+  const persisted = await durableStore.getRelayAttempt({ quoteId: message().quoteId });
+  assert.equal(persisted.status, "broadcasting");
+  assert.equal(persisted.txHash, TX_HASH);
+  assert.equal(original.calls.broadcast, 0);
+
+  const replacement = relayer();
+  const instanceB = await service({ store: durableStore, relay: replacement });
+  await assert.rejects(
+    invoke(instanceB, body),
+    (error) => error.code === "RELAY_RECONCILIATION_REQUIRED",
+  );
+  assert.equal(replacement.calls.preflight, 0);
+  assert.equal(replacement.calls.broadcast, 0);
+});
+
 test("concurrent duplicate relay calls converge on one broadcast and one hash", async () => {
   const store = new MemoryGateStore();
   const delayed = relayer({ delayed: true });

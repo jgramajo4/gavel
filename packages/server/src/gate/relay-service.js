@@ -276,7 +276,11 @@ function createGateRelayService({
         throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
           "RELAY_RECONCILIATION_REQUIRED");
       }
-      if (claim.txHash) return receipt(claim.txHash);
+      if (claim.status === "broadcast" && claim.txHash) return receipt(claim.txHash);
+      if (claim.status === "broadcasting") {
+        throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
+          "RELAY_RECONCILIATION_REQUIRED");
+      }
       throw new RelayRequestError("relay attempt is already in progress", 409, "RELAY_IN_PROGRESS");
     }
 

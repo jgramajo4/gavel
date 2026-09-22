@@ -4,10 +4,10 @@ This reference belongs to the umbrella `gavel` skill and supports both the voter
 
 ## Select and inspect the runtime revision
 
-Read `references/skill-manifest.json` before cloning. Report its `version`, `build`, and `runtime.ref` when the user asks which Gavel is installed.
+Read `references/skill-manifest.json` before cloning. Report its `version`, content-derived `buildId`, `build`, and `runtime.ref` when the user asks which Gavel is installed.
 
 - A Git-stamped release has `build.kind: "git"`, a verified `build.gitSha`, and the same immutable SHA in `runtime.ref`.
-- A GitHub directory install has `build.kind: "source"`, no claimed SHA, and `runtime.ref: "main"`. It tracks source and is not an immutable release.
+- A GitHub directory install has `build.kind: "source"`, no claimed Git SHA, a deterministic `sha256:…` package-content `buildId`, and `runtime.ref: "main"`. The build ID changes with the installable package inputs, but mutable `main` still tracks source and is not an immutable release.
 - Never invent or infer a build SHA from a version string.
 
 ## Install inside the current sandbox

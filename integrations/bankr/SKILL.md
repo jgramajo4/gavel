@@ -144,9 +144,10 @@ a person real prices from a deployment that is not production.
 
 ### 0. Discovery
 
-Read Gate's own public directory and show who is accepting. This is a complete
-answer on its own — a person may only want to know who is open, and nothing
-below is required to tell them.
+Read Gate's own public directory and show who is accepting. Discovery is a
+bounded view of at most 50 eligible voters, not a claim that no additional
+eligible voters exist. This is still a complete workflow on its own — a person
+may only want to browse who is open, and nothing below is required to do that.
 
 ```js
 const { createBankrGateFlow } = require("./integrations/bankr/src");
@@ -295,9 +296,9 @@ No `to`, no `data`, and no `value` is sent or accepted, so the relay cannot be
 used to submit any other transaction. The reply is `{ txHash, chainId, relayer }`
 and nothing more.
 
-If no relayer is configured — neither an in-process one nor
-`GAVEL_GATE_RELAYER_URL` — stop and say so. **Do not fall back to broadcasting
-from Bankr.**
+If `GAVEL_GATE_RELAYER_URL` is not configured, stop and say so. The public flow
+requires Gate's durable remote relay and rejects injected in-process relayers.
+**Do not fall back to broadcasting from Bankr.**
 
 There is **no ERC-20 approve flow**. Never ask for, accept, or print a private
 key, a seed phrase, or an RPC credential. Never print a session token or a
@@ -350,11 +351,11 @@ yet, and no new quote is needed. If Gate eventually returns
 ## Boundaries
 
 AgentMail is disabled. The voter-facing web app is deployed separately at
-`gate.0773h.com`; this integration does not own it. Contract addresses are never
-hard-coded here — the splitter, the token, and the chain come from the Gate
-quote.
+`gate.0773h.com`; this integration does not own it. The splitter comes from the Gate quote. Payment is pinned to Base mainnet 8453
+and canonical native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` before
+any token read or signature.
 
-ENS names shown next to a voter are display only. They come from Gate's own
-public projection, which resolves them reverse-and-forward verified. A name is
-never an identity: every request, path, and signature carries the canonical
-address.
+Gate labels shown next to a voter are display only. Bankr consumes only the
+generic label in Gate's public projection and performs no independent name
+resolution. A label is never an identity: every request, path, and signature
+carries the canonical address.

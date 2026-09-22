@@ -41,8 +41,9 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
  *
  * Nothing is guessed. The name and version come from the token, and they are
  * only used after they reproduce the token's own `DOMAIN_SEPARATOR`. A mismatch
- * aborts before any signature is requested; it never falls back to a guess,
- * which is what keeps a testnet USDC working with no code change.
+ * aborts before any signature is requested; it never falls back to a guess.
+ * Production quotes are separately pinned to canonical native Base USDC before
+ * this read occurs.
  */
 async function readTokenDomain(wallet, token, chainId) {
   const verifyingContract = getAddress(token);
@@ -205,11 +206,10 @@ async function authorizePayment({
  * `msg.sender == payer`, so the relayer pays gas while the payer's USDC
  * authority stays entirely inside the EIP-3009 signature.
  *
- * The funded account is either in process (`relayer`) or on the Gate server
- * (`remoteRelay`). An in-process relayer wins when both are supplied, because a
- * caller that went to the trouble of providing one meant it. With neither, this
- * fails by name — `RELAYER_UNAVAILABLE` — and never falls back to broadcasting
- * from Bankr.
+ * The public Bankr flow supplies Gate's durable `remoteRelay`. The lower-level
+ * in-process `relayer` seam remains only for isolated transaction-guard tests;
+ * `createBankrGateFlow` rejects it. With neither, this fails by name —
+ * `RELAYER_UNAVAILABLE` — and never falls back to broadcasting from Bankr.
  */
 async function broadcastPayment({
   relayer,

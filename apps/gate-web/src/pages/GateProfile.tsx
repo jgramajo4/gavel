@@ -67,7 +67,7 @@ export function GateProfile({ api, wallet }: { api: GateApi; wallet: string }) {
             {/* Name first, shortened address under it. The canonical address is
                 published in full once, below, where a reader who needs to copy
                 it can find it — not twice at the top of the page. */}
-            <WalletIdentity address={profile.wallet} ens={profile.ens} tone="header" />
+            <WalletIdentity address={profile.wallet} ens={profile.label} tone="header" />
             <AvailabilityBadge
               availability={profile.availability}
               acceptingSubmissions={profile.acceptingSubmissions}
