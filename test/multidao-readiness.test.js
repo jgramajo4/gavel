@@ -97,6 +97,40 @@ test("no identity means no voting, and says so as information", () => {
   assert.equal(dao.reasons.find((entry) => entry.code === "IDENTITY_UNSET").severity, "info");
 });
 
+test("an unrecognized execution mode reports, and fails safe on approval", () => {
+  // A config naming a mode this build does not know -- hand-edited, or written
+  // by a newer build -- must produce the EXECUTION_MODE_UNKNOWN reason rather
+  // than throwing out of readiness.
+  const runtime = resolveRuntimeReadiness({
+    config: { execution: { mode: "invented-mode" }, wallet: { type: "local" } },
+    dataDirWritable: true,
+    walletConnected: true,
+  });
+  assert.equal(runtime.signals.execution, ReadinessLevel.UNAVAILABLE);
+  assert.ok(runtime.reasons.some((entry) => entry.code === "EXECUTION_MODE_UNKNOWN"));
+  assert.equal(runtime.executionMode, "invented-mode");
+  // Fail-safe: unknown is never treated as autonomous.
+  assert.equal(runtime.humanApprovalRequired, true);
+});
+
+test("humanApprovalRequired is a readiness signal, not a second lookup", () => {
+  const approval = (mode, extra = {}) =>
+    resolveRuntimeReadiness({
+      config: {
+        wallet: { type: "local" },
+        execution: { mode, autonomous: { acknowledgedAt: "2026-01-01T00:00:00.000Z" }, ...extra },
+      },
+      dataDirWritable: true,
+      walletConnected: true,
+    }).humanApprovalRequired;
+
+  assert.equal(approval("unsigned"), true);
+  assert.equal(approval("eoa-supervised"), true);
+  assert.equal(approval("safe-supervised"), true);
+  // The only mode where Gavel completes the action alone.
+  assert.equal(approval("waap-autonomous"), false);
+});
+
 test("runtime readiness names the failing layer", () => {
   const readOnly = resolveRuntimeReadiness({
     config: defaultGavelConfig(),

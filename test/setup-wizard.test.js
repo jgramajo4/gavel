@@ -257,6 +257,48 @@ test("autonomous execution requires acknowledgement and a separate wallet", () =
   assert.equal(validateGavelConfig(flow.draft).valid, true);
 });
 
+test("a mistyped address is an issue, not an exception", () => {
+  // `apply()` promises `{ ok, issues }`. A caller that trusts the return value
+  // instead of wrapping the call must not be handed a thrown ethers error when
+  // a user fat-fingers a Safe or execution address.
+  const flow = wizard();
+  flow.goto(SetupStep.DAOS);
+  flow.apply(SetupStep.DAOS, { daos: ["nouns"] });
+  flow.goto(SetupStep.WALLET);
+
+  const badIdentity = flow.apply(SetupStep.WALLET, { type: "local", signer: "keystore", keystoreLabel: "voter", address: "0xnope" });
+  assert.equal(badIdentity.ok, false);
+  assert.equal(badIdentity.issues[0].code, "INVALID_ADDRESS");
+  assert.equal(badIdentity.issues[0].path, "identity.address");
+  assert.equal(flow.draft.identity.address, null);
+
+  flow.apply(SetupStep.WALLET, { type: "local", signer: "keystore", keystoreLabel: "voter", address: IDENTITY });
+  flow.goto(SetupStep.EXECUTION);
+
+  const badSafe = flow.apply(SetupStep.EXECUTION, { mode: "safe-supervised", safeAddress: "0x123" });
+  assert.equal(badSafe.ok, false);
+  assert.equal(badSafe.issues[0].code, "INVALID_ADDRESS");
+  assert.equal(badSafe.issues[0].path, "execution.safe.address");
+  // A rejected answer leaves the draft untouched: no half-applied mode.
+  assert.equal(flow.draft.execution.mode, "unsigned");
+  assert.equal(flow.draft.execution.safe, null);
+
+  const badAutonomous = flow.apply(SetupStep.EXECUTION, {
+    mode: "waap-autonomous",
+    executionAddress: "not-an-address",
+    acknowledgeAutonomous: true,
+  });
+  assert.equal(badAutonomous.ok, false);
+  assert.equal(badAutonomous.issues[0].code, "INVALID_ADDRESS");
+  assert.equal(badAutonomous.issues[0].path, "execution.autonomous.executionAddress");
+  assert.equal(flow.draft.execution.autonomous, null);
+
+  // The valid forms still work, including a lowercase address.
+  const accepted = flow.apply(SetupStep.EXECUTION, { mode: "safe-supervised", safeAddress: SAFE.toLowerCase() });
+  assert.equal(accepted.ok, true);
+  assert.equal(flow.draft.execution.safe.address, SAFE);
+});
+
 test("the review page shows status and never a secret", () => {
   const flow = wizard({
     env: { GAVEL_PRIVATE_KEY: SENTINEL_KEY, WALLETCONNECT_PROJECT_ID: "project-id" },

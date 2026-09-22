@@ -183,8 +183,24 @@ function listNetworkOptions() {
   }));
 }
 
-function issue(code, message) {
-  return { code, message };
+function issue(code, message, path) {
+  return path ? { code, message, path } : { code, message };
+}
+
+/**
+ * Parse an address into `issues` rather than out of the method.
+ *
+ * `apply()` promises `{ ok, issues }`, so a mistyped Safe or execution address
+ * has to come back as an issue. Letting ethers throw would break that contract
+ * for every caller that trusts the return value instead of wrapping the call.
+ */
+function readAddress(value, field, label, issues) {
+  try {
+    return getAddress(value);
+  } catch {
+    issues.push(issue("INVALID_ADDRESS", `${label} is not a valid Ethereum address.`, field));
+    return null;
+  }
 }
 
 /**
@@ -346,11 +362,8 @@ class SetupWizard {
           };
         }
         if (value?.address) {
-          try {
-            draft.identity.address = getAddress(value.address);
-          } catch {
-            issues.push(issue("INVALID_ADDRESS", "That is not a valid Ethereum address."));
-          }
+          const address = readAddress(value.address, "identity.address", "That", issues);
+          if (address) draft.identity.address = address;
         }
         // A wallet change can make the current execution mode impossible.
         const option = listExecutionOptions({
@@ -382,8 +395,10 @@ class SetupWizard {
             issues.push(issue("SAFE_ADDRESS_REQUIRED", "Safe-supervised execution needs the Safe address."));
             break;
           }
+          const safeAddress = readAddress(value.safeAddress, "execution.safe.address", "The Safe address", issues);
+          if (!safeAddress) break;
           draft.execution.safe = {
-            address: getAddress(value.safeAddress),
+            address: safeAddress,
             chainId: Number(value.chainId || 1),
             proposerIdentity: value.proposerIdentity || null,
           };
@@ -393,7 +408,13 @@ class SetupWizard {
             issues.push(issue("EXECUTION_ADDRESS_REQUIRED", "Autonomous execution needs its own execution wallet."));
             break;
           }
-          const executionAddress = getAddress(value.executionAddress);
+          const executionAddress = readAddress(
+            value.executionAddress,
+            "execution.autonomous.executionAddress",
+            "The autonomous execution wallet",
+            issues,
+          );
+          if (!executionAddress) break;
           if (draft.identity.address && executionAddress === getAddress(draft.identity.address)) {
             // Separate roles, separate keys. The engine enforces this too; the
             // wizard refuses it earlier so the mistake is never configured.

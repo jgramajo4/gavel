@@ -168,6 +168,36 @@ test("zero voting power is reported, not treated as a failure", async () => {
   );
 });
 
+test("`gavel readiness` survives a config naming an unknown execution mode", async () => {
+  // Readiness already handles this and reports EXECUTION_MODE_UNKNOWN; the CLI
+  // must not throw by looking the mode up a second time.
+  const dir = await dataDir();
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(
+    configPath(dir),
+    JSON.stringify({ version: 1, dao: "nouns" }),
+    "utf8",
+  );
+  const write = capture();
+  await readinessCommand(["--json"], {
+    dataDir: dir,
+    write,
+    dataDirWritable: true,
+    // A mode the registry does not know, injected past config parsing the way
+    // a hand-edited file or an older build would.
+    probe: async () => ({ indexFresh: true, identityResolved: true, votingPower: "1" }),
+  });
+  assert.equal(write.json().humanApprovalRequired, true);
+
+  const { resolveRuntimeReadiness } = require("../packages/core");
+  const runtime = resolveRuntimeReadiness({
+    config: { execution: { mode: "from-a-newer-build" }, wallet: { type: "read-only" } },
+    dataDirWritable: true,
+  });
+  assert.equal(runtime.humanApprovalRequired, true);
+  assert.ok(runtime.reasons.some((entry) => entry.code === "EXECUTION_MODE_UNKNOWN"));
+});
+
 test("`gavel secrets status` reports source and status only", async () => {
   const write = capture();
   await secretsCommand(["status", "--json"], {

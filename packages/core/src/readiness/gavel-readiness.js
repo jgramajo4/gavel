@@ -20,7 +20,7 @@
  */
 
 const { ExecutionMode } = require("../schema/execution");
-const { getExecutionMode } = require("../execution/modes");
+const { ExecutionModeKind, getExecutionMode } = require("../execution/modes");
 const { WalletConnectionType } = require("../wallet/provider");
 const { findDaoDescriptor, getDaoDescriptor } = require("../dao/catalog");
 const { InferenceMode } = require("../config/schema");
@@ -129,13 +129,19 @@ function resolveRuntimeReadiness(input = {}) {
 
   const mode = config?.execution?.mode || ExecutionMode.UNSIGNED;
   let executionLevel = ReadinessLevel.READY;
+  // Fail-safe: a mode this build does not recognize is treated as requiring a
+  // human, never as autonomous. Computed here, beside the lookup that can
+  // throw, so no caller has to repeat it -- repeating it is how a guarded
+  // lookup becomes an unguarded one somewhere else.
+  let humanApprovalRequired = true;
   try {
     const definition = getExecutionMode(mode);
+    humanApprovalRequired = definition.kind !== ExecutionModeKind.AUTONOMOUS;
     if (!definition.implemented) {
       executionLevel = ReadinessLevel.UNAVAILABLE;
       reasons.push(reason("EXECUTION_MODE_UNIMPLEMENTED", `Execution mode ${mode} is not implemented.`, ReasonSeverity.ERROR));
     } else if (
-      definition.kind !== "OFFLINE" &&
+      definition.kind !== ExecutionModeKind.OFFLINE &&
       walletType === WalletConnectionType.READ_ONLY &&
       mode === ExecutionMode.EOA_SUPERVISED
     ) {
@@ -164,6 +170,7 @@ function resolveRuntimeReadiness(input = {}) {
     signals,
     reasons,
     executionMode: mode,
+    humanApprovalRequired,
     walletType,
   };
 }

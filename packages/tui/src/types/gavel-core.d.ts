@@ -197,6 +197,7 @@ declare module '@gavel/core' {
     signals: Record<string, string>;
     reasons: ReadinessReason[];
     executionMode: string;
+    humanApprovalRequired: boolean;
     walletType: string;
   };
   export function summarizeGavelReadiness(input: Record<string, unknown>): {

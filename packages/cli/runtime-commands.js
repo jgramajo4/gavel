@@ -20,7 +20,6 @@ const {
   ExecutionMode,
   daoCapabilityMatrix,
   getDaoDescriptor,
-  getExecutionMode,
   isKnownDao,
   listDaoDescriptors,
   listWalletMethods,
@@ -212,7 +211,10 @@ async function readinessCommand(argv, io = {}) {
     canLaunch: summary.canLaunch,
     executionMode: runtime.executionMode,
     // The question a harness actually asks before acting on a recommendation.
-    humanApprovalRequired: getExecutionMode(runtime.executionMode).kind !== "AUTONOMOUS",
+    // Taken from the readiness signal rather than looked up again here: an
+    // unrecognized mode is already handled there, and a second lookup would
+    // throw on exactly the config readiness just described.
+    humanApprovalRequired: runtime.humanApprovalRequired,
     runtime: { level: runtime.level, signals: runtime.signals, reasons: runtime.reasons },
     daos: Object.fromEntries(
       daos.map((dao) => [
