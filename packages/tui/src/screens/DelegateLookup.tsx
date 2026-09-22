@@ -1,4 +1,14 @@
-/** Screen 3 — Delegate Lookup. Search by ENS/address; power, delegate, history. */
+/**
+ * Delegate lookup, scoped to one DAO.
+ *
+ * Labels come from the DAO catalog, because the quantity differs: Nouns shows
+ * "Votes" and a delegation target, Railgun shows staked power behind a voting
+ * key. A single screen calling all of them "voting power" would be wrong for
+ * at least two of the three.
+ *
+ * History comes from the DAO's own source, so a DAO with no direct source says
+ * so rather than rendering another DAO's votes.
+ */
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import Spinner from 'ink-spinner';
@@ -6,6 +16,8 @@ import TextInput from 'ink-text-input';
 import { useDelegate } from '../hooks/useDelegate.js';
 import { useServices } from '../hooks/AppContext.js';
 import { Header, Footer, Field, ErrorLine } from '../components/common.js';
+import { daoTerm, findDaoDescriptor } from '@gavel/core';
+import { hasChainReader } from '../chain/daoReaders.js';
 import { shortAddress, formatVotes } from '../utils/format.js';
 import type { VoteSupport } from '../types.js';
 import type { Route } from '../navigation.js';
@@ -16,9 +28,18 @@ const SUPPORT_TEXT: Record<VoteSupport, { label: string; color: string }> = {
   2: { label: 'ABSTAIN', color: 'gray' },
 };
 
-export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => void; onBack: () => void }) {
-  const { signer } = useServices();
-  const { state, lookup } = useDelegate();
+export function DelegateLookup({
+  dao,
+  navigate,
+  onBack,
+}: {
+  dao: string;
+  navigate: (r: Route) => void;
+  onBack: () => void;
+}) {
+  const { signer, wallet } = useServices();
+  const { state, lookup } = useDelegate(dao);
+  const descriptor = findDaoDescriptor(dao);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(true);
 
@@ -26,7 +47,9 @@ export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => v
     if (editing) return;
     if (key.escape || input === 'q') onBack();
     else if (input === '/') setEditing(true);
-    else if (input === 's' && state.kind === 'ready') navigate({ screen: 'delegateSwitch' });
+    else if (input === 's' && state.kind === 'ready' && hasChainReader(dao)) {
+      navigate({ screen: 'delegateSwitch', dao });
+    }
   });
 
   const isSelf =
@@ -36,7 +59,10 @@ export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => v
 
   return (
     <Box flexDirection="column">
-      <Header title="Delegate Lookup" subtitle="search by ENS name or address" />
+      <Header
+        title={`${descriptor?.displayName ?? dao} · ${daoTerm(dao, 'delegate')}`}
+        subtitle={`search by ENS name or address · shows ${daoTerm(dao, 'votingPower').toLowerCase()}`}
+      />
       <Box>
         <Text color="cyan">search › </Text>
         {editing ? (
@@ -47,7 +73,7 @@ export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => v
               setEditing(false);
               if (val.trim()) void lookup(val.trim());
             }}
-            placeholder={signer ? shortAddress(signer.address) : 'vitalik.eth'}
+            placeholder={wallet.address ?? 'vitalik.eth'}
           />
         ) : (
           <Text dimColor>{query || '(empty)'} — press / to edit</Text>
@@ -68,8 +94,10 @@ export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => v
             {state.info.ens ? `${state.info.ens} (${shortAddress(state.info.address)})` : state.info.address}
             {isSelf ? '  ← you' : ''}
           </Field>
-          <Field label="voting power">{formatVotes(state.info.votingPower)} votes</Field>
-          <Field label="delegating to">
+          <Field label={state.info.votingPowerLabel.toLowerCase()}>
+            {formatVotes(state.info.votingPower)}
+          </Field>
+          <Field label={state.info.delegationLabel.toLowerCase()}>
             {!state.info.delegatingTo || state.info.delegatingTo.toLowerCase() === state.info.address.toLowerCase()
               ? 'self'
               : shortAddress(state.info.delegatingTo)}
@@ -80,7 +108,7 @@ export function DelegateLookup({ navigate, onBack }: { navigate: (r: Route) => v
               <Text dimColor>  no votes recorded</Text>
             ) : (
               state.info.votes.slice(0, 12).map((v) => (
-                <Box key={`${v.proposalId}-${v.support}`}>
+                <Box key={`${v.proposalKey}-${v.support}`}>
                   <Box width={8}><Text dimColor>#{v.proposalId}</Text></Box>
                   <Box width={10}>
                     <Text color={SUPPORT_TEXT[v.support].color}>{SUPPORT_TEXT[v.support].label}</Text>

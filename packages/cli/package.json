@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@gavel/core": "0.2.0",
+    "@gavel/daos": "0.2.0",
     "@gavel/ens-adapter": "0.2.0",
     "@gavel/governance-index": "0.2.0",
     "@gavel/nouns-adapter": "0.2.0",

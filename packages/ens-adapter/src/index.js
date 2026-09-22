@@ -150,6 +150,7 @@ class EnsDaoAdapter {
       analyze: true,
       predict: true,
       prepareVote: true,
+      eoaSupervised: true,
       safeSupervised: true,
       waapAutonomous: false,
     });

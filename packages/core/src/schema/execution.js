@@ -2,6 +2,13 @@ const { z } = require("zod");
 
 const ExecutionMode = Object.freeze({
   UNSIGNED: "unsigned",
+  /**
+   * Gavel prepares; the human approves and signs in their own wallet. The
+   * wallet may be reached over WalletConnect or held locally -- both are the
+   * same mode, because the authority model is identical: Gavel cannot complete
+   * the action alone.
+   */
+  EOA_SUPERVISED: "eoa-supervised",
   SAFE_SUPERVISED: "safe-supervised",
   WAAP_AUTONOMOUS: "waap-autonomous",
 });

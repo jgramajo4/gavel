@@ -1,13 +1,18 @@
 /**
- * Screen 4 — Delegate Switching. Shows current delegate, prompts for a new
- * delegatee (ENS/address), builds + signs delegate() via the session key, and
- * polls for confirmation. First signed tx in the build order.
+ * Changing a DAO's delegation.
+ *
+ * Always explicit, always confirmed, and always scoped to one DAO. Gavel never
+ * changes delegation as a side effect of anything else -- switching execution
+ * mode does not touch it -- so this screen is the only place it can happen,
+ * and it requires a chain reader for the DAO in question plus a connected
+ * signer.
  */
 import React, { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import Spinner from 'ink-spinner';
 import TextInput from 'ink-text-input';
-import { delegateTo, currentDelegate } from '../actions/delegate.js';
+import { daoTerm, findDaoDescriptor } from '@gavel/core';
+import { getChainReader } from '../chain/daoReaders.js';
 import { resolveToAddress } from '../data/ens.js';
 import { useServices } from '../hooks/AppContext.js';
 import { Header, Footer, Field } from '../components/common.js';
@@ -22,18 +27,31 @@ type Step =
   | { kind: 'done'; result: TxResult }
   | { kind: 'error'; message: string };
 
-export function DelegateSwitch({ onBack }: { onBack: () => void }) {
+export function DelegateSwitch({ dao, onBack }: { dao: string; onBack: () => void }) {
   const { publicClient, signer } = useServices();
+  const reader = getChainReader(dao);
+  const descriptor = findDaoDescriptor(dao);
   const [step, setStep] = useState<Step>({ kind: 'loadingCurrent' });
   const [input, setInput] = useState('');
 
   useEffect(() => {
+    if (!reader) {
+      setStep({
+        kind: 'error',
+        message: `${descriptor?.displayName ?? dao} delegation is prepared through the CLI: ` +
+          `gavel prepare-delegation --dao ${dao} --asset-owner-address <address>`,
+      });
+      return undefined;
+    }
     if (!signer) {
-      setStep({ kind: 'error', message: 'Canonical wallet handoff is not implemented yet.' });
-      return;
+      setStep({
+        kind: 'error',
+        message: 'No signer is attached. Connect a wallet in Settings, or prepare the delegation with `gavel prepare-delegation`.',
+      });
+      return undefined;
     }
     let cancelled = false;
-    void currentDelegate(publicClient, signer.address)
+    void reader.currentDelegate(publicClient, signer.address)
       .then((current) => {
         if (!cancelled) setStep({ kind: 'input', current });
       })
@@ -43,7 +61,7 @@ export function DelegateSwitch({ onBack }: { onBack: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [publicClient, signer]);
+  }, [publicClient, signer, reader, dao, descriptor]);
 
   useInput((key, keys) => {
     if (step.kind === 'confirm') {
@@ -67,10 +85,10 @@ export function DelegateSwitch({ onBack }: { onBack: () => void }) {
   }
 
   async function broadcast(next: `0x${string}`) {
-    if (!signer) return;
+    if (!signer || !reader) return;
     setStep({ kind: 'broadcasting' });
     try {
-      const result = await delegateTo(publicClient, signer, next);
+      const result = await reader.delegateTo(publicClient, signer, next);
       setStep({ kind: 'done', result });
     } catch (err) {
       setStep({ kind: 'error', message: err instanceof Error ? err.message : String(err) });

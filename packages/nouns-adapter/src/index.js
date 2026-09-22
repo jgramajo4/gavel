@@ -32,6 +32,7 @@ class NounsDaoAdapter {
       analyze: true,
       predict: true,
       prepareVote: true,
+      eoaSupervised: true,
       safeSupervised: true,
       waapAutonomous: true,
     });

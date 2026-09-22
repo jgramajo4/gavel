@@ -1,7 +1,9 @@
 /**
- * Delegation action — the first signed tx in the build order. Builds and signs
- * a `delegate()` tx via the session key. No clientId (delegation is not a
- * rewards-eligible function).
+ * Nouns delegation.
+ *
+ * Nouns token `delegate()`, reached only through the DAO chain-reader
+ * registry. Delegation models differ per DAO -- ENS delegates an ERC20Votes
+ * balance, Railgun sets a voting key -- so nothing generic may call this.
  */
 import type { PublicClient } from 'viem';
 import { ADDRESSES } from '../constants.js';

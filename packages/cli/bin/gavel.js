@@ -14,9 +14,8 @@ const {
   resolveEthereumRpcUrl,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
-const { EnsDaoAdapter } = require("../../ens-adapter");
-const { RailgunDaoAdapter } = require("../../railgun-adapter");
 const { IndexApiClient } = require("../../governance-index");
+const { createDaoAdapter: createWiredDaoAdapter } = require("@gavel/daos");
 const {
   ExecutionMode,
   ExecutionEngine,
@@ -40,17 +39,24 @@ const {
   resolveDataDir,
   resolveExecutionReadiness,
   runChronologicalBacktest,
+  listDaoIds,
 } = require("../../core");
 const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
+const {
+  configCommand,
+  daosCommand,
+  readinessCommand,
+  secretsCommand,
+  walletCommand,
+} = require("../runtime-commands");
 
 const DATA_DIR = resolveDataDir();
-const SUPPORTED_DAOS = Object.freeze(["nouns", "ens", "railgun-eth"]);
+// The DAO list is the catalog's, not a constant maintained here. Adding an
+// adapter must not mean editing a private array in the CLI.
+const SUPPORTED_DAOS = Object.freeze(listDaoIds());
 
 function createDaoAdapter(dao, provider) {
-  if (dao === "nouns") return new NounsDaoAdapter({ provider });
-  if (dao === "ens") return new EnsDaoAdapter({ provider });
-  if (dao === "railgun-eth") return new RailgunDaoAdapter({ provider });
-  throw new Error(`Unsupported DAO: ${dao}. Choose ${SUPPORTED_DAOS.join(", ")}.`);
+  return createWiredDaoAdapter(dao, { provider });
 }
 
 function defaultPrivatePath(...segments) {
@@ -108,6 +114,16 @@ Usage:
                              [--rpc <url>] [--safe-api-url <url>]
   gavel safe delegate setup --safe <address> [--chain-id <id>] [--identity <local:label>]
                             [--rpc <url>] [--safe-api-url <url>]
+  gavel daos list [--json]
+  gavel daos capabilities [--dao <id>] [--json]
+  gavel daos follow <dao>... [--json]
+  gavel daos unfollow <dao>... [--json]
+  gavel wallet status [--json]
+  gavel readiness [--json]
+  gavel secrets status [--json]
+  gavel config show [--json]
+  gavel config path
+  gavel config migrate [--json]
   gavel gate profile [--json]
   gavel gate inbox [--json]
   gavel gate inbox show <id> [--json]
@@ -127,6 +143,11 @@ Commands:
   execution prepare   Validate live against the DAO and emit a canonical ValidatedExecutionIntent.
   execution submit    Re-validate live, then hand the intent to a configured execution backend.
   identity create     Create a locally held, encrypted Safe proposal identity.
+  daos      List, inspect and follow governance systems. The TUI reads the same catalog.
+  wallet    Report the wallet connection type, governance identity and roles. Never a secret.
+  readiness Runtime and per-DAO readiness: monitor, analyze, vote, separately.
+  secrets   Report each secret's source and status. Never its value.
+  config    Show, locate or migrate the Gavel client configuration.
   gate profile        Fetch the authenticated Gate public profile projection.
   gate inbox          List, show, or archive the authenticated private Gate inbox.
 
@@ -1409,6 +1430,11 @@ async function main() {
     }
     return safeDelegateCommand(subcommand, rest);
   }
+  if (command === "daos") return daosCommand(argv);
+  if (command === "wallet") return walletCommand(argv);
+  if (command === "readiness") return readinessCommand(argv);
+  if (command === "secrets") return secretsCommand(argv);
+  if (command === "config") return configCommand(argv);
   if (command === "gate") return gateCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }

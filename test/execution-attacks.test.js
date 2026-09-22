@@ -519,15 +519,26 @@ test("a fabricated adapter cannot bless calldata contradicting its own declarati
   });
   assert.equal(minted.intent.target, getAddress(ATTACKER));
 
-  // What contains that residual is the boundary above: the CLI resolves DAO
-  // adapters from a fixed registry of ids and never accepts a caller-supplied
-  // adapter object, so there is no user-reachable path that supplies one.
+  // What contains that residual is the boundary above: DAO adapters are
+  // resolved from a fixed id-to-constructor table and never from a
+  // caller-supplied object, so there is no user-reachable path that supplies
+  // one. That table now lives in `@gavel/daos`, shared by the CLI and the TUI,
+  // which makes this assertable directly rather than by reading CLI source.
+  const { ADAPTER_CONSTRUCTORS, createDaoAdapter } = require("@gavel/daos");
+  for (const constructor of Object.values(ADAPTER_CONSTRUCTORS)) {
+    assert.equal(typeof constructor, "function");
+  }
+  assert.throws(() => createDaoAdapter("attacker-dao", { provider: {} }), /Unknown DAO: attacker-dao/);
+  assert.throws(() => createDaoAdapter(selfConsistent, { provider: {} }), /Unknown DAO/);
+
+  // And the CLI still reaches adapters only through that registry: it takes a
+  // DAO id, never an adapter.
   const cli = require("node:fs").readFileSync(
     require("node:path").resolve(__dirname, "..", "packages", "cli", "bin", "gavel.js"),
     "utf8",
   );
   assert.match(cli, /function createDaoAdapter\(dao, provider\)/);
-  assert.match(cli, /throw new Error\(`Unsupported DAO: \$\{dao\}/);
+  assert.match(cli, /createWiredDaoAdapter\(dao, \{ provider \}\)/);
 });
 
 test("ATTACK: validation requires the governance intent, not merely evidence", () => {

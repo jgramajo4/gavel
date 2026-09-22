@@ -1,4 +1,11 @@
-/** Screen 2 — Proposal Detail + Prediction Panel + Vote. */
+/**
+ * Proposal detail, for whichever DAO the proposal belongs to.
+ *
+ * The header carries the DAO name, not just a number: `ENS #3` and
+ * `Nouns #3` are different proposals and the screen must never be ambiguous
+ * about which one is open. Tally labels and the vote flow come from the DAO's
+ * own capabilities rather than from Nouns' model.
+ */
 import React, { useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useProposalDetail } from '../hooks/useProposalDetail.js';
@@ -6,6 +13,7 @@ import { useIdle } from '../hooks/useIdle.js';
 import { PredictionPanel } from '../components/PredictionPanel.js';
 import { VoteFlow } from '../components/VoteFlow.js';
 import { StatusBadge, Bar, Header, Footer, Field } from '../components/common.js';
+import { daoTerm, findDaoDescriptor } from '@gavel/core';
 import { formatVotes, shortAddress, relativeTime, timeRemaining } from '../utils/format.js';
 import { POLL_INTERVALS } from '../constants.js';
 import type { Proposal } from '../types.js';
@@ -20,7 +28,8 @@ export function ProposalDetail({
   onBack: () => void;
 }) {
   const idle = useIdle(POLL_INTERVALS.idleTimeout);
-  const { tally, status, lastUpdated, error, terminal } = useProposalDetail(proposal, idle);
+  const { tally, status, lastUpdated, error, terminal, live } = useProposalDetail(proposal, idle);
+  const descriptor = findDaoDescriptor(proposal.dao);
   const [descScroll, setDescScroll] = useState(0);
   const [voting, setVoting] = useState(false);
   const predictionRefresh = useRef<(() => void) | null>(null);
@@ -49,8 +58,14 @@ export function ProposalDetail({
   return (
     <Box flexDirection="column">
       <Header
-        title={`Proposal ${proposal.id}`}
-        subtitle={terminal ? 'finished — static (no polling)' : `live · updated ${staleness}${idle ? ' · idle' : ''}`}
+        title={proposal.label}
+        subtitle={
+          terminal
+            ? 'finished — static (no polling)'
+            : live
+              ? `live · updated ${staleness}${idle ? ' · idle' : ''}`
+              : `indexed tally — ${descriptor?.displayName ?? proposal.dao} has no live reader in this build`
+        }
       />
       <Box>
         <Text bold>{proposal.title}</Text>
@@ -81,6 +96,9 @@ export function ProposalDetail({
           <Box width={10}><Text>{formatVotes(tally.abstainVotes)}</Text></Box>
         </Box>
         <Field label="quorum">{formatVotes(tally.quorumVotes)} needed</Field>
+        <Field label={daoTerm(proposal.dao, 'votingPower').toLowerCase()}>
+          {descriptor?.displayName ?? proposal.dao} · chain {descriptor?.chainId ?? '?'}
+        </Field>
       </Box>
 
       {/* Description (scrollable) */}
@@ -95,7 +113,7 @@ export function ProposalDetail({
 
       {/* Prediction */}
       <PredictionPanel
-        proposalId={proposal.id}
+        proposalKey={proposal.key}
         proposalText={`${proposal.title}\n\n${proposal.description}`}
         bindRefresh={(fn) => {
           predictionRefresh.current = fn;
@@ -110,7 +128,7 @@ export function ProposalDetail({
 
       {voting ? (
         <Box marginTop={1}>
-          <VoteFlow proposalId={proposal.id} onExit={() => setVoting(false)} />
+          <VoteFlow proposal={proposal} onExit={() => setVoting(false)} />
         </Box>
       ) : (
         <Footer

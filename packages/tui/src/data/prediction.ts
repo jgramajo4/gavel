@@ -1,42 +1,55 @@
 /**
- * Prediction wrapper around the gramajo/nouns_proposal_check Gradio Space
- * (DistilBERT outcome model). Optimistic stale cache: last result per proposal
- * is persisted to ~/.config/gavel/cache.json and shown instantly with a
- * staleness indicator. The fetch timeout IS the failure signal — no health ping.
+ * Remote outcome scoring, cached per proposal.
+ *
+ * Two things changed when Gavel stopped being single-DAO. The cache is keyed
+ * by the composite `dao:proposalId`, because a bare proposal id collides
+ * across DAOs and would have served one DAO's score for another's proposal.
+ * And it lives under GAVEL_DATA_DIR rather than a fixed `~/.config` path, so
+ * a standalone TUI, Hermes, Bankr and a container each keep their own private
+ * state instead of sharing one file.
+ *
+ * Optimistic stale cache: the last result is shown instantly with a staleness
+ * indicator. The fetch timeout IS the failure signal — no health ping.
  */
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { privatePath, resolveDataDir } from '@gavel/core';
 import type { Config } from '../config.js';
 import type { Prediction } from '../types.js';
 
-const CACHE_DIR = join(homedir(), '.config', 'gavel');
-const CACHE_FILE = join(CACHE_DIR, 'cache.json');
+/** Resolved per call so a changed GAVEL_DATA_DIR is honoured without a restart. */
+function cacheFile(config: Config): string {
+  return privatePath(config.dataDir || resolveDataDir(), 'prediction-cache.json');
+}
+
 const FETCH_TIMEOUT_MS = 30_000;
 
 type Cache = Record<string, Prediction>;
 
-async function readCache(): Promise<Cache> {
+async function readCache(config: Config): Promise<Cache> {
   try {
-    const raw = await readFile(CACHE_FILE, 'utf8');
+    const raw = await readFile(cacheFile(config), 'utf8');
     return JSON.parse(raw) as Cache;
   } catch {
     return {};
   }
 }
 
-async function writeCache(cache: Cache): Promise<void> {
+async function writeCache(config: Config, cache: Cache): Promise<void> {
   try {
-    await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
+    const file = cacheFile(config);
+    await mkdir(file.slice(0, file.lastIndexOf('/')), { recursive: true, mode: 0o700 });
+    await writeFile(file, JSON.stringify(cache, null, 2), { encoding: 'utf8', mode: 0o600 });
   } catch {
     // Cache is best-effort; a write failure must never break the UI.
   }
 }
 
-export async function getCachedPrediction(proposalId: number): Promise<Prediction | null> {
-  const cache = await readCache();
-  return cache[String(proposalId)] ?? null;
+export async function getCachedPrediction(
+  config: Config,
+  proposalKey: string,
+): Promise<Prediction | null> {
+  const cache = await readCache(config);
+  return cache[proposalKey] ?? null;
 }
 
 export class ColdStartError extends Error {
@@ -53,7 +66,7 @@ export class ColdStartError extends Error {
  */
 export async function fetchPrediction(
   config: Config,
-  proposalId: number,
+  proposalKey: string,
   proposalText: string,
 ): Promise<Prediction> {
   const controller = new AbortController();
@@ -68,10 +81,10 @@ export async function fetchPrediction(
     if (res.status === 503) throw new ColdStartError();
     if (!res.ok) throw new Error(`prediction ${res.status}: ${res.statusText}`);
     const json = (await res.json()) as { data?: unknown[] };
-    const prediction = parseGradioResult(proposalId, json.data ?? []);
-    const cache = await readCache();
-    cache[String(proposalId)] = prediction;
-    await writeCache(cache);
+    const prediction = parseGradioResult(proposalKey, json.data ?? []);
+    const cache = await readCache(config);
+    cache[proposalKey] = prediction;
+    await writeCache(config, cache);
     return prediction;
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
@@ -88,7 +101,7 @@ export async function fetchPrediction(
  * `{ label, confidences: [{label, confidence}] }`) or a raw probability.
  * Handle both shapes defensively.
  */
-function parseGradioResult(proposalId: number, data: unknown[]): Prediction {
+function parseGradioResult(proposalKey: string, data: unknown[]): Prediction {
   const first = data[0];
   let passProbability = 0.5;
   let label: 'PASS' | 'FAIL' = 'FAIL';
@@ -100,7 +113,7 @@ function parseGradioResult(proposalId: number, data: unknown[]): Prediction {
     };
     if (obj.confidences?.length) {
       const pass = obj.confidences.find((c) => /pass|for|yes|1/i.test(c.label));
-      passProbability = pass ? pass.confidence : obj.confidences[0].confidence;
+      passProbability = pass ? pass.confidence : (obj.confidences[0]?.confidence ?? 0.5);
     }
     if (obj.label) label = /pass|for|yes|1/i.test(obj.label) ? 'PASS' : 'FAIL';
   } else if (typeof first === 'number') {
@@ -112,7 +125,7 @@ function parseGradioResult(proposalId: number, data: unknown[]): Prediction {
   else label = 'FAIL';
 
   return {
-    proposalId,
+    proposalKey,
     passProbability,
     label,
     fetchedAt: Date.now(),

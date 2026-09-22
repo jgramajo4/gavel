@@ -1,12 +1,20 @@
 /**
- * Read-only client for the self-hosted governance index (`packages/governance-index`).
- * It serves the same normalized proposals the CLI consumes, so the TUI can drop
- * its public-subgraph dependency wherever an operator runs one.
+ * Read-only client for the governance index (`packages/governance-index`).
  *
- * The index is a cache of chain state, not an oracle: a stalled or failing sync
- * looks exactly like a DAO that stopped proposing. Every read therefore gates on
- * checkpoint freshness first and fails closed, matching the CLI client.
+ * It serves the same normalized proposals the CLI consumes, for every DAO the
+ * index tracks, which is what lets the TUI drop its single-DAO subgraph
+ * dependency.
+ *
+ * The index is a cache of chain state, not an oracle: a stalled or failing
+ * sync looks exactly like a DAO that stopped proposing. Every read therefore
+ * gates on checkpoint freshness first and fails closed, matching the CLI
+ * client.
+ *
+ * Failure is per DAO. `fetchProposalsForDaos()` returns what it could read
+ * plus one error per DAO that failed, because one unreachable indexer must
+ * degrade one row of the inbox and not the whole client.
  */
+import { daoProposalKey, findDaoDescriptor, formatDaoProposal } from '@gavel/core';
 import type { Config } from '../config.js';
 import type { Proposal, ProposalStatus } from '../types.js';
 import { INDEX_MAX_STALENESS_MS } from '../constants.js';
@@ -14,8 +22,8 @@ import { INDEX_MAX_STALENESS_MS } from '../constants.js';
 /**
  * Normalized proposal document served by `/v1/daos/<dao>/proposals`.
  *
- * `state` is the raw upstream value and can be stale -- the Nouns subgraph
- * reports `ACTIVE` for proposals that lost their vote months ago. Read
+ * `state` is the raw upstream value and can be stale -- an upstream subgraph
+ * may report `ACTIVE` for proposals that lost their vote months ago. Read
  * `effectiveStatus`, which is what the indexer derived from the voting window,
  * the finalized block and the tallies. Both are optional here only so an older
  * index still renders.
@@ -84,7 +92,7 @@ function seconds(value: string | null | undefined): number | undefined {
  * Refuses to read an index with no checkpoint, a source reporting a sync error,
  * or a newest checkpoint older than the configured staleness limit.
  */
-async function assertFresh(config: Config, dao: string): Promise<void> {
+export async function assertFresh(config: Config, dao: string): Promise<void> {
   const status = await request<{ sources?: SyncCheckpoint[] }>(
     config,
     `/v1/daos/${dao}/sync-status`,
@@ -114,19 +122,14 @@ async function assertFresh(config: Config, dao: string): Promise<void> {
   }
 }
 
-export async function fetchProposals(
-  config: Config,
-  first = 40,
-  dao = 'nouns',
-): Promise<Proposal[]> {
-  await assertFresh(config, dao);
-  const limit = Math.min(Math.max(first, 1), 100);
-  const page = await request<{ items: IndexedProposal[] }>(
-    config,
-    `/v1/daos/${dao}/proposals?limit=${limit}`,
-  );
-  return page.items.map((p) => ({
-    id: Number(p.id),
+export function toProposal(dao: string, p: IndexedProposal): Proposal {
+  const descriptor = findDaoDescriptor(dao);
+  return {
+    dao,
+    daoDisplayName: descriptor?.displayName ?? dao,
+    key: daoProposalKey(dao, p.id),
+    id: String(p.id),
+    label: formatDaoProposal(dao, p.id),
     title: (p.title ?? `Proposal ${p.id}`).trim() || `Proposal ${p.id}`,
     description: p.description ?? '',
     proposer: p.proposer ?? '',
@@ -139,5 +142,46 @@ export async function fetchProposals(
     endBlock: Number(p.endBlock ?? '0'),
     endTimestamp: seconds(p.endTime),
     createdTimestamp: seconds(p.createdAt),
-  }));
+  };
+}
+
+export async function fetchProposals(config: Config, dao: string, first = 40): Promise<Proposal[]> {
+  await assertFresh(config, dao);
+  const limit = Math.min(Math.max(first, 1), 100);
+  const page = await request<{ items: IndexedProposal[] }>(
+    config,
+    `/v1/daos/${dao}/proposals?limit=${limit}`,
+  );
+  return page.items.map((item) => toProposal(dao, item));
+}
+
+export interface DaoFetchFailure {
+  dao: string;
+  message: string;
+}
+
+/**
+ * Read every followed DAO, concurrently, and keep the failures separate.
+ *
+ * `Promise.allSettled` rather than `Promise.all` is the whole point: one DAO
+ * rejecting must not discard the proposals the others returned.
+ */
+export async function fetchProposalsForDaos(
+  config: Config,
+  daos: string[],
+  first = 40,
+): Promise<{ proposals: Proposal[]; failures: DaoFetchFailure[] }> {
+  const settled = await Promise.allSettled(daos.map((dao) => fetchProposals(config, dao, first)));
+  const proposals: Proposal[] = [];
+  const failures: DaoFetchFailure[] = [];
+  settled.forEach((result, index) => {
+    if (result.status === 'fulfilled') proposals.push(...result.value);
+    else {
+      failures.push({
+        dao: daos[index] as string,
+        message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    }
+  });
+  return { proposals, failures };
 }

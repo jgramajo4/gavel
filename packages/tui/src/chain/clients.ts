@@ -1,15 +1,13 @@
 /**
- * viem clients. The public client reads chain state; the wallet client — created
- * only when a session key is present — signs and broadcasts.
+ * viem clients.
+ *
+ * The public client reads chain state. There is deliberately no signer factory
+ * here any more: the old `makeSigner()` built a wallet client from a private
+ * key in configuration, which is exactly the pattern the wallet-provider
+ * boundary replaces. Signing authority now comes from a wallet provider in
+ * `@gavel/core`, which holds a reference to a signer the host already has.
  */
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  type PublicClient,
-  type WalletClient,
-} from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
+import { createPublicClient, http, type PublicClient, type WalletClient } from 'viem';
 import { mainnet } from 'viem/chains';
 import type { Config } from '../config.js';
 
@@ -20,20 +18,14 @@ export function makePublicClient(config: Config): PublicClient {
   });
 }
 
+/**
+ * A signer, once one has been attached.
+ *
+ * Supplied by the wallet layer; never constructed from configuration. The type
+ * stays here because screens describe what they would do with one.
+ */
 export interface Signer {
   walletClient: WalletClient;
   address: `0x${string}`;
-}
-
-/** Returns a signer, or null when no session key is set. */
-export function makeSigner(config: Config): Signer | null {
-  if (!config.privateKey) return null;
-  const account = privateKeyToAccount(config.privateKey);
-  const walletClient = createWalletClient({
-    account,
-    chain: mainnet,
-    transport: http(config.rpcUrl),
-  });
-  return { walletClient, address: account.address };
 }
 
