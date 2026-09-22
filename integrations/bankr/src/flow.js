@@ -3,7 +3,7 @@
 const { BankrGateError } = require("./errors");
 const { createGateApi } = require("./gate-api");
 const { createIndexApi } = require("./index-api");
-const { discoverVoters, selectVoter } = require("./discovery");
+const { discoverVoters, selectTargetVoter, selectVoter } = require("./discovery");
 const { assertPayableQuote, confirmationSummary, parseIssuedQuote, secondsUntilExpiry } = require("./quote");
 const { buildSubmissionRequest, createOrResumeSubmission } = require("./submission");
 const { openBaseSenderSession } = require("./session");
@@ -76,9 +76,24 @@ function createBankrGateFlow({
       return discoverVoters(gate, { stage, dao: resolved.dao, minVotingPower, sort, chainId: displayChainId });
     },
 
-    /** 2b. Re-read one voter and confirm acceptance at selection time. */
+    /** 2b. Re-read one canonical wallet and confirm acceptance at selection time. */
     selectVoter(voterWallet, { stage } = {}) {
       return selectVoter(gate, voterWallet, { stage, chainId: displayChainId });
+    },
+
+    /**
+     * 2c. Prefer an explicit wallet/label over a private profile default.
+     * Labels are matched only against the current Gate directory, then the
+     * canonical wallet profile is re-read before selection.
+     */
+    selectTargetVoter({ explicitTarget, profileWallet, stage } = {}) {
+      return selectTargetVoter(gate, {
+        explicitTarget,
+        profileWallet,
+        stage,
+        dao: resolved.dao,
+        chainId: displayChainId,
+      });
     },
 
     /** 3. Compose the advocate's untrusted content into Gate's exact body. */
@@ -189,7 +204,9 @@ function createBankrGateFlow({
 async function sendAttentionRequest({
   flow,
   target: targetInput,
+  voterTarget,
   voterWallet,
+  profileVoterWallet,
   pitch,
   disclosures = "",
   evidenceUrls = [],
@@ -201,7 +218,12 @@ async function sendAttentionRequest({
   const target = targetInput?.stage ? targetInput : await flow.resolveTarget(targetInput ?? {});
   onPhase("target_resolved", { target });
 
-  const voter = await flow.selectVoter(voterWallet, { stage: target.stage });
+  const explicitTarget = voterTarget ?? voterWallet;
+  const voter = await flow.selectTargetVoter({
+    explicitTarget,
+    profileWallet: profileVoterWallet,
+    stage: target.stage,
+  });
   onPhase("voter_selected", { voter });
 
   const request = flow.compose({ target, pitch, disclosures, evidenceUrls });

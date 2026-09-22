@@ -4,8 +4,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { createGateApi } = require("../src/gate-api");
-const { assertVoterAccepts, discoverVoters, projectVoter, selectVoter } = require("../src/discovery");
+const {
+  assertVoterAccepts, discoverVoters, projectVoter, selectTargetVoter, selectVoter,
+} = require("../src/discovery");
 const { BASE_MAINNET, VOTER, createFetchStub, gateProfile } = require("./helpers");
+
+const TARGET_VOTER = "0xc180000000000000000000000000000000005425";
 
 function gateApiFor(routes) {
   const { fetchImpl, calls } = createFetchStub(routes);
@@ -55,16 +59,129 @@ test("a paused or closed Gate profile is never selectable", () => {
   );
 });
 
-test("selecting a voter re-reads that voter's Gate profile", async () => {
+test("human display prefers Gate's label while machine identity stays the canonical wallet", async () => {
+  const labeled = gateProfile({ ens: null, label: "delegate.gramajo.eth" });
   const { api, calls } = gateApiFor([
-    { match: (url) => url.includes(`/v1/gates/${VOTER.toLowerCase()}`), body: gateProfile() },
+    { match: (url) => url.includes(`/v1/gates/${VOTER.toLowerCase()}`), body: labeled },
   ]);
   const voter = await selectVoter(api, VOTER.toLowerCase(), { stage: "PRE_VOTE", chainId: BASE_MAINNET });
 
   assert.equal(voter.wallet, VOTER.toLowerCase());
   const lower = VOTER.toLowerCase();
-  assert.equal(voter.label, `voter.eth (${lower.slice(0, 6)}…${lower.slice(-4)})`);
+  assert.equal(voter.label, `delegate.gramajo.eth (${lower.slice(0, 6)}…${lower.slice(-4)})`);
   assert.equal(calls.length, 1);
+});
+
+test("human display falls back cleanly to the shortened canonical wallet", () => {
+  const voter = projectVoter(gateProfile({ ens: null, label: null }), { stage: "PRE_VOTE" });
+  const lower = VOTER.toLowerCase();
+  assert.equal(voter.wallet, lower);
+  assert.equal(voter.label, `${lower.slice(0, 6)}…${lower.slice(-4)}`);
+});
+
+test("an explicit Gate label wins over the Bankr profile wallet and resolves only through live Gate data", async () => {
+  const targetProfile = gateProfile({
+    wallet: TARGET_VOTER,
+    ens: null,
+    label: "delegate.gramajo.eth",
+  });
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.includes("/v1/gates?"), body: { items: [targetProfile] } },
+    { match: (url) => url.endsWith(`/v1/gates/${TARGET_VOTER}`), body: targetProfile },
+  ]);
+
+  const voter = await selectTargetVoter(api, {
+    explicitTarget: "delegate.gramajo.eth",
+    profileWallet: VOTER,
+    stage: "PRE_VOTE",
+    chainId: BASE_MAINNET,
+  });
+
+  assert.equal(voter.wallet, TARGET_VOTER);
+  assert.equal(voter.label, "delegate.gramajo.eth (0xc180…5425)");
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates", `/v1/gates/${TARGET_VOTER}`]);
+});
+
+test("an explicit wallet wins over the Bankr profile wallet without directory inference", async () => {
+  const targetProfile = gateProfile({ wallet: TARGET_VOTER, label: "delegate.gramajo.eth" });
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.endsWith(`/v1/gates/${TARGET_VOTER}`), body: targetProfile },
+  ]);
+
+  const voter = await selectTargetVoter(api, {
+    explicitTarget: TARGET_VOTER,
+    profileWallet: VOTER,
+    stage: "PRE_VOTE",
+  });
+
+  assert.equal(voter.wallet, TARGET_VOTER);
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [`/v1/gates/${TARGET_VOTER}`]);
+});
+
+test("an ambiguous explicit Gate label fails closed instead of choosing by directory order", async () => {
+  const duplicate = gateProfile({ wallet: TARGET_VOTER, ens: null, label: "delegate.gramajo.eth" });
+  const other = gateProfile({ wallet: VOTER, ens: null, label: "delegate.gramajo.eth" });
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.includes("/v1/gates?"), body: { items: [duplicate, other] } },
+  ]);
+
+  await assert.rejects(
+    selectTargetVoter(api, {
+      explicitTarget: "delegate.gramajo.eth",
+      profileWallet: VOTER,
+      stage: "PRE_VOTE",
+      chainId: BASE_MAINNET,
+    }),
+    (error) => error.code === "AMBIGUOUS_VOTER",
+  );
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), ["/v1/gates"]);
+});
+
+test("an unknown explicit label fails without falling back or gaining an ENS resolver capability", async () => {
+  const calls = [];
+  const gateApi = new Proxy({
+    async listGates() { calls.push("listGates"); return [gateProfile()]; },
+    async getGate() { calls.push("getGate"); return gateProfile(); },
+  }, {
+    get(target, property, receiver) {
+      assert.ok(property === "listGates" || property === "getGate",
+        `unexpected voter-resolution capability: ${String(property)}`);
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  await assert.rejects(
+    selectTargetVoter(gateApi, {
+      explicitTarget: "unknown.delegate.eth",
+      profileWallet: VOTER,
+      stage: "PRE_VOTE",
+    }),
+    (error) => error.code === "VOTER_NOT_ACCEPTING",
+  );
+  assert.deepEqual(calls, ["listGates"]);
+});
+
+test("an invalid explicit target fails instead of falling back to the Bankr profile wallet", async () => {
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.endsWith(`/v1/gates/${VOTER}`), body: gateProfile() },
+  ]);
+
+  await assert.rejects(
+    selectTargetVoter(api, { explicitTarget: "   ", profileWallet: VOTER, stage: "PRE_VOTE" }),
+    (error) => error.code === "INVALID_REQUEST",
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("the Bankr profile wallet is used only when no explicit target is present", async () => {
+  const { api, calls } = gateApiFor([
+    { match: (url) => url.endsWith(`/v1/gates/${VOTER}`), body: gateProfile() },
+  ]);
+
+  const voter = await selectTargetVoter(api, { profileWallet: VOTER, stage: "PRE_VOTE" });
+
+  assert.equal(voter.wallet, VOTER.toLowerCase());
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [`/v1/gates/${VOTER}`]);
 });
 
 test("selecting a wallet Gate does not know refuses instead of inventing a voter", async () => {

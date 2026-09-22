@@ -10,6 +10,7 @@ const {
 } = require("./helpers");
 
 const PUBLIC_ID = "abcdefghijklmnopqrstuv";
+const TARGET_VOTER = "0xc180000000000000000000000000000000005425";
 const AUDIENCE = "gate.local";
 const EVIDENCE = [
   "https://evidence.invalid/thread-1",
@@ -141,6 +142,51 @@ test("the full demo flow runs target -> voter -> pitch -> quote -> confirmation 
   assert.equal(typeof walletStub.wallet.sendTransaction, "undefined");
   assert.equal(result.payment.relayer, RELAYER);
   assert.equal(result.payment.payer, PAYER);
+});
+
+test("flow target selection keeps an explicit voter ahead of a profile default", async () => {
+  const explicitProfile = gateProfile({ wallet: TARGET_VOTER, ens: null, label: "delegate.gramajo.eth" });
+  const world = createFetchStub([
+    { match: (url) => url.includes("/v1/gates?"), body: { items: [explicitProfile] } },
+    { match: (url) => url.endsWith(`/v1/gates/${TARGET_VOTER}`), body: explicitProfile },
+  ]);
+  const { flow } = flowFor(world);
+
+  const voter = await flow.selectTargetVoter({
+    explicitTarget: "delegate.gramajo.eth",
+    profileWallet: VOTER,
+    stage: "PRE_VOTE",
+  });
+
+  assert.equal(voter.wallet, TARGET_VOTER);
+});
+
+test("sendAttentionRequest forwards the explicit voter target ahead of a profile default", async () => {
+  const selections = [];
+  const stop = new Error("stop after voter selection");
+  const flow = {
+    async resolveTarget() { return { stage: "PRE_VOTE" }; },
+    async selectTargetVoter(input) {
+      selections.push(input);
+      return { wallet: TARGET_VOTER, label: "delegate.gramajo.eth (0xc180…5425)" };
+    },
+    selectVoter() { throw new Error("legacy wallet selector must not choose the profile default"); },
+    compose() { throw stop; },
+  };
+
+  await assert.rejects(sendAttentionRequest({
+    flow,
+    target: { stage: "PRE_VOTE" },
+    voterTarget: "delegate.gramajo.eth",
+    profileVoterWallet: VOTER,
+    pitch: "Please consider this candidate.",
+  }), (error) => error === stop);
+
+  assert.deepEqual(selections, [{
+    explicitTarget: "delegate.gramajo.eth",
+    profileWallet: VOTER,
+    stage: "PRE_VOTE",
+  }]);
 });
 
 test("evidence URLs are carried to Gate verbatim and NEVER fetched", async () => {
