@@ -125,7 +125,9 @@ signature it sends belongs to this quote and no other.
 IP literal, a loopback, a LAN address, plain HTTP, a path, a query, credentials,
 or a reserved test name (`.local`, `.test`, `.internal`, `example.com`, ...) is
 a configuration failure, not a fallback: the client refuses to build a relay
-with one.
+request with one. This syntactic validation does not authenticate the operator
+behind a public DNS name; provision both Gate origins through trusted
+configuration and never take either value from a prompt.
 
 On a transport failure the outcome is **UNKNOWN** - the relay may have broadcast
 before the connection dropped. Read the submission's Gate status; never sign a

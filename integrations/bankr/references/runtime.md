@@ -69,7 +69,7 @@ The canonical CLI produces validated unsigned calldata by default. It needs no p
 
 - Public history and proposal ingestion use the public governance index at `https://index.0773h.com` unless `GAVEL_INDEX_API_URL` selects another credential-free origin.
 - Chain-backed checks default to `https://eth.drpc.org`; `ETHEREUM_RPC_URL` is an optional advanced override supplied through Bankr secure Env Vars.
-- The Gate route requires `GAVEL_GATE_URL`, the **production Gate API** origin. A localhost, LAN, or testnet origin is a configuration failure.
+- The Gate route requires `GAVEL_GATE_URL`, the operator-trusted **production Gate API** origin. Public-HTTPS validation rejects visibly local, private, and reserved hosts; it does not authenticate the operator behind an arbitrary DNS name. Provision this value through trusted configuration, never from a prompt. A localhost, LAN, or testnet origin is a configuration failure.
 - Gate discovery needs no wallet or relayer. Payment additionally needs `GAVEL_GATE_RELAYER_URL`; relayer credentials remain with the relayer.
 
 Never put credentials in a URL or print a secret environment value.

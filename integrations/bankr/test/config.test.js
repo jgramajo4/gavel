@@ -23,12 +23,28 @@ test("the production Gate origin must be a public HTTPS hostname", () => {
     "https://127.0.0.1",
     "https://gate.test",
     "https://gate.example.com",
+    "https://localhost.",
+    "https://gate.local.",
+    "https://gate.test.",
+    "https://example.com.",
   ]) {
     assert.throws(
       () => resolveConfig({ GAVEL_GATE_URL: gateUrl }),
       (error) => error.code === "INVALID_CONFIG" && /HTTPS (?:origin|hostname)/.test(error.message),
     );
+    assert.throws(
+      () => resolveConfig({
+        GAVEL_GATE_URL: "https://gate.gavel.vote",
+        GAVEL_GATE_RELAYER_URL: gateUrl,
+      }),
+      (error) => error.code === "INVALID_CONFIG" && /HTTPS (?:origin|hostname)/.test(error.message),
+    );
   }
+});
+
+test("a trailing DNS root dot is canonicalized for a valid public Gate hostname", () => {
+  const config = resolveConfig({ GAVEL_GATE_URL: "https://gate.gavel.vote." });
+  assert.equal(config.gateUrl, "https://gate.gavel.vote");
 });
 
 test("Base mainnet is the only chain allowed by default", () => {

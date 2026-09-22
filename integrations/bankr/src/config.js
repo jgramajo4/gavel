@@ -54,11 +54,12 @@ function canonicalOrigin(value, name) {
  */
 function canonicalRelayOrigin(value, name) {
   const origin = canonicalOrigin(value, name);
-  const { protocol, hostname } = new URL(origin);
+  const parsed = new URL(origin);
+  const { protocol } = parsed;
   if (protocol !== "https:") {
     throw new BankrGateError("INVALID_CONFIG", `${name} must be an HTTPS origin.`);
   }
-  const host = hostname.toLowerCase();
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   // An IPv6 literal arrives bracketed; an IPv4 literal is four dotted numbers.
   const isIpLiteral = host.startsWith("[") || /^[0-9]+(\.[0-9]+){3}$/.test(host);
   if (isIpLiteral || !host.includes(".") || RESERVED_RELAY_HOSTS.includes(host)
@@ -69,7 +70,8 @@ function canonicalRelayOrigin(value, name) {
       `${name} must be a public HTTPS hostname, not an IP address, a loopback, a LAN, or a reserved test name.`,
     );
   }
-  return origin;
+  parsed.hostname = host;
+  return parsed.origin;
 }
 
 function chainIds(value) {
