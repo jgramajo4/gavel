@@ -13,6 +13,7 @@ const { getAddress } = require("ethers");
 const { executionIntentSchema } = require("../schema/intent");
 const { createVoteIntent, voteIntentHash } = require("./vote-intent");
 const {
+  deepFreeze,
   domainHash,
   normalizeChainId,
   normalizeHex,
@@ -41,7 +42,9 @@ function createExecutionIntent(input) {
   if (operation !== "CALL") {
     throw new Error("Only CALL execution intents are supported; delegatecall is never a governance vote");
   }
-  return executionIntentSchema.parse({
+  // Frozen at construction, `source` included: the DAO an execution intent
+  // was built for is settled here and cannot be rewritten in place later.
+  return deepFreeze(executionIntentSchema.parse({
     version: 1,
     chainId,
     actor: getAddress(input.actor ?? voteIntent.voterAddress),
@@ -58,7 +61,7 @@ function createExecutionIntent(input) {
       reason: normalizeReason(voteIntent.reason),
       voteIntentHash: voteIntentHash(voteIntent),
     },
-  });
+  }));
 }
 
 /**

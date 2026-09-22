@@ -19,14 +19,14 @@ type State =
   | { kind: 'ready'; prediction: Prediction; stale: boolean }
   | { kind: 'error'; message: string };
 
-export function usePrediction(proposalId: number, proposalText: string) {
+export function usePrediction(proposalKey: string, proposalText: string) {
   const { config } = useServices();
   const [state, setState] = useState<State>({ kind: 'idle' });
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const cached = await getCachedPrediction(proposalId);
+      const cached = await getCachedPrediction(config, proposalKey);
       if (!cancelled && cached) {
         setState({ kind: 'ready', prediction: cached, stale: true });
       }
@@ -34,7 +34,7 @@ export function usePrediction(proposalId: number, proposalText: string) {
     return () => {
       cancelled = true;
     };
-  }, [proposalId]);
+  }, [config, proposalKey]);
 
   const refresh = useCallback(async () => {
     setState((prev) =>
@@ -43,7 +43,7 @@ export function usePrediction(proposalId: number, proposalText: string) {
         : { kind: 'loading' },
     );
     try {
-      const prediction = await fetchPrediction(config, proposalId, proposalText);
+      const prediction = await fetchPrediction(config, proposalKey, proposalText);
       setState({ kind: 'ready', prediction, stale: false });
     } catch (err) {
       if (err instanceof ColdStartError) {
@@ -52,7 +52,7 @@ export function usePrediction(proposalId: number, proposalText: string) {
         setState({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
       }
     }
-  }, [config, proposalId, proposalText]);
+  }, [config, proposalKey, proposalText]);
 
   return { state, refresh };
 }

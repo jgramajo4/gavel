@@ -261,10 +261,17 @@ test("a validated intent is immutable after validation", () => {
   }, TypeError);
   assert.equal(validated.intent.target, GOVERNOR);
 
-  // The caller's own copies cannot reach inside it either.
+  // The caller's own copies cannot reach inside it either -- and are now
+  // themselves frozen at construction, so the retarget cannot even be
+  // attempted. Both properties are asserted: the attempt throws, and the
+  // validated copy is unaffected regardless.
   const intent = executionIntent();
   const held = validateExecutionIntent({ adapter: dao(), voteIntent: voteIntent(), intent, evidence: evidence() });
-  intent.target = ATTACKER;
+  assert.equal(Object.isFrozen(intent), true);
+  assert.throws(() => {
+    intent.target = ATTACKER;
+  }, TypeError);
+  assert.equal(intent.target, GOVERNOR);
   assert.equal(held.intent.target, GOVERNOR);
   assert.equal(held.intentHash, executionIntentHash(executionIntent()));
 });

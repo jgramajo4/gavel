@@ -1,7 +1,9 @@
 /**
- * Vote actions — the first rewards-eligible signed flow. Every call passes
- * clientId 38 for reward attribution. Refundable votes rebate gas for the first
- * N votes on a proposal.
+ * Nouns vote transactions.
+ *
+ * Nouns-specific: `castRefundableVote` and the client id are Nouns concepts.
+ * Reached only through the DAO chain-reader registry, never from a generic
+ * screen, and never as a substitute for the canonical intent pipeline.
  */
 import type { PublicClient } from 'viem';
 import { ADDRESSES, CLIENT_ID, MAINNET_CHAIN_ID } from '../constants.js';

@@ -1,8 +1,12 @@
 /**
- * Subgraph-first reads for the proposal list and delegate history (indexed,
- * batchable). Live tallies and tx construction go through direct contract reads
- * elsewhere — this module is for the cheap, indexed bulk queries.
+ * The Nouns subgraph, and only the Nouns subgraph.
+ *
+ * This is the pre-index path for one DAO, kept because Nouns has a public
+ * subgraph and the governance index is optional. Every function here is
+ * explicitly Nouns-scoped and stamps `dao: 'nouns'` on what it returns, so a
+ * DAO-agnostic caller can never mistake this for a general source.
  */
+import { daoProposalKey, daoDisplayName, formatDaoProposal } from '@gavel/core';
 import type { Config } from '../config.js';
 import type { Proposal, ProposalStatus, DelegateVote } from '../types.js';
 
@@ -40,6 +44,9 @@ interface RawProposal {
   // also surface an executionETA. We derive human time downstream.
 }
 
+/** This module serves exactly one DAO, named once. */
+const DAO = 'nouns';
+
 function mapStatus(raw: string): ProposalStatus {
   const s = raw.toUpperCase();
   const known: ProposalStatus[] = [
@@ -75,7 +82,11 @@ export async function fetchProposals(config: Config, first = 40): Promise<Propos
     { first },
   );
   return data.proposals.map((p) => ({
-    id: Number(p.id),
+    dao: DAO,
+    daoDisplayName: daoDisplayName(DAO),
+    key: daoProposalKey(DAO, p.id),
+    id: String(p.id),
+    label: formatDaoProposal(DAO, p.id),
     title: (p.title ?? `Proposal ${p.id}`).trim() || `Proposal ${p.id}`,
     description: p.description ?? '',
     proposer: p.proposer?.id ?? '',
@@ -136,7 +147,8 @@ export async function fetchDelegate(
   const id = address.toLowerCase();
   const data = await query<RawDelegate>(config.subgraphUrl, DELEGATE_QUERY, { id });
   const votes: DelegateVote[] = (data.delegate?.votes ?? []).map((v) => ({
-    proposalId: Number(v.proposal.id),
+    proposalKey: daoProposalKey(DAO, v.proposal.id),
+    proposalId: String(v.proposal.id),
     support: (v.supportDetailed as 0 | 1 | 2) ?? 2,
     votes: BigInt(v.votes ?? '0'),
     reason: v.reason ?? undefined,

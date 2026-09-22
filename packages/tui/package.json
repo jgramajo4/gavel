@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@gavel/core": "0.2.0",
-    "@gavel/nouns-adapter": "0.2.0",
     "dotenv": "^16.4.5",
     "ink": "^5.0.1",
     "ink-spinner": "^5.0.0",
@@ -38,4 +37,3 @@
     "typescript": "^5.6.2"
   }
 }
-

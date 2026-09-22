@@ -14,9 +14,8 @@ const {
   resolveEthereumRpcUrl,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
-const { EnsDaoAdapter } = require("../../ens-adapter");
-const { RailgunDaoAdapter } = require("../../railgun-adapter");
 const { IndexApiClient } = require("../../governance-index");
+const { createDaoAdapter: createWiredDaoAdapter } = require("@gavel/daos");
 const {
   ExecutionMode,
   ExecutionEngine,
@@ -40,21 +39,48 @@ const {
   resolveDataDir,
   resolveExecutionReadiness,
   runChronologicalBacktest,
+  listDaoIds,
+  interactiveExecutionAvailability,
+  loadGavelConfig,
+  resolveDaoContext,
 } = require("../../core");
 const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
+const {
+  configCommand,
+  daosCommand,
+  readinessCommand,
+  secretsCommand,
+  walletCommand,
+} = require("../runtime-commands");
 
 const DATA_DIR = resolveDataDir();
-const SUPPORTED_DAOS = Object.freeze(["nouns", "ens", "railgun-eth"]);
+// The DAO list is the catalog's, not a constant maintained here. Adding an
+// adapter must not mean editing a private array in the CLI.
+const SUPPORTED_DAOS = Object.freeze(listDaoIds());
 
 function createDaoAdapter(dao, provider) {
-  if (dao === "nouns") return new NounsDaoAdapter({ provider });
-  if (dao === "ens") return new EnsDaoAdapter({ provider });
-  if (dao === "railgun-eth") return new RailgunDaoAdapter({ provider });
-  throw new Error(`Unsupported DAO: ${dao}. Choose ${SUPPORTED_DAOS.join(", ")}.`);
+  return createWiredDaoAdapter(dao, { provider });
 }
 
 function defaultPrivatePath(...segments) {
   return privatePath(DATA_DIR, ...segments);
+}
+
+/**
+ * Which DAO this invocation is about.
+ *
+ * Every DAO-scoped command goes through here, so the policy lives in one
+ * place instead of four `default: "nouns"` declarations. An omitted `--dao`
+ * resolves only when the user follows exactly one DAO; with several followed
+ * it is an error naming them, because `nouns:123` and `ens:123` are different
+ * proposals and guessing between them is how a vote lands in the wrong DAO.
+ */
+async function resolveCommandDao(values) {
+  const loaded = await loadGavelConfig({});
+  return resolveDaoContext({
+    explicitDao: values.dao,
+    followedDaos: loaded.config.followedDaos,
+  }).dao;
 }
 
 function usage() {
@@ -97,6 +123,7 @@ Usage:
                            (--to <address> | --executor <safe|waap>)
                            [--rpc <url>] [--output <path>] [--stdout]
   gavel execution prepare <prediction.json> <proposal.json> --support <choice>
+                          [--dao <id>] (asserts the documents' DAO; never retargets)
                           [--execution-address <address>] [--asset-owner <address>]
                           [--reason <text>] [--rpc <url>] [--output <path>] [--stdout]
   gavel execution submit <prediction.json> <proposal.json> --support <choice>
@@ -108,6 +135,16 @@ Usage:
                              [--rpc <url>] [--safe-api-url <url>]
   gavel safe delegate setup --safe <address> [--chain-id <id>] [--identity <local:label>]
                             [--rpc <url>] [--safe-api-url <url>]
+  gavel daos list [--json]
+  gavel daos capabilities [--dao <id>] [--json]
+  gavel daos follow <dao>... [--json]
+  gavel daos unfollow <dao>... [--json]
+  gavel wallet status [--json]
+  gavel readiness [--json]
+  gavel secrets status [--json]
+  gavel config show [--json]
+  gavel config path
+  gavel config migrate [--json]
   gavel gate profile [--json]
   gavel gate inbox [--json]
   gavel gate inbox show <id> [--json]
@@ -127,6 +164,11 @@ Commands:
   execution prepare   Validate live against the DAO and emit a canonical ValidatedExecutionIntent.
   execution submit    Re-validate live, then hand the intent to a configured execution backend.
   identity create     Create a locally held, encrypted Safe proposal identity.
+  daos      List, inspect and follow governance systems. The TUI reads the same catalog.
+  wallet    Report the wallet connection type, governance identity and roles. Never a secret.
+  readiness Runtime and per-DAO readiness: monitor, analyze, vote, separately.
+  secrets   Report each secret's source and status. Never its value.
+  config    Show, locate or migrate the Gavel client configuration.
   gate profile        Fetch the authenticated Gate public profile projection.
   gate inbox          List, show, or archive the authenticated private Gate inbox.
 
@@ -136,6 +178,11 @@ Execution boundary:
   natural language -> governance intent -> execution intent -> validation
   -> executor. A stored intent document is an audit artifact, never an
   authorization: submission always re-validates against live chain state.
+
+DAO selection:
+  --dao names the governance system a command acts on. Omit it only when you
+  follow exactly one DAO: with several followed, Gavel refuses rather than
+  guessing, because proposal IDs are per-DAO and nouns:123 is not ens:123.
 
 Network:
   Chain-backed commands use ${DEFAULT_ETHEREUM_RPC_URL} by default.
@@ -178,7 +225,7 @@ async function historyCommand(argv) {
       stdout: { type: "boolean", default: false },
       endpoint: { type: "string" },
       "page-size": { type: "string", default: "100" },
-      dao: { type: "string", default: "nouns" },
+      dao: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -190,14 +237,14 @@ async function historyCommand(argv) {
   if (positionals.length !== 1) throw new Error("history requires exactly one voter address");
 
   const voter = getAddress(positionals[0]);
-  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
+  const dao = await resolveCommandDao(values);
   const pageSize = Number(values["page-size"]);
   // Every DAO reads the index by default. A Nouns voter's history is hundreds of
   // paginated subgraph queries per user, which the index answers once; `--endpoint`
   // is the explicit opt-out back to the subgraph.
-  const document = values.dao === "nouns" && values.endpoint
+  const document = dao === "nouns" && values.endpoint
     ? await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint), pageSize }).fetchHistory(voter)
-    : await new IndexApiClient({ pageSize }).fetchHistory(values.dao, voter);
+    : await new IndexApiClient({ pageSize }).fetchHistory(dao, voter);
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
@@ -205,7 +252,7 @@ async function historyCommand(argv) {
   }
 
   const destination =
-    values.output || defaultPrivatePath(values.dao, `${voter.toLowerCase()}.json`);
+    values.output || defaultPrivatePath(dao, `${voter.toLowerCase()}.json`);
   const absolutePath = await writePrivateJson(destination, document);
   process.stdout.write(
     `${JSON.stringify({
@@ -434,7 +481,7 @@ async function proposalCommand(argv) {
     args: argv,
     allowPositionals: true,
     options: {
-      dao: { type: "string", default: "nouns" },
+      dao: { type: "string" },
       output: { type: "string", short: "o" },
       stdout: { type: "boolean", default: false },
       endpoint: { type: "string" },
@@ -449,31 +496,32 @@ async function proposalCommand(argv) {
   if (positionals.length !== 1 || !/^\d+$/.test(positionals[0])) {
     throw new Error("proposal requires exactly one unsigned proposal ID");
   }
-  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
+  const dao = await resolveCommandDao(values);
   let proposal;
-  if (values.dao === "ens") {
+  if (dao === "ens") {
     // Only `ProposalCreated` carries the complete description and actions, so
     // ENS reads the index and live-verifies what it returns over RPC.
     const client = new IndexApiClient();
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
-  } else if (values.dao === "nouns" && values.endpoint) {
+  } else if (dao === "nouns" && values.endpoint) {
     proposal = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint) }).fetchProposal(positionals[0]);
-  } else if (values.dao === "nouns" || process.env.GAVEL_INDEX_API_URL) {
-    proposal = await new IndexApiClient().fetchProposal(values.dao, positionals[0]);
+  } else if (dao === "nouns" || process.env.GAVEL_INDEX_API_URL) {
+    proposal = await new IndexApiClient().fetchProposal(dao, positionals[0]);
   } else {
     // Railgun proposal state is a single live contract read, so it stays on RPC
     // unless an operator points the CLI at an index.
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
-    proposal = await createDaoAdapter(values.dao, provider).fetchProposal(positionals[0]);
+    proposal = await createDaoAdapter(dao, provider).fetchProposal(positionals[0]);
   }
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
     return;
   }
-  const destination = values.output || defaultPrivatePath("proposals", values.dao, `${proposal.id}.json`);
+  // Stored under the DAO, so `nouns:123` and `ens:123` are two files.
+  const destination = values.output || defaultPrivatePath("proposals", dao, `${proposal.id}.json`);
   const absolutePath = await writePrivateJson(destination, proposal);
-  process.stdout.write(`${JSON.stringify({ ok: true, proposalId: proposal.id, contentHash: proposal.contentHash, state: proposal.state, actionCount: proposal.actions.length, output: absolutePath }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, dao, proposalId: proposal.id, contentHash: proposal.contentHash, state: proposal.state, actionCount: proposal.actions.length, output: absolutePath }, null, 2)}\n`);
 }
 
 async function backtestCommand(argv) {
@@ -678,6 +726,20 @@ function normalizeMode(value) {
   const mode = String(value || ExecutionMode.UNSIGNED).toLowerCase();
   if (mode === "safe") return ExecutionMode.SAFE_SUPERVISED;
   if (mode === "waap") return ExecutionMode.WAAP_AUTONOMOUS;
+  // Interactive approval is a real mode with a real adapter, but this build
+  // registers no wallet transport, so nothing can submit through it. Refusing
+  // by name here -- rather than accepting the flag and failing later with a
+  // generic "no backend registered" -- is the difference between a setup
+  // error and a surprise at the moment of casting a vote.
+  if (mode === ExecutionMode.EOA_SUPERVISED) {
+    const availability = interactiveExecutionAvailability();
+    if (!availability.available) {
+      const error = new Error(availability.reason);
+      error.code = "EXECUTION_MODE_UNAVAILABLE";
+      throw error;
+    }
+    return mode;
+  }
   if (!Object.values(ExecutionMode).includes(mode)) {
     throw new Error("mode must be unsigned, safe-supervised, or waap-autonomous");
   }
@@ -696,7 +758,7 @@ async function executionStatusCommand(argv) {
     args: argv,
     allowPositionals: true,
     options: {
-      dao: { type: "string", default: "nouns" },
+      dao: { type: "string" },
       mode: { type: "string", default: ExecutionMode.UNSIGNED },
       "model-address": { type: "string", default: process.env.GAVEL_MODEL_ADDRESS },
       "asset-owner-address": { type: "string", default: process.env.GAVEL_ASSET_OWNER_ADDRESS },
@@ -712,13 +774,13 @@ async function executionStatusCommand(argv) {
     return;
   }
   if (positionals.length !== 0) throw new Error("execution-status accepts no positional arguments");
-  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
+  const dao = await resolveCommandDao(values);
   if (!values["model-address"]) throw new Error("execution-status requires --model-address or GAVEL_MODEL_ADDRESS");
   const mode = normalizeMode(values.mode);
   const executionAddress = configuredExecutionAddress(mode, values, values["model-address"]);
   if (!executionAddress) throw new Error(`No execution address configured for ${mode}`);
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
-  const adapter = createDaoAdapter(values.dao, provider);
+  const adapter = createDaoAdapter(dao, provider);
   const status = await resolveExecutionReadiness({
     adapter,
     mode,
@@ -735,7 +797,7 @@ async function prepareDelegationCommand(argv) {
     args: argv,
     allowPositionals: true,
     options: {
-      dao: { type: "string", default: "nouns" },
+      dao: { type: "string" },
       to: { type: "string" },
       executor: { type: "string" },
       "asset-owner-address": { type: "string", default: process.env.GAVEL_ASSET_OWNER_ADDRESS },
@@ -753,8 +815,8 @@ async function prepareDelegationCommand(argv) {
     return;
   }
   if (positionals.length !== 0) throw new Error("prepare-delegation accepts no positional arguments");
-  if (!SUPPORTED_DAOS.includes(values.dao)) throw new Error(`Unsupported DAO: ${values.dao}`);
-  if (values.dao === "railgun-eth") {
+  const dao = await resolveCommandDao(values);
+  if (dao === "railgun-eth") {
     throw new Error("Railgun delegation is per stake ID and is not available through prepare-delegation; configure staking delegation separately.");
   }
   const assetOwnerAddress = values["asset-owner-address"] || values["model-address"];
@@ -770,7 +832,7 @@ async function prepareDelegationCommand(argv) {
     throw new Error("prepare-delegation requires --to or --executor with a configured Safe/WaaP address");
   }
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
-  const adapter = createDaoAdapter(values.dao, provider);
+  const adapter = createDaoAdapter(dao, provider);
   const preparation = await adapter.prepareDelegation({ assetOwnerAddress, requiredDelegateAddress });
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(preparation, null, 2)}\n`);
@@ -804,6 +866,7 @@ async function executionPrepareCommand(argv) {
     allowPositionals: true,
     options: {
       support: { type: "string" },
+      dao: { type: "string" },
       from: { type: "string" },
       "asset-owner": { type: "string" },
       "execution-address": { type: "string" },
@@ -834,6 +897,17 @@ async function executionPrepareCommand(argv) {
     readJson(positionals[1]),
   ]);
   const proposal = proposalInput.proposal || proposalInput;
+  // `--dao` is a cross-check, never a selector. The DAO binding belongs to the
+  // documents: it was fixed when the proposal was fetched and the prediction
+  // was made, and nothing on this command line may retarget an already-bound
+  // intent at a different governance system. Passing a DAO that disagrees is
+  // refused rather than honoured.
+  if (values.dao && String(values.dao).toLowerCase() !== String(prediction.dao || "").toLowerCase()) {
+    throw new Error(
+      `--dao ${values.dao} does not match the prediction's DAO (${prediction.dao}). ` +
+        "A prepared intent stays bound to the DAO it was built for.",
+    );
+  }
   const provider = createEthereumProvider({ rpcUrl: values.rpc });
   const adapter = assertCanonicalGovernanceAdapter(createDaoAdapter(prediction.dao, provider));
 
@@ -1409,6 +1483,11 @@ async function main() {
     }
     return safeDelegateCommand(subcommand, rest);
   }
+  if (command === "daos") return daosCommand(argv);
+  if (command === "wallet") return walletCommand(argv);
+  if (command === "readiness") return readinessCommand(argv);
+  if (command === "secrets") return secretsCommand(argv);
+  if (command === "config") return configCommand(argv);
   if (command === "gate") return gateCommand(argv);
   throw new Error(`Unknown command: ${command}`);
 }

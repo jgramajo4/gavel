@@ -231,3 +231,58 @@ test("the legacy direct-signing scripts are outside the execution path", () => {
     assert.doesNotMatch(source, /AGENT_PRIVATE_KEY/, `${filename} reads a raw private key`);
   }
 });
+
+/**
+ * The wallet transport is not a second execution path.
+ *
+ * `requestTransaction()` takes a Gavel-validated intent hash, but the stronger
+ * guarantee is structural: exactly one module in the monorepo calls it, and
+ * that module rebuilds the request from `validated.intent`. If a screen, a
+ * harness or a helper ever calls it directly, this fails -- because that call
+ * site would be a way to get a wallet to sign something the canonical pipeline
+ * never produced.
+ */
+test("only the interactive execution adapter asks a wallet to submit a transaction", () => {
+  const allowed = new Set([
+    path.join(root, "packages", "core", "src", "execution", "executors", "interactive-wallet.js"),
+    // The providers themselves, which define the method.
+    path.join(root, "packages", "core", "src", "wallet", "provider.js"),
+    path.join(root, "packages", "core", "src", "wallet", "providers.js"),
+  ]);
+  const searched = [
+    ...sourceFiles(path.join(root, "packages"), [".js", ".ts", ".tsx"]),
+    ...sourceFiles(path.join(root, "integrations"), [".js", ".ts", ".tsx"]),
+  ].filter((file) => !file.includes(`${path.sep}dist${path.sep}`));
+
+  const callers = [];
+  for (const file of searched) {
+    const source = fs
+      .readFileSync(file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    if (!/requestTransaction\s*\(/.test(source)) continue;
+    assert.ok(allowed.has(file), `${path.relative(root, file)} calls requestTransaction() directly`);
+    callers.push(file);
+  }
+  // The adapter must be among them, so this cannot pass by the method having
+  // been renamed out from under the check.
+  assert.ok(
+    callers.some((file) => file.endsWith(path.join("executors", "interactive-wallet.js"))),
+    "the interactive execution adapter no longer submits through the wallet boundary",
+  );
+});
+
+test("the TUI never constructs a DAO adapter or reimplements governance semantics", () => {
+  // The TUI consumes shared capability, config and readiness APIs. It must not
+  // build adapters (that is `@gavel/daos`), and it must not decide governance
+  // questions of its own.
+  const tui = sourceFiles(path.join(root, "packages", "tui", "src"), [".ts", ".tsx"]);
+  for (const file of tui) {
+    const source = fs
+      .readFileSync(file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    assert.doesNotMatch(source, /new (Nouns|Ens|Railgun)DaoAdapter/, path.relative(root, file));
+    assert.doesNotMatch(source, /prepareValidatedIntent|validateExecutionIntent|createExecutionIntent/, path.relative(root, file));
+  }
+});

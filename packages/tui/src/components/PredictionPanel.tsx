@@ -10,15 +10,15 @@ import { Bar } from './common.js';
 import { relativeTime } from '../utils/format.js';
 
 export function PredictionPanel({
-  proposalId,
+  proposalKey,
   proposalText,
   bindRefresh,
 }: {
-  proposalId: number;
+  proposalKey: string;
   proposalText: string;
   bindRefresh?: (fn: () => void) => void;
 }) {
-  const { state, refresh } = usePrediction(proposalId, proposalText);
+  const { state, refresh } = usePrediction(proposalKey, proposalText);
   React.useEffect(() => {
     bindRefresh?.(() => void refresh());
   }, [bindRefresh, refresh]);

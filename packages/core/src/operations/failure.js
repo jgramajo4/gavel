@@ -21,6 +21,9 @@ function safeOperationMessage(error) {
     .slice(0, 300);
 }
 
+/** Codes raised by `resolveDaoContext()`. */
+const DAO_RESOLUTION_CODES = new Set(["UNKNOWN_DAO", "AMBIGUOUS_DAO", "NO_DAO_CONFIGURED"]);
+
 function classifyOperationalFailure(command, error) {
   const message = safeOperationMessage(error);
   const lowered = message.toLowerCase();
@@ -29,7 +32,12 @@ function classifyOperationalFailure(command, error) {
   // A governance index that is stalled, failing, or missing a checkpoint is an
   // operational data problem for the caller, not a defect in Gavel. Match the
   // error code so the wording of each refusal stays free to change.
-  if (error?.code === INDEX_STALE_CODE) {
+  // A DAO that could not be resolved -- ambiguous, unknown, or none followed
+  // -- is always the caller's to fix, and each carries an actionable message.
+  // Matched by code so the wording stays free to change.
+  if (DAO_RESOLUTION_CODES.has(error?.code)) {
+    category = "USER_CORRECTION_REQUIRED";
+  } else if (error?.code === INDEX_STALE_CODE) {
     category = "STALE_DATA";
   } else if (error?.code === INDEX_RATE_LIMITED_CODE || /timeout|http 5\d\d|rpc|network|fetch|socket|econn|rate[- ]limit|canonical version could not be verified/.test(lowered)) {
     category = "RETRYABLE_INFRASTRUCTURE";
@@ -40,7 +48,7 @@ function classifyOperationalFailure(command, error) {
     category = "SAFETY_BLOCK";
   } else if (/requires|must be|exactly one|invalid|unknown|not found/.test(lowered)) {
     category = "USER_CORRECTION_REQUIRED";
-  } else if (/unsupported|not implemented/.test(lowered)) {
+  } else if (error?.code === "EXECUTION_MODE_UNAVAILABLE" || /unsupported|not implemented|not available in this build/.test(lowered)) {
     category = "UNSUPPORTED_INPUT";
   }
   return {

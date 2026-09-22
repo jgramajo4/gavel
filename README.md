@@ -92,7 +92,7 @@ keep private state in a runtime-owned `GAVEL_DATA_DIR`.
 | [Bankr](#bankr) | A conversational governance copilot | Supported through the `nouns-dao` compatibility skill | Unsigned preparation by default; legacy signing scripts are separate |
 | [Hermes Agent](#hermes-agent) | A self-hosted conversational agent | Supported through a first-use bootstrapping skill | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
 | [BYOH](#byoh-bring-your-own-harness) | Any agent framework, shell, scheduler, or local application | Supported through the JSON CLI | Unsigned, Safe-supervised, or explicitly scoped WaaP integration |
-| [TUI](#terminal-ui-tui) | Interactive proposal browsing in a real terminal | Phase 1 source is imported into `packages/tui` | Read-only while canonical wallet handoff is implemented |
+| [TUI](#terminal-ui-tui) | Interactive multi-DAO governance in a real terminal | Supported: unified inbox, setup wizard, settings | Read-only, interactive wallet approval, Safe-supervised, or explicitly scoped WaaP |
 | [Headless / Railway](#headless-on-railway) | Scheduled ingestion, analysis, and JSON-producing jobs | CLI jobs are supported; an HTTP service is not yet shipped | Use unsigned output or an external supported executor |
 
 Whichever method you choose, start with read-only history, profile, proposal,
@@ -101,11 +101,28 @@ its submission.
 
 ### Supported DAOs
 
+Gavel follows whichever of these you choose; none of them is the default or the
+primary one. `gavel daos list --json` and the setup wizard both read the same
+catalog, so a new adapter appears in every surface at once.
+
 | DAO | CLI ID | Support |
 | --- | --- | --- |
 | Nouns DAO | `nouns` | History, proposal reads, prediction, vote preparation, delegation |
 | ENS DAO | `ens` | Indexed Governor history and RPC-verified proposals, prediction, vote preparation, delegation |
 | Railgun Governance (Ethereum) | `railgun-eth` | Live proposal reads, indexed history, binary vote preparation with staking snapshot hints |
+
+Capabilities differ, and Gavel adapts rather than assuming Nouns' model:
+`gavel daos capabilities --json` reports which DAOs support delegation, Safe
+execution, autonomous execution and so on. Each DAO also carries its own
+vocabulary -- Nouns counts `Votes`, ENS counts `Voting power`, Railgun counts
+`Staked voting power` -- and the UI uses the DAO's word when one DAO is in view.
+
+Following a DAO you cannot vote in is a supported, ordinary configuration:
+zero voting power is reported as a fact, never as an application error.
+
+`--dao` never defaults to one of them. Omit it only when you follow exactly one
+DAO; with several followed, Gavel names them and asks which you meant, because
+proposal IDs are per-DAO and `nouns:123` is not `ens:123`.
 
 ENS Governor and Snapshot records remain separate; Gavel prepares executable ENS
 Governor votes only. Railgun supports FOR/Yay and AGAINST/Nay, has no abstain or
@@ -123,6 +140,7 @@ do not commit a populated `.env` file.
 | `NOUNS_SUBGRAPH_URL` | Optional | Subgraph used when `--endpoint` opts a Nouns read out of the index, and by the TUI delegate view |
 | `GAVEL_INDEX_API_URL` | Optional override | Private or self-hosted governance index; defaults to the public `https://index.0773h.com`, which every DAO reads. No credentials in this URL |
 | `GAVEL_INDEX_MAX_STALENESS_SECONDS` | Optional | Reject an indexed read once its newest checkpoint is older than this; defaults to `3600` |
+| `WALLETCONNECT_PROJECT_ID` | Connecting a wallet over WalletConnect | WalletConnect project id. Referenced by name in configuration; the value is never stored |
 | `ETHEREUM_RPC_URL` | Optional advanced override | Ethereum mainnet JSON-RPC endpoint; defaults to `https://eth.drpc.org` |
 | `GAVEL_MODEL_ADDRESS` | Optional default for execution checks | Address associated with the model or agent identity; it need not own voting assets |
 | `GAVEL_ASSET_OWNER_ADDRESS` | Delegated voting | Address that owns the Noun or voting power |
@@ -320,19 +338,27 @@ bundled.
 
 ### Terminal UI (TUI)
 
-`packages/tui` contains the first migration slice of the standalone
-[`jgramajo4/Gavel-TUI`](https://github.com/jgramajo4/Gavel-TUI) application,
-pinned to source commit `39ddf1e8fbb2f378b0b62c44df206dcfa4900466`.
-The Ink screens, keyboard navigation, polling, formatting, and legacy data
-modules are now available in the monorepo for incremental replacement.
+`packages/tui` is Gavel's interactive multi-DAO client, descended from the
+standalone [`jgramajo4/Gavel-TUI`](https://github.com/jgramajo4/Gavel-TUI)
+application at source commit `39ddf1e8fbb2f378b0b62c44df206dcfa4900466`.
 
-This phase is intentionally read-only. The migrated configuration never loads
-`GAVEL_PRIVATE_KEY`, so the legacy vote, delegation, and attestation action
-modules cannot obtain a signer through the application bootstrap. Do not
-re-enable that environment-key path. Replace those actions with canonical
-Gavel preparation and an explicit local wallet handoff.
+On first launch it runs a setup wizard: private data directory, which DAOs to
+follow, how to connect a wallet, a per-DAO check, execution mode, inference,
+privacy, alerts, review. Afterwards the home screen is a unified governance
+inbox across every followed DAO, and the same settings are editable in place --
+changing which DAOs you follow never means re-running the wizard.
 
-Run the imported interface from a real terminal:
+The TUI owns no configuration semantics. Followed DAOs, wallet connection,
+execution mode, inference and notifications live in the shared config under
+`GAVEL_DATA_DIR`, which `gavel daos`, `gavel wallet`, `gavel readiness` and
+`gavel config` read and write too.
+
+It holds no signing material. Its configuration has no key field and no signer
+factory; signing authority arrives through a wallet provider that holds a
+reference to a signer the host already has. Do not re-introduce an
+environment-key path.
+
+Run it from a real terminal:
 
 ```bash
 npm ci
@@ -340,18 +366,21 @@ npm run tui:typecheck
 npm run tui
 ```
 
-The proposal list reads the public governance index, applying the same
-checkpoint-freshness gate as the CLI: a stalled index is reported rather than
-shown as a short list. `GAVEL_INDEX_API_URL` selects a different index, and
-setting it to an empty value opts back to the subgraph. The delegate view always
-reads the subgraph, because delegation ingestion is not implemented in the
-index, and live tallies come from RPC.
+Proposals are read per followed DAO from the public governance index, applying
+the same checkpoint-freshness gate as the CLI: a stalled index is reported
+rather than shown as a short list. Each DAO is read independently, so one
+unreachable indexer becomes one unavailable row in the inbox instead of an
+empty client. `GAVEL_INDEX_API_URL` selects a different index, and setting it
+to an empty value opts back to the Nouns subgraph.
 
-The TUI still contains transitional PASS/FAIL prediction, subgraph, ABI, and
-proposal-state modules. They are migration inputs, not canonical Gavel domain
-logic. Follow [the TUI migration checklist](docs/architecture/TUI_MIGRATION.md)
-as each module is replaced by `@gavel/core`, `@gavel/nouns-adapter`, or the
-stable JSON CLI.
+Live in-terminal tallies need a per-DAO chain reader, and only Nouns has one in
+this build. A DAO without one still shows indexed tallies and says so, rather
+than polling another DAO's governor; its votes and delegation are prepared
+through the canonical CLI path.
+
+See [MULTI_DAO_CLIENT.md](docs/architecture/MULTI_DAO_CLIENT.md) for the DAO
+catalog, the configuration model, the wallet-provider boundary, the readiness
+model and text captures of every wizard step.
 
 ### Headless on Railway
 
@@ -400,6 +429,61 @@ for [services](https://docs.railway.com/services),
 The first future HTTP deployment should use `packages/server` and the same core,
 adapter, storage, and execution boundaries. Until that server exists, exposing a
 public Railway domain does not make the CLI an API.
+
+## Client configuration
+
+Which DAOs you follow, how you control a wallet, what Gavel may do with it,
+where recommendations are computed and what it alerts you about are one
+document under `GAVEL_DATA_DIR`, shared by the TUI and the CLI. Anything the
+setup wizard configures is reachable headlessly, so Hermes, Bankr, OpenClaw,
+IronClaw, Pi, Claude Code, Codex, OpenCode and any other BYOH runtime see the
+same state.
+
+```bash
+gavel daos list --json           # the catalog, and which you follow
+gavel daos capabilities --json   # what each DAO supports
+gavel daos follow ens nouns
+gavel daos unfollow railgun-eth
+gavel wallet status --json       # connection type, identity, and the roles, kept apart
+gavel readiness --json           # runtime + per-DAO monitor/analyze/vote
+gavel secrets status --json      # each secret's source and status, never its value
+gavel config show --json         # the whole configuration, redacted
+gavel config migrate             # bring a pre-multi-DAO config forward, once
+```
+
+`gavel readiness --json` is what an agent runtime should ask before acting:
+which DAOs are enabled, whether Gavel can vote in each of them, which execution
+mode applies and whether human approval is required.
+
+```json
+{
+  "level": "degraded",
+  "canLaunch": true,
+  "executionMode": "unsigned",
+  "humanApprovalRequired": true,
+  "daos": {
+    "nouns": { "index": "ready", "identity": "ready", "vote": "ready" },
+    "ens":   { "index": "unavailable", "identity": "ready", "vote": "unknown" }
+  }
+}
+```
+
+One unreachable indexer degrades one DAO, not the client: `canLaunch` goes
+false only when the runtime itself cannot function.
+
+Configuration stores **references**, never secrets. A signer is recorded as
+`environment: GAVEL_PRIVATE_KEY` or as a keystore label; a WalletConnect
+session is recorded as `{ topic, account, chainId, expiresAt }` and nothing
+else. Writing a secret-shaped value into configuration fails the write rather
+than persisting it, and every status, JSON, log, error and diagnostic path runs
+through redaction.
+
+An existing Nouns-only configuration migrates on first read: it becomes
+`followedDaos: ["nouns"]` without changing your voting or security model.
+Migration never increases authority -- an ambiguous `wallet` field becomes a
+read-only governance identity with a note, and a plaintext key or phrase found
+in old configuration is detected by shape, removed, never echoed, and replaced
+by instructions for moving it to a keystore or the environment.
 
 ## Historical vote ingestion
 

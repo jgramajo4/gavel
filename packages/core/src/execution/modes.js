@@ -92,6 +92,22 @@ registerExecutionMode({
   implemented: true,
   description: "Validated calldata handed back for out-of-band signing.",
 });
+/**
+ * The interactive path: Gavel prepares, a human approves in their own wallet.
+ *
+ * `identityRole` is null on purpose. The other supervised mode holds a Gavel
+ * credential that proposes into a queue; this one holds nothing at all -- the
+ * key is in the user's wallet app and Gavel only ever presents a request. A
+ * mode with no identity cannot leak one.
+ */
+registerExecutionMode({
+  mode: ExecutionMode.EOA_SUPERVISED,
+  kind: ExecutionModeKind.SUPERVISED,
+  capability: "eoaSupervised",
+  identityRole: null,
+  implemented: true,
+  description: "Presented to a user-controlled wallet for explicit human approval.",
+});
 registerExecutionMode({
   mode: ExecutionMode.SAFE_SUPERVISED,
   kind: ExecutionModeKind.SUPERVISED,
@@ -115,20 +131,11 @@ registerExecutionMode({
  * clear error instead of silently doing something else.
  */
 const FUTURE_EXECUTION_MODES = Object.freeze({
-  EOA_SUPERVISED: "eoa-supervised",
   ERC4337: "erc4337",
   BANKR_WALLET: "bankr-wallet",
   HARDWARE_WALLET: "hardware-wallet",
 });
 
-registerExecutionMode({
-  mode: FUTURE_EXECUTION_MODES.EOA_SUPERVISED,
-  kind: ExecutionModeKind.SUPERVISED,
-  capability: "eoaSupervised",
-  identityRole: "proposal",
-  implemented: false,
-  description: "Presented to a human-held EOA for signature.",
-});
 registerExecutionMode({
   mode: FUTURE_EXECUTION_MODES.ERC4337,
   kind: ExecutionModeKind.SUPERVISED,

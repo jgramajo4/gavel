@@ -43,3 +43,12 @@ preparation and a canonical wallet handoff.
 A TUI interaction may request analysis or transaction preparation, but it is not
 authorization to submit a transaction. Unknown RPC state, proposal drift,
 delegation mismatch, or a canonical preparation block must stop the flow.
+
+## Superseded
+
+The migration's read-only posture and its replacement checklist are closed out
+by the multi-DAO client work: proposal ingestion now reads the governance index
+per followed DAO, the canonical wallet handoff exists as the wallet-provider
+boundary in `@gavel/core`, and the TUI no longer has a key path of its own. See
+[MULTI_DAO_CLIENT.md](./MULTI_DAO_CLIENT.md) for the architecture that replaced
+this one.

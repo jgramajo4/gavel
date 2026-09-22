@@ -1,7 +1,10 @@
 /**
- * Direct contract reads for live, block-accurate vote tallies. Used by the
- * proposal-detail poller — a single cheap `proposalVotes` read, not a subgraph
- * query.
+ * Direct Nouns contract reads for live, block-accurate vote tallies.
+ *
+ * Nouns-specific by construction: the addresses, the ABI and the state enum
+ * below are all Nouns'. It is reached only through the DAO chain-reader
+ * registry (`chain/daoReaders.ts`), so a DAO with no reader falls back to
+ * indexed tallies instead of silently reading the wrong governor.
  */
 import type { PublicClient } from 'viem';
 import { ADDRESSES } from '../constants.js';
@@ -39,7 +42,7 @@ const NOUNS_STATE_MAP: Record<number, ProposalStatus> = {
 
 export async function fetchTally(
   client: PublicClient,
-  proposalId: number,
+  proposalId: string,
 ): Promise<VoteTally> {
   const [votes, quorum] = await Promise.all([
     client.readContract({
@@ -61,7 +64,7 @@ export async function fetchTally(
 
 export async function fetchProposalState(
   client: PublicClient,
-  proposalId: number,
+  proposalId: string,
 ): Promise<ProposalStatus> {
   const raw = (await client.readContract({
     address: ADDRESSES.NounsDAO as `0x${string}`,

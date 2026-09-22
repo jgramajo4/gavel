@@ -160,6 +160,7 @@ class RailgunDaoAdapter {
       analyze: true,
       predict: true,
       prepareVote: true,
+      eoaSupervised: true,
       safeSupervised: false,
       waapAutonomous: false,
     });
