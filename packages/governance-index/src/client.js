@@ -1,11 +1,11 @@
 const { getAddress } = require("ethers");
 const { historyDocumentSchema, normalizedVoteSchema } = require("../../core/src/schema/governance");
+const { DEFAULT_INDEX_API_URL } = require("../../core/src/config/index-api-endpoint");
 const { sanitizeEndpoint } = require("./provenance");
 
 const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
 // Public read-only index. Used when no operator override is configured, so an
 // ordinary user needs no endpoint, no shared secret, and no network setup.
-const DEFAULT_INDEX_API_URL = "https://index.0773h.com";
 const DEFAULT_MAX_STALENESS_MS = 60 * 60 * 1000;
 const MAX_HISTORY_PAGES = 1000;
 const DEFAULT_MAX_RETRIES = 5;

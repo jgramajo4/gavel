@@ -183,6 +183,7 @@ async function readinessCommand(argv, io = {}) {
   const runtime = resolveRuntimeReadiness({
     config: loaded.config,
     configIssues: issues,
+    env: io.env || process.env,
     dataDir: loaded.dataDir,
     dataDirWritable: io.dataDirWritable,
     walletConnected: io.walletConnected,
@@ -215,7 +216,12 @@ async function readinessCommand(argv, io = {}) {
     // unrecognized mode is already handled there, and a second lookup would
     // throw on exactly the config readiness just described.
     humanApprovalRequired: runtime.humanApprovalRequired,
-    runtime: { level: runtime.level, signals: runtime.signals, reasons: runtime.reasons },
+    runtime: {
+      level: runtime.level,
+      signals: runtime.signals,
+      reasons: runtime.reasons,
+      indexEndpoint: runtime.indexEndpoint,
+    },
     daos: Object.fromEntries(
       daos.map((dao) => [
         dao.dao,

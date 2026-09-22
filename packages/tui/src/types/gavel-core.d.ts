@@ -62,6 +62,16 @@ declare module '@gavel/core' {
     reason: string | null;
   };
 
+  export interface IndexApiEndpointMetadata {
+    source: 'config' | 'environment' | 'default';
+    variable: string | null;
+    status: 'configured' | 'disabled' | 'missing' | 'invalid';
+  }
+  export function resolveIndexApiEndpoint(
+    config?: Partial<GavelConfig> | GavelConfig['runtime'],
+    env?: Record<string, string | undefined>,
+  ): { readonly url: string; readonly metadata: IndexApiEndpointMetadata };
+
   export function daoProposalKey(dao: string, proposalId: string | number | bigint): string;
   export function formatDaoProposal(dao: string, proposalId: string | number | bigint): string;
 

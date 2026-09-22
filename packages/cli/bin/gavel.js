@@ -42,6 +42,7 @@ const {
   listDaoIds,
   interactiveExecutionAvailability,
   loadGavelConfig,
+  resolveIndexApiEndpoint,
   resolveDaoContext,
 } = require("../../core");
 const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
@@ -81,6 +82,12 @@ async function resolveCommandDao(values) {
     explicitDao: values.dao,
     followedDaos: loaded.config.followedDaos,
   }).dao;
+}
+
+/** Resolve the one operational index endpoint from the shared runtime config. */
+async function resolveCommandIndexEndpoint() {
+  const loaded = await loadGavelConfig({});
+  return resolveIndexApiEndpoint(loaded.config, process.env);
 }
 
 function usage() {
@@ -239,12 +246,20 @@ async function historyCommand(argv) {
   const voter = getAddress(positionals[0]);
   const dao = await resolveCommandDao(values);
   const pageSize = Number(values["page-size"]);
+  const indexEndpoint = await resolveCommandIndexEndpoint();
   // Every DAO reads the index by default. A Nouns voter's history is hundreds of
   // paginated subgraph queries per user, which the index answers once; `--endpoint`
   // is the explicit opt-out back to the subgraph.
-  const document = dao === "nouns" && values.endpoint
-    ? await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint), pageSize }).fetchHistory(voter)
-    : await new IndexApiClient({ pageSize }).fetchHistory(dao, voter);
+  let document;
+  if (dao === "nouns" && values.endpoint) {
+    document = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint), pageSize }).fetchHistory(voter);
+  } else if (indexEndpoint.url) {
+    document = await new IndexApiClient({ baseUrl: indexEndpoint.url, pageSize }).fetchHistory(dao, voter);
+  } else if (dao === "nouns") {
+    document = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(), pageSize }).fetchHistory(voter);
+  } else {
+    throw new Error(`${dao} history requires a configured governance index endpoint`);
+  }
 
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
@@ -497,17 +512,21 @@ async function proposalCommand(argv) {
     throw new Error("proposal requires exactly one unsigned proposal ID");
   }
   const dao = await resolveCommandDao(values);
+  const indexEndpoint = await resolveCommandIndexEndpoint();
   let proposal;
   if (dao === "ens") {
     // Only `ProposalCreated` carries the complete description and actions, so
     // ENS reads the index and live-verifies what it returns over RPC.
-    const client = new IndexApiClient();
+    if (!indexEndpoint.url) throw new Error("ENS proposal lookup requires a configured governance index endpoint");
+    const client = new IndexApiClient({ baseUrl: indexEndpoint.url });
     const provider = createEthereumProvider({ rpcUrl: values.rpc });
     proposal = await new EnsDaoAdapter({ provider, proposalLoader: (id) => client.fetchProposal("ens", id) }).fetchProposal(positionals[0]);
   } else if (dao === "nouns" && values.endpoint) {
     proposal = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint(values.endpoint) }).fetchProposal(positionals[0]);
-  } else if (dao === "nouns" || process.env.GAVEL_INDEX_API_URL) {
-    proposal = await new IndexApiClient().fetchProposal(dao, positionals[0]);
+  } else if (indexEndpoint.url) {
+    proposal = await new IndexApiClient({ baseUrl: indexEndpoint.url }).fetchProposal(dao, positionals[0]);
+  } else if (dao === "nouns") {
+    proposal = await new NounsSubgraphHistoryAdapter({ endpoint: subgraphEndpoint() }).fetchProposal(positionals[0]);
   } else {
     // Railgun proposal state is a single live contract read, so it stays on RPC
     // unless an operator points the CLI at an index.

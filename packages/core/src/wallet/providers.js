@@ -118,18 +118,26 @@ class LocalSignerWalletProvider extends BaseWalletProvider {
    * "disconnected" while the capability list said otherwise.
    */
   getCapabilities() {
-    if (this._state !== WalletConnectionState.CONNECTED) return [WalletCapability.READ];
+    if (this._state !== WalletConnectionState.CONNECTED || !this.#signer) return [WalletCapability.READ];
     const capabilities = [WalletCapability.READ, WalletCapability.SIGN_MESSAGE, WalletCapability.SIGN_TRANSACTION];
     if (this.#broadcaster) capabilities.push(WalletCapability.SEND_TRANSACTION);
     return capabilities;
   }
 
   async getAccount() {
-    if (!this._account) this._account = getAddress(await this.#signer.address());
+    if (!this._account && this.#signer) this._account = getAddress(await this.#signer.address());
     return this._account;
   }
 
   async connect() {
+    if (!this.#signer) {
+      this._state = WalletConnectionState.DISCONNECTED;
+      throw new WalletError(
+        WalletErrorCode.NOT_CONNECTED,
+        "The local signer was revoked. Use the supported reconnect path to attach it again.",
+        { type: this.type },
+      );
+    }
     await this.getAccount();
     this._state = WalletConnectionState.CONNECTED;
     return this.getStatus();
