@@ -12,7 +12,7 @@ This one same-name `gavel` install exposes both personalized voter/copilot workf
 
 **Upgrade or reinstall:** send the exact install action above again. Bankr replaces an installed skill with the same frontmatter name. Start a new conversation so the refreshed instructions load. Replacement does not authorize changes to private Gavel files.
 
-**Inspect the installed version:** ask Bankr, “What Gavel skill version, build kind, and runtime ref are installed?” The skill reads `references/skill-manifest.json` and reports those fields. A direct GitHub directory install is a source build with no Git SHA and `runtime.ref` set to `main`; it must not be described as immutable. Release packaging may stamp a verified 40-character Git SHA into both `build.gitSha` and `runtime.ref`.
+**Inspect the installed version:** ask Bankr, “What Gavel skill version, build ID, build kind, Git SHA, and runtime ref are installed?” The skill reads `references/skill-manifest.json` and reports those fields. Compare its version and build ID to the same file on `main` at <https://github.com/jgramajo4/gavel/blob/main/integrations/bankr/references/skill-manifest.json>. A direct GitHub directory install is a source build with no Git SHA and `runtime.ref` set to `main`; it must not be described as immutable. Release packaging stamps a verified 40-character Git SHA into both `build.gitSha` and `runtime.ref`.
 
 **Remove:** Bankr's in-Bankr skill documentation describes removing an installed skill from the **Skills** tab. It does not document a natural-language uninstall action for a GitHub-installed guest skill, so this guide does not invent one. See <https://docs.bankr.bot/skills/in-bankr/from-github/>.
 
@@ -38,7 +38,7 @@ node integrations/bankr/scripts/build-artifact.js --output /tmp/gavel-bankr-arti
 npm pack /tmp/gavel-bankr-artifact
 ```
 
-A release process may add `--build-sha <verified-40-character-git-sha>`. The script validates and stamps that supplied SHA; it never guesses one. The source manifest remains unchanged.
+A release process should add `--build-sha <verified-40-character-git-sha>`. The script validates and stamps that supplied SHA; it never guesses one. The source manifest remains unchanged. Inspect a built artifact directly with `node -p "require('/path/to/artifact/references/skill-manifest.json')"`.
 
 Run package and route checks with:
 

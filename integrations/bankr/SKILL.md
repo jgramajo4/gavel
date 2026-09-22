@@ -2,7 +2,7 @@
 name: gavel
 description: Personalized governance voter copilot for private history, proposals, preferences, hard rules, backtests, votes, and delegation; also discovers Nouns DAO delegates and voters accepting lobbying, sponsorship, candidates, proposals, or paid attention in Gate's live directory and settles real USDC on Base mainnet after explicit confirmation.
 tags: [nouns, ens, railgun, governance, voting, delegation, copilot, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
-version: 0.2.0
+version: 0.3.0
 visibility: public
 metadata:
   clawdbot:
@@ -127,7 +127,7 @@ Environment (Bankr secure Env Vars; refer to them by name, never echo a value):
 | --- | --- |
 | `GAVEL_GATE_URL` | The **production Gate API** origin. Required. Origin only — no path, query, or credentials. |
 | `GAVEL_INDEX_API_URL` | Optional. Defaults to the public `https://index.0773h.com`. |
-| `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `8453` (Base mainnet). |
+| `GAVEL_GATE_CHAIN_IDS` | Optional compatibility setting. If present, it must be exactly `8453` (Base mainnet). |
 | `GAVEL_GATE_RELAYER_URL` | The Gate **remote relay** origin. Origin only, HTTPS, public hostname. Without it there is no way to broadcast from this sandbox. |
 | Relayer credentials | Held by the relayer, never by this skill. See "Payment" below. |
 

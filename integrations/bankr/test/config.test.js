@@ -20,6 +20,15 @@ test("Base mainnet is the only chain allowed by default", () => {
   assert.deepEqual([...resolveConfig({ GAVEL_GATE_URL: "https://gate.example" }).allowedChainIds], [8453]);
 });
 
+test("Bankr production cannot be configured for Base Sepolia or another chain", () => {
+  for (const chainIds of ["84532", "8453,84532", "1", [84532]]) {
+    assert.throws(
+      () => resolveConfig({ GAVEL_GATE_URL: "https://gate.example", GAVEL_GATE_CHAIN_IDS: chainIds }),
+      (error) => error.code === "INVALID_CONFIG" && /exactly 8453/.test(error.message),
+    );
+  }
+});
+
 test("no contract address, token, fee, or price is configurable here", () => {
   const config = resolveConfig({ GAVEL_GATE_URL: "https://gate.example" });
   for (const field of ["splitter", "token", "attentionAmount", "gavelFeeAmount", "quoteSigner"]) {

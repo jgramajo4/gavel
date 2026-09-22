@@ -108,7 +108,7 @@ test("the umbrella prioritizes live Gate discovery while keeping voter and Gate 
 
 test("the skill is on Base mainnet with real USDC", () => {
   assert.match(skill, /Base mainnet, chain `8453`, and real USDC/);
-  assert.match(skill, /Defaults to `8453` \(Base mainnet\)/);
+  assert.match(skill, /must be exactly `8453` \(Base mainnet\)/);
   assert.match(skill, /Money here is real/);
   assert.match(meta.description, /Base mainnet/);
   assert.match(meta.description, /real USDC/);

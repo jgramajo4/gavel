@@ -45,6 +45,7 @@ test("the source manifest exposes a version and distinguishes source from stampe
 
   assert.equal(manifest.name, "gavel");
   assert.equal(manifest.version, pkg.version);
+  assert.equal(manifest.buildId, "bankr-umbrella-v1");
   assert.deepEqual(manifest.build, { kind: "source", gitSha: null });
   assert.equal(manifest.runtime.ref, "main");
   assert.match(skill, /references\/skill-manifest\.json/);

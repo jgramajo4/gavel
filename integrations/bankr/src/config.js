@@ -73,12 +73,16 @@ function canonicalRelayOrigin(value, name) {
 }
 
 function chainIds(value) {
-  if (value === undefined || value === null || value === "") return [...DEFAULT_ALLOWED_CHAIN_IDS];
-  const list = (Array.isArray(value) ? value : String(value).split(","))
-    .map((entry) => Number(String(entry).trim()))
-    .filter((entry) => Number.isSafeInteger(entry) && entry > 0);
-  if (list.length === 0) {
-    throw new BankrGateError("INVALID_CONFIG", "GAVEL_GATE_CHAIN_IDS must list at least one chain ID.");
+  const list = (value === undefined || value === null || value === "")
+    ? [...DEFAULT_ALLOWED_CHAIN_IDS]
+    : (Array.isArray(value) ? value : String(value).split(","))
+      .map((entry) => Number(String(entry).trim()))
+      .filter((entry) => Number.isSafeInteger(entry) && entry > 0);
+  if (list.length !== 1 || list[0] !== 8453) {
+    throw new BankrGateError(
+      "INVALID_CONFIG",
+      "GAVEL_GATE_CHAIN_IDS must contain exactly 8453 (Base mainnet).",
+    );
   }
   return list;
 }
