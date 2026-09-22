@@ -40,6 +40,13 @@ for (const name of ["package.json", "src"]) {
 
 const pkgPath = path.join(output, "package.json");
 const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+const gatePackage = JSON.parse(fs.readFileSync(path.join(vendorGate, "package.json"), "utf8"));
+for (const [name, range] of Object.entries(gatePackage.dependencies || {})) {
+  if (pkg.dependencies[name] && pkg.dependencies[name] !== range) {
+    throw new Error(`dependency range mismatch for ${name}: ${pkg.dependencies[name]} != ${range}`);
+  }
+  pkg.dependencies[name] = range;
+}
 pkg.dependencies["@gavel/gate"] = "file:vendor/gate";
 pkg.files = ["README.md", "SKILL.md", "references", "scripts", "src", "vendor/gate"];
 fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);

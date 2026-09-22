@@ -104,4 +104,15 @@ test("a packed artifact contains both routes and a vendored private Gate depende
   });
   const artifact = require(installedPackage);
   assert.equal(typeof artifact.createBankrGateFlow, "function");
+
+  // Bankr installs the published artifact itself, not an unpacked directory.
+  // npm treats nested file: dependencies differently in that path, so prove the
+  // tarball is independently loadable instead of relying on workspace hoisting.
+  const tarballInstall = path.join(work, "tarball-install");
+  fs.mkdirSync(tarballInstall);
+  execFileSync("npm", ["install", tarball, "--ignore-scripts", "--package-lock=false", "--no-audit", "--no-fund"], {
+    cwd: tarballInstall,
+  });
+  const packedArtifact = require(path.join(tarballInstall, "node_modules", "@gavel", "integration-bankr"));
+  assert.equal(typeof packedArtifact.createBankrGateFlow, "function");
 });
