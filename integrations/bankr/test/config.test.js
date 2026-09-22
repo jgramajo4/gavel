@@ -27,6 +27,10 @@ test("the production Gate origin must be a public HTTPS hostname", () => {
     "https://gate.local.",
     "https://gate.test.",
     "https://example.com.",
+    "https://localhost..",
+    "https://gate.local..",
+    "https://gate.test..",
+    "https://example.com..",
   ]) {
     assert.throws(
       () => resolveConfig({ GAVEL_GATE_URL: gateUrl }),
@@ -45,6 +49,12 @@ test("the production Gate origin must be a public HTTPS hostname", () => {
 test("a trailing DNS root dot is canonicalized for a valid public Gate hostname", () => {
   const config = resolveConfig({ GAVEL_GATE_URL: "https://gate.gavel.vote." });
   assert.equal(config.gateUrl, "https://gate.gavel.vote");
+
+  const relayConfig = resolveConfig({
+    GAVEL_GATE_URL: "https://gate.gavel.vote",
+    GAVEL_GATE_RELAYER_URL: "https://relay.gavel.vote.",
+  });
+  assert.equal(relayConfig.relayerUrl, "https://relay.gavel.vote");
 });
 
 test("Base mainnet is the only chain allowed by default", () => {

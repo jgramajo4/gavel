@@ -59,7 +59,14 @@ function canonicalRelayOrigin(value, name) {
   if (protocol !== "https:") {
     throw new BankrGateError("INVALID_CONFIG", `${name} must be an HTTPS origin.`);
   }
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  const rawHost = parsed.hostname.toLowerCase();
+  if (/\.\.$/.test(rawHost)) {
+    throw new BankrGateError(
+      "INVALID_CONFIG",
+      `${name} must be a public HTTPS hostname, not a malformed DNS name.`,
+    );
+  }
+  const host = rawHost.replace(/\.$/, "");
   // An IPv6 literal arrives bracketed; an IPv4 literal is four dotted numbers.
   const isIpLiteral = host.startsWith("[") || /^[0-9]+(\.[0-9]+){3}$/.test(host);
   if (isIpLiteral || !host.includes(".") || RESERVED_RELAY_HOSTS.includes(host)
