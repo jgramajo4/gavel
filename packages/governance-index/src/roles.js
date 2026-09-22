@@ -77,6 +77,7 @@ const GATE_REQUIRED_FUNCTIONS = Object.freeze([
   "gate.release_expired_reservation(text,text)",
   "gate.runtime_migration_status()",
   "gate.runtime_privilege_audit()",
+  "gate.relay_account_ready(bigint)",
   "gate.claim_relay_attempt(text,text,bigint,text,text,integer)",
   "gate.mark_relay_broadcasting(text,bigint,text,text)",
   "gate.complete_relay_broadcast(text,text)",

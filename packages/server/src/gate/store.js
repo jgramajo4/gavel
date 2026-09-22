@@ -763,6 +763,32 @@ class PostgresGateStore {
     return BigInt(row.total);
   }
 
+  async withRelayAccountLock({ chainId, relayerAddress } = {}, operation) {
+    const chain = positiveBigint(chainId, "chainId");
+    const relayer = address(relayerAddress, "relayerAddress");
+    if (typeof operation !== "function") throw new TypeError("relay account operation is required");
+    const client = await this.pool.connect();
+    const lockKey = `gavel-gate-relay:${chain}:${relayer}`;
+    let locked = false;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtextextended($1,0))", [lockKey]);
+      locked = true;
+      const ready = (await client.query("SELECT gate.relay_account_ready($1) AS ready", [chain])).rows[0]?.ready;
+      if (ready !== true) {
+        const error = new Error("relay account requires operator reconciliation");
+        error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
+        throw error;
+      }
+      return await operation();
+    } finally {
+      try {
+        if (locked) await client.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [lockKey]);
+      } finally {
+        client.release();
+      }
+    }
+  }
+
   async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
     const id = bytes32(quoteId, "quoteId");
     const nonce = bytes32(authorizationNonce, "authorization nonce");

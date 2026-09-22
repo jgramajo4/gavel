@@ -40,7 +40,7 @@ const RELAY_AUTHORIZATION_FIELDS = Object.freeze(["signature"]);
 
 const DEFAULT_MAX_TRACKED_RELAYS = 256;
 const RELAY_STORE_METHODS = Object.freeze([
-  "claimRelayAttempt", "markRelayBroadcasting", "completeRelayBroadcast", "failRelayAttempt",
+  "withRelayAccountLock", "claimRelayAttempt", "markRelayBroadcasting", "completeRelayBroadcast", "failRelayAttempt",
 ]);
 
 class RelayRequestError extends Error {
@@ -359,7 +359,16 @@ function createGateRelayService({
     const quoteId = String(quote.message.quoteId).toLowerCase();
     const pending = broadcasts.get(quoteId);
     if (pending) return pending;
-    const attempt = remember(quoteId, broadcast(quote, signature));
+    const attempt = remember(quoteId, relayStore.withRelayAccountLock(
+      { chainId, relayerAddress },
+      () => broadcast(quote, signature),
+    ).catch((error) => {
+      if (error?.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED") {
+        throw new RelayRequestError("relay account requires operator reconciliation", 503,
+          "RELAY_RECONCILIATION_REQUIRED");
+      }
+      throw error;
+    }));
     try {
       return await attempt;
     } catch (error) {

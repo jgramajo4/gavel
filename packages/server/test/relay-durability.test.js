@@ -184,6 +184,45 @@ test("concurrent duplicate relay calls converge on one broadcast and one hash", 
   assert.deepEqual(receipts[1], receipts[0]);
 });
 
+test("different quotes serialize nonce allocation through the durable relayer-account lock", async () => {
+  const store = new MemoryGateStore();
+  const calls = { active: 0, collision: false, preflight: 0, broadcast: 0 };
+  const sharedRelayer = {
+    address: RELAYER,
+    async preflightSettlement() {
+      calls.preflight += 1;
+      calls.active += 1;
+      if (calls.active > 1) calls.collision = true;
+      await new Promise((resolve) => setImmediate(resolve));
+      calls.active -= 1;
+      const byte = calls.preflight === 1 ? "ab" : "ac";
+      return { txHash: `0x${byte.repeat(32)}`, rawTransaction: `0x02${byte.repeat(100)}` };
+    },
+    async broadcastSettlement(prepared) {
+      calls.broadcast += 1;
+      return prepared.txHash;
+    },
+  };
+  const firstMessage = message();
+  const secondMessage = message({ quoteId: `0x${"a2".repeat(32)}`, submissionHash: `0x${"78".repeat(32)}` });
+  const options = (quote) => ({
+    relayer: sharedRelayer, relayStore: store, submissionService: submissionService(quote),
+    deployment: { chainId: CHAIN_ID, splitter: SPLITTER, token: TOKEN, quoteSigner: SIGNER.address },
+    tokenDomain: TOKEN_DOMAIN, now: () => NOW,
+  });
+  const first = createGateRelayService(options(await issuedQuote(firstMessage)));
+  const second = createGateRelayService(options(await issuedQuote(secondMessage)));
+
+  await Promise.all([
+    invoke(first, { authorization: { signature: await authorizationSignature(PAYER, firstMessage) } }),
+    invoke(second, { authorization: { signature: await authorizationSignature(PAYER, secondMessage) } }),
+  ]);
+
+  assert.equal(calls.collision, false);
+  assert.equal(calls.preflight, 2);
+  assert.equal(calls.broadcast, 2);
+});
+
 test("definitely-not-sent preflight failure releases the durable claim for retry", async () => {
   const store = new MemoryGateStore();
   const failing = relayer({ preflightFailures: 1 });

@@ -479,7 +479,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
       { enabled: true, accept_pre_vote: true, accept_voting: false });
     assert.deepEqual((await pool.query(`SELECT migration_checksum,catalog_manifest FROM public.schema_migrations
       WHERE version='gate/001_gate-v3'`)).rows[0], {
-      migration_checksum: "sha256:gate-001-v4-durable-relay",
+      migration_checksum: "sha256:gate-001-v5-relay-account-lock",
       catalog_manifest: manifestBeforeRerun,
     });
     const deploymentConstraint = (await pool.query(`SELECT pg_get_constraintdef(c.oid) AS definition
@@ -1314,6 +1314,22 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     assert.equal(reclaimed.disposition, "claimed");
     assert.equal(reclaimed.claimToken, "2");
 
+    let releaseFirst;
+    let secondEntered = false;
+    const firstLock = store.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT }, async () => {
+      await new Promise((resolve) => { releaseFirst = resolve; });
+    });
+    while (!releaseFirst) await new Promise((resolve) => setImmediate(resolve));
+    const secondLock = restarted.withRelayAccountLock(
+      { chainId: "8453", relayerAddress: GAVEL_RECIPIENT },
+      async () => { secondEntered = true; },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondEntered, false);
+    releaseFirst();
+    await Promise.all([firstLock, secondLock]);
+    assert.equal(secondEntered, true);
+
     const ambiguousIdentity = await makeIdentity("c");
     const ambiguousClaim = await store.claimRelayAttempt(ambiguousIdentity);
     await store.markRelayBroadcasting({ quoteId: ambiguousIdentity.quoteId, claimToken: ambiguousClaim.claimToken,
@@ -1323,6 +1339,14 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     const ambiguous = await restarted.claimRelayAttempt(ambiguousIdentity);
     assert.equal(ambiguous.status, "reconciliation_required");
     assert.equal(ambiguous.txHash, hash("d"));
+    let unsafeOperationRan = false;
+    await assert.rejects(
+      restarted.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT }, async () => {
+        unsafeOperationRan = true;
+      }),
+      (error) => error.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED",
+    );
+    assert.equal(unsafeOperationRan, false);
 
     assert.equal(await denied(pool, "gavel_gate", "SELECT * FROM gate.relay_attempts"), true);
     const functions = (await pool.query(`SELECT p.proname,p.prosecdef,p.proconfig,
@@ -1331,8 +1355,9 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE n.nspname='gate' AND p.proname=ANY($1::text[]) ORDER BY p.proname`, [[
       "claim_relay_attempt", "complete_relay_broadcast", "fail_relay_attempt", "mark_relay_broadcasting",
+      "relay_account_ready",
     ]])).rows;
-    assert.equal(functions.length, 4);
+    assert.equal(functions.length, 5);
     for (const row of functions) assert.deepEqual(
       { definer: row.prosecdef, config: row.proconfig, public: row.public_execute, gate: row.gate_execute },
       { definer: true, config: ["search_path=pg_catalog, gate"], public: false, gate: true }, row.proname,

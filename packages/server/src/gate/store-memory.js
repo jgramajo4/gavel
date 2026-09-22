@@ -121,6 +121,7 @@ class MemoryGateStore {
   #authNonces;
   #authSessions;
   #relayAttempts;
+  #relayAccountQueues;
   #notificationRetryLimit;
 
   constructor(options = {}) {
@@ -152,6 +153,7 @@ class MemoryGateStore {
     this.#authNonces = new Map();
     this.#authSessions = new Map();
     this.#relayAttempts = new Map();
+    this.#relayAccountQueues = new Map();
   }
 
   #allocatePublicIdUnsafe() {
@@ -1453,6 +1455,31 @@ class MemoryGateStore {
    * bytes are deliberately not identity: two valid ECDSA encodings of the same
    * authorization authorize the same nonce and therefore the same transaction.
    */
+  async withRelayAccountLock({ chainId, relayerAddress } = {}, operation) {
+    const account = `${block(chainId, "chainId").raw}:${address(relayerAddress, "relayerAddress")}`;
+    if (typeof operation !== "function") throw new TypeError("relay account operation is required");
+    const prior = this.#relayAccountQueues.get(account) ?? Promise.resolve();
+    let release;
+    const turn = new Promise((resolve) => { release = resolve; });
+    const queued = prior.then(() => turn, () => turn);
+    this.#relayAccountQueues.set(account, queued);
+    await prior.catch(() => {});
+    try {
+      const unresolved = [...this.#relayAttempts.values()].some((attempt) =>
+        attempt.deployment.chainId === block(chainId, "chainId").raw
+          && ["broadcasting", "reconciliation_required"].includes(attempt.status));
+      if (unresolved) {
+        const error = new Error("relay account requires operator reconciliation");
+        error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
+        throw error;
+      }
+      return await operation();
+    } finally {
+      release();
+      if (this.#relayAccountQueues.get(account) === queued) this.#relayAccountQueues.delete(account);
+    }
+  }
+
   async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
     const id = bytes32(quoteId, "quoteId");
     const nonce = bytes32(authorizationNonce, "authorization nonce");

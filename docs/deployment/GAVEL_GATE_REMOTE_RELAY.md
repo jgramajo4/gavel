@@ -159,16 +159,19 @@ with `RELAYER_UNAVAILABLE`, and no other Gate behaviour changes.
 - **Relay deduplication survives process restarts.** Gate atomically claims the
   quote's EIP-3009 nonce, persists the exact signed transaction bytes and their
   deterministic hash before broadcast, and returns the stored hash for later
-  duplicate calls. Concurrent calls converge on the same durable row. A process
-  restart after the node accepted the transaction cannot create a differently
-  signed replacement or a second settlement.
+  duplicate calls. Concurrent calls for the same quote converge on the same
+  durable row. Across different quotes, a PostgreSQL advisory lock keyed to the
+  funded relayer account serializes nonce selection, simulation, signing,
+  write-ahead, and broadcast across every Gate process.
 - **Failures are split by whether broadcast was possible.** Validation,
   simulation, population, or signing failures occur before the broadcast
   primitive and release the claim for a later retry. Once broadcasting starts,
   an RPC error is ambiguous: Gate persists `reconciliation_required`, refuses
   automatic rebroadcast, and operators must inspect the stored hash/on-chain
   state. Never clear or retry that state merely because the HTTP response was
-  lost.
+  lost. While any relay for the chain is `broadcasting` or
+  `reconciliation_required`, Gate also refuses every new relay from that funded
+  account; resolve the persisted raw transaction and hash before resuming.
 - **The scanner remains settlement authority.** A persisted or returned relay
   hash is only a hint. Only the independently observed canonical
   `QuoteSettled` log can move the submission to `accepted`.

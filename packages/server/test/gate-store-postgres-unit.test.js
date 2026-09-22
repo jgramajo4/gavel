@@ -938,6 +938,10 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.mutate_profile\(text,text,text,gate\.availability,jsonb,boolean,timestamptz,boolean,text,boolean,jsonb\) TO gavel_gate/i);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.transition_notification\(text,gate\.notification_state,text,text\) TO gavel_gate/i);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION gate\.relay_account_ready\(p_chain_id bigint\)[\s\S]*status IN\('broadcasting','reconciliation_required'\)/i);
+  assert.match(sql, /REVOKE ALL ON FUNCTION gate\.relay_account_ready\(bigint\) FROM PUBLIC/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION gate\.relay_account_ready\(bigint\) TO gavel_gate/i);
+  assert.match(storeSource, /pg_advisory_lock\(hashtextextended\(\$1,0\)\)[\s\S]*gate\.relay_account_ready\(\$1\)[\s\S]*pg_advisory_unlock/i);
   assert.doesNotMatch(sql, /GRANT SELECT,INSERT,UPDATE ON gate\.profiles/i);
   assert.match(sql, /IF marked THEN[\s\S]*information_schema\.columns[\s\S]*marker does not match installed Gate schema/i);
   assert.match(sql, /pending_reservation_capacity integer NOT NULL[^;]*DEFAULT 12/i);
@@ -968,7 +972,7 @@ test("Gate migration encodes strict invariants, immutable evidence, marker, and 
   assert.match(sql, /CREATE CONSTRAINT TRIGGER[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
   assert.match(sql, /migration_checksum|catalog_manifest/i);
   assert.match(sql, /ON CONFLICT\s*\(version\)\s*DO UPDATE SET[\s\S]*migration_checksum\s*=\s*EXCLUDED\.migration_checksum[\s\S]*catalog_manifest\s*=\s*EXCLUDED\.catalog_manifest/i);
-  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v4-durable-relay'/i);
-  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-runtime-privilege-audit[\s\S]*sha256:gate-001-v4-durable-relay[\s\S]*\)/i);
-  assert.match(sql, /migration_checksum='sha256:gate-001-v4-durable-relay'/i);
+  assert.match(sql, /SELECT 'gate\/001_gate-v3','sha256:gate-001-v5-relay-account-lock'/i);
+  assert.match(sql, /migration_checksum IN \([\s\S]*sha256:gate-001-v4-durable-relay[\s\S]*sha256:gate-001-v5-relay-account-lock[\s\S]*\)/i);
+  assert.match(sql, /migration_checksum='sha256:gate-001-v5-relay-account-lock'/i);
 });
