@@ -225,7 +225,7 @@ test("proposal refresh persists coherent Gate provenance against real PostgreSQL
     assert.deepEqual(persisted, { blockNumber: "105", observedHead: "105", blockHash: refreshedHash });
     const gate = await store.getGateProposal("nouns", "42");
     assert.deepEqual(gate, {
-      chainId: 1, governorAddress: GOVERNOR, proposalId: "42",
+      chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42",
       title: "Canonical title", proposer: ADDRESS, refreshedAt: gate.refreshedAt,
       sourceBlock: "105", sourceBlockHash: refreshedHash, effectiveStatus: "ACTIVE",
       contentHash: `0x${contentHash}`,
