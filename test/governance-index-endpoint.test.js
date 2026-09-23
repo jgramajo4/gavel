@@ -106,15 +106,20 @@ test("a transport failure names the endpoint and how to change it", async () => 
       new IndexApiClient({ fetch: failing }).fetchHistory("ens", VOTER),
       (error) => error.message.includes(DEFAULT_INDEX_API_URL)
         && /set GAVEL_INDEX_API_URL/.test(error.message)
-        // Still reads as infrastructure to a structured-error consumer.
-        && /fetch failed/.test(error.message),
+        // Still reads as infrastructure to a structured-error consumer without
+        // copying arbitrary transport text into the diagnostic.
+        && !/fetch failed/.test(error.message),
     );
 
-    // An operator who chose an endpoint is not told to set the variable again,
-    // and a credential-bearing endpoint is never echoed back.
-    const override = new IndexApiClient({ fetch: failing, baseUrl: "https://user:secret@index.example/base" });
-    await assert.rejects(override.fetchHistory("ens", VOTER), (error) =>
-      !/set GAVEL_INDEX_API_URL/.test(error.message) && !/secret/.test(error.message));
+    // Userinfo is rejected before any request, and the credential is never echoed.
+    assert.throws(
+      () => new IndexApiClient({ fetch: failing, baseUrl: "https://user:secret@index.example/base" }),
+      (error) => /must not contain URL userinfo/.test(error.message) && !/secret/.test(error.message),
+    );
+    assert.throws(
+      () => new IndexApiClient({ fetch: failing, baseUrl: "not-a-url-GAVEL_SECRET_SENTINEL" }),
+      (error) => /must be an HTTP\(S\) URL/.test(error.message) && !/GAVEL_SECRET_SENTINEL/.test(error.message),
+    );
   } finally {
     if (previous === undefined) delete process.env.GAVEL_INDEX_API_URL;
     else process.env.GAVEL_INDEX_API_URL = previous;

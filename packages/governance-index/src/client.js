@@ -55,7 +55,16 @@ class IndexApiClient {
     const pageSize = Number(options.pageSize || 100);
     if (!Number.isSafeInteger(pageSize) || pageSize < 1) throw new RangeError("pageSize must be a positive integer");
     this.pageSize = Math.min(pageSize, 100);
-    if (!/^https?:\/\//.test(this.baseUrl)) throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    let parsedBaseUrl;
+    try {
+      parsedBaseUrl = new URL(this.baseUrl);
+    } catch {
+      throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    }
+    if (!/^https?:$/.test(parsedBaseUrl.protocol)) throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    if (parsedBaseUrl.username || parsedBaseUrl.password) {
+      throw new TypeError("GAVEL_INDEX_API_URL must not contain URL userinfo");
+    }
     if (typeof this.fetch !== "function") throw new TypeError("fetch is required");
     const staleness = options.maxStalenessMs != null
       ? Number(options.maxStalenessMs)
@@ -136,7 +145,9 @@ class IndexApiClient {
         // Name the endpoint that failed. The default one is chosen silently, so a
         // bare transport error leaves the caller nothing to act on. The sanitized
         // origin is used so the text can never echo a misconfigured secret.
-        throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
+        const causeCode = String(error?.cause?.code || error?.code || "");
+        const safeCause = /^[A-Z][A-Z0-9_]{1,40}$/.test(causeCode) ? ` (${causeCode})` : "";
+        throw new Error(`Governance index request to ${this.publicBaseUrl} failed${safeCause}${override}`);
       }
       if (response.status === 429) {
         if (attempt >= this.maxRetries) throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);

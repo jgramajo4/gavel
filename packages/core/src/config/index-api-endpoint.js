@@ -15,6 +15,10 @@ class IndexApiEndpointError extends Error {
   }
 }
 
+function invalidMetadata(metadata) {
+  return { ...metadata, status: "invalid" };
+}
+
 function assertHttpUrl(value, label, metadata) {
   let parsed;
   try {
@@ -23,16 +27,24 @@ function assertHttpUrl(value, label, metadata) {
     throw new IndexApiEndpointError(
       "INDEX_API_URL_INVALID",
       `${label} must contain an HTTP(S) URL.`,
-      metadata,
+      invalidMetadata(metadata),
     );
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new IndexApiEndpointError(
       "INDEX_API_URL_INVALID",
-      `${label} must contain an HTTP(S) URL.`,
-      metadata,
+      `${label} must use the http or https scheme.`,
+      invalidMetadata(metadata),
     );
   }
+  if (parsed.username || parsed.password) {
+    throw new IndexApiEndpointError(
+      "INDEX_URL_CARRIES_CREDENTIALS",
+      `${label} must not contain URL userinfo. Use a query-bearing environment endpoint or authenticated network boundary instead.`,
+      invalidMetadata(metadata),
+    );
+  }
+  return parsed;
 }
 
 function endpoint(url, metadata) {
@@ -56,16 +68,13 @@ function resolveIndexApiEndpoint(config = {}, env = process.env) {
       variable: null,
       status: value === "" ? IndexApiEndpointStatus.DISABLED : IndexApiEndpointStatus.CONFIGURED,
     };
-    if (value !== "") assertHttpUrl(value, "runtime.indexApiUrl", metadata);
-    if (value !== "") {
-      const parsed = new URL(value);
-      if (parsed.username || parsed.password || parsed.search) {
-        throw new IndexApiEndpointError(
-          "INDEX_URL_CARRIES_CREDENTIALS",
-          "runtime.indexApiUrl must not carry userinfo or query parameters. Name an environment variable instead.",
-          metadata,
-        );
-      }
+    const parsed = value !== "" ? assertHttpUrl(value, "runtime.indexApiUrl", metadata) : null;
+    if (value !== "" && parsed.search) {
+      throw new IndexApiEndpointError(
+        "INDEX_URL_CARRIES_CREDENTIALS",
+        "runtime.indexApiUrl must not carry query parameters. Name an environment variable instead.",
+        invalidMetadata(metadata),
+      );
     }
     return endpoint(value, metadata);
   }

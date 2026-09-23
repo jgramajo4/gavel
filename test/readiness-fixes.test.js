@@ -16,8 +16,10 @@ const {
   resolveRuntimeReadiness,
   saveGavelConfig,
   WalletErrorCode,
+  classifyOperationalFailure,
 } = require("../packages/core");
 const { configCommand, readinessCommand } = require("../packages/cli/runtime-commands");
+const { IndexApiClient } = require("../packages/governance-index");
 
 const SENTINEL = "GAVEL_INDEX_SECRET_SENTINEL";
 const PRIVATE_URL = `https://private.example/v1?banana=${SENTINEL}`;
@@ -31,6 +33,31 @@ function config(runtime = {}) {
     ...defaultGavelConfig(),
     runtime: { ...defaultGavelConfig().runtime, ...runtime },
   };
+}
+
+async function startCountingServer(handler) {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url);
+    handler(request, response);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, requests, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function runTuiConfig(dataDir, env = {}) {
+  const tsx = path.join(ROOT, "node_modules", ".bin", "tsx");
+  const { stdout, stderr } = await execFileAsync(tsx, ["-e", [
+    "import { loadConfig } from './packages/tui/src/config.ts';",
+    "void (async () => {",
+    "  const loaded = await loadConfig();",
+    "  console.log(JSON.stringify({ url: loaded.indexApiUrl, metadata: loaded.indexApiEndpoint }));",
+    "})();",
+  ].join("\n")], {
+    cwd: ROOT,
+    env: { ...process.env, GAVEL_DATA_DIR: dataDir, ...env },
+  });
+  return { document: JSON.parse(stdout), stdout, stderr };
 }
 
 test("a named index variable resolves privately and exposes only redacted metadata", () => {
@@ -264,4 +291,174 @@ test("a disconnected local signer cannot become false-ready through plain connec
   await provider.disconnect();
   await assert.rejects(provider.reconnect(), (error) => error.code === WalletErrorCode.NOT_CONNECTED);
   assert.equal((await provider.getStatus()).canSign, false);
+});
+
+test("userinfo and malformed endpoint values fail safely without leaking their sentinel", async () => {
+  const secret = "GAVEL_USERINFO_SECRET_SENTINEL";
+  const cases = [
+    { runtime: { indexApiUrl: `https://u:${secret}@index.example` }, env: {} },
+    { runtime: { indexApiUrlVariable: "MY_IDX" }, env: { MY_IDX: `https://u:${secret}@127.0.0.1:9/` } },
+    { runtime: {}, env: { GAVEL_INDEX_API_URL: `https://u:${secret}@127.0.0.1:9/` } },
+    { runtime: { indexApiUrlVariable: "MY_IDX" }, env: { MY_IDX: `not-a-url-${secret}` } },
+  ];
+  for (const entry of cases) {
+    assert.throws(
+      () => resolveIndexApiEndpoint(config(entry.runtime), entry.env),
+      (error) => !String(error.message).includes(secret) && error.metadata?.status === "invalid",
+    );
+  }
+
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-index-leak-"));
+  await saveGavelConfig(config({ indexApiUrlVariable: "MY_IDX" }), { dataDir });
+  await assert.rejects(
+    execFileAsync(process.execPath, [CLI, "history", VOTER, "--dao", "ens", "--stdout"], {
+      cwd: ROOT,
+      env: { ...process.env, GAVEL_DATA_DIR: dataDir, MY_IDX: `https://u:${secret}@127.0.0.1:9/` },
+    }),
+    (error) => !`${error.stdout}\n${error.stderr}\n${error.message}`.includes(secret),
+  );
+
+  const write = [];
+  await readinessCommand(["--json"], {
+    dataDir,
+    env: { MY_IDX: `https://u:${secret}@127.0.0.1:9/` },
+    write: (chunk) => write.push(String(chunk)),
+  });
+  await configCommand(["show", "--json"], {
+    dataDir,
+    env: { MY_IDX: `https://u:${secret}@127.0.0.1:9/` },
+    write: (chunk) => write.push(String(chunk)),
+  });
+  assert.ok(!write.join("\n").includes(secret));
+});
+
+test("transport errors retain a safe cause code but never raw fetch text", async () => {
+  const secret = "GAVEL_FETCH_ERROR_SECRET_SENTINEL";
+  const client = new IndexApiClient({
+    baseUrl: "https://index.example",
+    fetch: async () => {
+      const error = new Error(`fetch failed for https://index.example/?banana=${secret}`);
+      error.cause = { code: "ECONNREFUSED" };
+      throw error;
+    },
+  });
+  await assert.rejects(
+    client.fetchHistory("ens", VOTER),
+    (error) => /ECONNREFUSED/.test(error.message) && !error.message.includes(secret) && !/banana/.test(error.message),
+  );
+});
+
+test("Railgun proposal stays on RPC unless an index endpoint is explicitly configured", async (t) => {
+  const rpc = await startCountingServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: "RPC_ROUTE_PROVED" } }));
+  });
+  t.after(() => rpc.server.close());
+
+  for (const runtime of [{}, { indexApiUrl: "" }, { indexApiUrlVariable: "MISSING_INDEX" }]) {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-railgun-rpc-"));
+    await saveGavelConfig(config(runtime), { dataDir });
+    const before = rpc.requests.length;
+    const env = { ...process.env, GAVEL_DATA_DIR: dataDir };
+    if (runtime.indexApiUrl === "") env.GAVEL_INDEX_API_URL = "https://ignored.example";
+    else delete env.GAVEL_INDEX_API_URL;
+    await assert.rejects(
+      execFileAsync(process.execPath, [CLI, "proposal", "1", "--dao", "railgun-eth", "--rpc", rpc.url, "--stdout"], {
+        cwd: ROOT,
+        env,
+        timeout: 10_000,
+      }),
+      (error) => !/INDEX_API_URL_VARIABLE_MISSING/.test(`${error.stderr}\n${error.message}`),
+    );
+    assert.ok(rpc.requests.length > before, JSON.stringify(runtime));
+  }
+});
+
+test("Railgun proposal uses direct, named, and legacy index overrides", async (t) => {
+  const index = await startCountingServer((request, response) => {
+    const pathname = request.url.split("?")[0];
+    const body = pathname.endsWith("/sync-status")
+      ? { sources: [{ sourceId: "voting-logs", finalizedHead: "500", updatedAt: new Date().toISOString(), lastError: null }] }
+      : { id: "1", dao: "railgun-eth", source: "INDEX_ROUTE_PROVED" };
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(body));
+  });
+  t.after(() => index.server.close());
+
+  const cases = [
+    { runtime: { indexApiUrl: index.url }, env: {} },
+    { runtime: { indexApiUrlVariable: "MY_IDX" }, env: { MY_IDX: index.url } },
+    { runtime: {}, env: { GAVEL_INDEX_API_URL: index.url } },
+  ];
+  for (const entry of cases) {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-railgun-index-"));
+    await saveGavelConfig(config(entry.runtime), { dataDir });
+    const { stdout } = await execFileAsync(process.execPath, [CLI, "proposal", "1", "--dao", "railgun-eth", "--stdout"], {
+      cwd: ROOT,
+      env: { ...process.env, GAVEL_DATA_DIR: dataDir, ...entry.env },
+    });
+    assert.equal(JSON.parse(stdout).source, "INDEX_ROUTE_PROVED");
+  }
+});
+
+test("Nouns explicit subgraph does not resolve an unrelated missing index variable", async (t) => {
+  const subgraph = await startCountingServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    response.writeHead(500, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "SUBGRAPH_ROUTE_PROVED" }));
+  });
+  t.after(() => subgraph.server.close());
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-nouns-subgraph-"));
+  await saveGavelConfig(config({ indexApiUrlVariable: "MISSING_INDEX" }), { dataDir });
+  await assert.rejects(
+    execFileAsync(process.execPath, [CLI, "history", VOTER, "--dao", "nouns", "--endpoint", subgraph.url, "--stdout"], {
+      cwd: ROOT,
+      env: { ...process.env, GAVEL_DATA_DIR: dataDir },
+    }),
+    (error) => !/INDEX_API_URL_VARIABLE_MISSING/.test(`${error.stderr}\n${error.message}`),
+  );
+  assert.ok(subgraph.requests.length > 0);
+});
+
+test("index configuration errors are classified as user correction", () => {
+  for (const code of [
+    "INDEX_API_URL_INVALID",
+    "INDEX_API_URL_VARIABLE_INVALID",
+    "INDEX_API_URL_VARIABLE_MISSING",
+    "INDEX_URL_CARRIES_CREDENTIALS",
+  ]) {
+    const error = Object.assign(new Error("fix index configuration"), { code });
+    assert.equal(classifyOperationalFailure("history", error).category, "USER_CORRECTION_REQUIRED");
+  }
+});
+
+test("TUI resolves index precedence after persisted config and degrades invalid references", async () => {
+  let dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-tui-direct-"));
+  await saveGavelConfig(config({ indexApiUrl: "https://direct.example", indexApiUrlVariable: "MISSING_INDEX" }), { dataDir });
+  let loaded = await runTuiConfig(dataDir, { GAVEL_INDEX_API_URL: "junk" });
+  assert.deepEqual(loaded.document, {
+    url: "https://direct.example",
+    metadata: { source: "config", variable: null, status: "configured" },
+  });
+
+  dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-tui-missing-"));
+  await saveGavelConfig(config({ indexApiUrlVariable: "MISSING_INDEX" }), { dataDir });
+  loaded = await runTuiConfig(dataDir, {});
+  assert.equal(loaded.document.url, "");
+  assert.deepEqual(loaded.document.metadata, { source: "environment", variable: "MISSING_INDEX", status: "missing" });
+
+  dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-tui-invalid-"));
+  await saveGavelConfig(config(), { dataDir });
+  loaded = await runTuiConfig(dataDir, { GAVEL_INDEX_API_URL: "junk" });
+  assert.equal(loaded.document.url, "");
+  assert.equal(loaded.document.metadata.status, "invalid");
+
+  dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "gavel-tui-disabled-"));
+  await saveGavelConfig(config({ indexApiUrl: "" }), { dataDir });
+  loaded = await runTuiConfig(dataDir, { GAVEL_INDEX_API_URL: "junk" });
+  assert.deepEqual(loaded.document, {
+    url: "",
+    metadata: { source: "config", variable: null, status: "disabled" },
+  });
 });

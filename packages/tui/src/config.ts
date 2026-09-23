@@ -47,21 +47,33 @@ export interface Config extends Endpoints {
   migrationNotes: Array<{ at: string; code: string; message: string }>;
 }
 
-export function loadEndpoints(): Endpoints {
-  const indexEndpoint = resolveIndexApiEndpoint({}, process.env);
+export function loadEndpoints(): Omit<Endpoints, 'indexApiUrl'> {
   return {
     rpcUrl: process.env.RPC_URL?.trim() || DEFAULTS.RPC_URL,
     subgraphUrl: process.env.SUBGRAPH_URL?.trim() || DEFAULTS.SUBGRAPH_URL,
-    indexApiUrl: indexEndpoint.url,
     easGraphqlUrl: process.env.EAS_GRAPHQL_URL?.trim() || DEFAULTS.EAS_GRAPHQL_URL,
     predictionUrl: process.env.PREDICTION_URL?.trim() || DEFAULTS.PREDICTION_URL,
   };
 }
 
+function resolveTuiIndexEndpoint(config: GavelConfig): {
+  url: string;
+  metadata: IndexApiEndpointMetadata;
+} {
+  try {
+    return resolveIndexApiEndpoint(config, process.env);
+  } catch (error) {
+    const metadata = error && typeof error === 'object' && 'metadata' in error
+      ? (error.metadata as IndexApiEndpointMetadata)
+      : { source: 'default', variable: null, status: 'invalid' } as const;
+    return { url: '', metadata };
+  }
+}
+
 export async function loadConfig(): Promise<Config> {
   const endpoints = loadEndpoints();
   const loaded = await loadGavelConfig({});
-  const indexEndpoint = resolveIndexApiEndpoint(loaded.config, process.env);
+  const indexEndpoint = resolveTuiIndexEndpoint(loaded.config);
   return {
     ...endpoints,
     indexApiUrl: indexEndpoint.url,
@@ -76,7 +88,7 @@ export async function loadConfig(): Promise<Config> {
 /** Persist a changed Gavel config and return the updated TUI config. */
 export async function persistConfig(config: Config, next: GavelConfig): Promise<Config> {
   const saved = await saveGavelConfig(next, { dataDir: config.dataDir, file: config.configPath });
-  const indexEndpoint = resolveIndexApiEndpoint(saved.config, process.env);
+  const indexEndpoint = resolveTuiIndexEndpoint(saved.config);
   return {
     ...config,
     indexApiUrl: indexEndpoint.url,
