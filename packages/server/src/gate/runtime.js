@@ -409,6 +409,7 @@ async function createGateServerRuntime(options = {}) {
     if (relayer) {
       relayService = factories.createGateRelayService({
         relayer,
+        relayStore: options.store,
         submissionService: options.submissionService,
         deployment: {
           chainId: config.chainId,

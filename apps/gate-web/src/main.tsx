@@ -17,7 +17,7 @@ const apiBaseUrl = import.meta.env.VITE_GATE_API_URL ?? '';
 // ENS reverse resolution is display-only and entirely optional. It is on when
 // the operator publishes a mainnet JSON-RPC endpoint, off otherwise — no key
 // belongs in a browser bundle, and an unresolved address simply renders
-// shortened. The server's indexed `ens` field always wins over this.
+// shortened. The server's generic `label` field always wins over this.
 const ensResolver = createEnsResolver(import.meta.env.VITE_ENS_RPC_URL);
 
 const injected = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;

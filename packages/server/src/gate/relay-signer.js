@@ -1,158 +1,169 @@
 "use strict";
 
 const util = require("node:util");
-const { Wallet, getAddress } = require("ethers");
+const { Transaction, Wallet, getAddress } = require("ethers");
 const { redactSignerMaterial } = require("./quote-signer");
 
 const PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+const RAW_TX = /^0x[0-9a-fA-F]+$/;
 
-/**
- * The funded Gate relayer: a GAS-ONLY wallet.
- *
- * This account never holds, receives, or moves USDC. It cannot: the only thing
- * it is ever asked to send is a `settle` call whose EIP-3009 authorization pays
- * FROM the payer TO the splitter, and this signer refuses any transaction that
- * is not exactly `{ to, data, value: 0 }`. It has no token allowance to spend,
- * no transfer path, and no balance the splitter would read.
- *
- * Operationally that means: fund it with ETH for gas and nothing else. A USDC
- * balance on this address is an operator mistake, not a capability.
- *
- * As with the quote signer, neither the key nor the wrapped Wallet is stored on
- * the returned object, so it cannot be reached by property access, enumeration,
- * JSON serialization, or util.inspect.
- */
 class GateRelayerError extends Error {
   constructor(code, message, statusCode = 502) {
     super(redactSignerMaterial(String(message)));
     this.name = "GateRelayerError";
     this.code = code;
     this.statusCode = statusCode;
+    if (code === "PREFLIGHT_FAILED" || code === "PREPARED_TX_REJECTED") this.definitelyNotSent = true;
   }
 }
 
-function assertBroadcastInterface(value) {
-  if (!value || typeof value.sendTransaction !== "function") {
-    throw new TypeError("relayer must be a private key or an object exposing sendTransaction");
+function assertPreparationInterface(value) {
+  if (!value || typeof value.populateTransaction !== "function") {
+    throw new TypeError("relayer signer must expose populateTransaction");
+  }
+  if (typeof value.signTransaction !== "function") throw new TypeError("relayer signer must expose signTransaction");
+  if (!value.provider || typeof value.provider.call !== "function") {
+    throw new TypeError("relayer signer provider.call is required for simulation");
+  }
+  if (typeof value.provider.broadcastTransaction !== "function") {
+    throw new TypeError("relayer signer provider.broadcastTransaction is required");
   }
   let address;
-  try {
-    address = getAddress(String(value.address));
-  } catch {
-    throw new TypeError("relayer address is invalid");
+  try { address = getAddress(String(value.address)); } catch { throw new TypeError("relayer address is invalid"); }
+  return {
+    address,
+    populateTransaction: (transaction) => value.populateTransaction(transaction),
+    signTransaction: (transaction) => value.signTransaction(transaction),
+    simulateTransaction: (transaction) => value.provider.call(transaction),
+    broadcastTransaction: (rawTransaction) => value.provider.broadcastTransaction(rawTransaction),
+  };
+}
+
+function safeSettlement({ to, data, value } = {}, chain) {
+  let destination;
+  try { destination = getAddress(String(to)); } catch {
+    throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given no usable destination", 400);
   }
-  return { address, sendTransaction: (transaction) => value.sendTransaction(transaction) };
+  if (typeof data !== "string" || !/^0x[0-9a-fA-F]{8,}$/.test(data)) {
+    throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given no usable calldata", 400);
+  }
+  let wei;
+  try { wei = BigInt(value); } catch {
+    throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given an unreadable value", 400);
+  }
+  if (wei !== 0n) throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer never sends ETH", 400);
+  return { to: destination, data: data.toLowerCase(), value: 0n, chainId: chain };
+}
+
+function assertExactTransaction(transaction, expected, label) {
+  let to;
+  let value;
+  let chainId;
+  try {
+    to = getAddress(String(transaction?.to));
+    value = BigInt(transaction?.value ?? 0);
+    chainId = BigInt(transaction?.chainId);
+  } catch {
+    throw new GateRelayerError("PREPARED_TX_REJECTED", `${label} transaction identity is invalid`, 400);
+  }
+  if (to !== expected.to || String(transaction?.data).toLowerCase() !== expected.data
+      || value !== 0n || chainId !== BigInt(expected.chainId)) {
+    throw new GateRelayerError("PREPARED_TX_REJECTED", `${label} transaction changed the prepared settlement`, 400);
+  }
 }
 
 /**
- * `signer` is either a raw key (deployment secret store) or an injected
- * broadcasting interface (KMS/HSM, or a test double). A raw key additionally
- * requires the Base provider this deployment already holds; no relayer ever
- * opens an RPC endpoint of its own, and the RPC credential never leaves the
- * process.
+ * Constructs the funded Gate gas-only relayer. Preflight and broadcast are
+ * deliberately separate: preflight populates, simulates and signs but has no
+ * path to send; broadcast accepts only those immutable signed bytes.
  */
 function createGateRelayer({ signer, provider, chainId } = {}) {
   const chain = Number(chainId);
   if (!Number.isSafeInteger(chain) || chain < 1) throw new TypeError("relayer chainId must be a positive integer");
-  let backend;
+  let value = signer;
   if (typeof signer === "string") {
     if (!PRIVATE_KEY.test(signer)) throw new TypeError("relayer key must be a 32-byte hex private key");
     if (!provider || typeof provider.getTransactionCount !== "function") {
-      throw new TypeError("a Base provider is required to broadcast with a raw relayer key");
+      throw new TypeError("a Base provider is required to prepare and broadcast with a raw relayer key");
     }
-    let wallet;
-    try {
-      wallet = new Wallet(signer, provider);
-    } catch {
-      throw new TypeError("relayer key is invalid");
-    }
-    backend = assertBroadcastInterface({
-      address: wallet.address,
-      sendTransaction: (transaction) => wallet.sendTransaction(transaction),
-    });
-  } else {
-    backend = assertBroadcastInterface(signer);
+    try { value = new Wallet(signer, provider); } catch { throw new TypeError("relayer key is invalid"); }
   }
-
-  // Broadcasts are serialized. Two settlements racing for the same account
-  // nonce would leave one of them rejected as a duplicate or a replacement, and
-  // an operator staring at a transaction that never appeared.
+  const backend = assertPreparationInterface(value);
   let queue = Promise.resolve();
 
-  /**
-   * Broadcasts ONE prepared Gate settlement.
-   *
-   * The three fields are re-checked here, at the last possible moment, because
-   * this is the only place in the process that can spend money. A non-zero
-   * value, a missing destination, or empty calldata is refused rather than
-   * signed.
-   */
-  async function sendSettlement(transaction) {
-    const next = queue.then(() => broadcast(transaction ?? {}), () => broadcast(transaction ?? {}));
-    // The queue follows the attempt whether it settled or failed, so one failed
-    // broadcast never wedges the account.
-    queue = next.catch(() => {});
-    return next;
+  async function preflightSettlement(transaction) {
+    const expected = safeSettlement(transaction ?? {}, chain);
+    let populated;
+    let rawTransaction;
+    try {
+      populated = await backend.populateTransaction(expected);
+      assertExactTransaction(populated, expected, "populated");
+      await backend.simulateTransaction(populated);
+      rawTransaction = await backend.signTransaction(populated);
+    } catch (error) {
+      if (error instanceof GateRelayerError) throw error;
+      throw new GateRelayerError("PREFLIGHT_FAILED", `relayer preflight failed: ${error?.message ?? "unknown error"}`);
+    }
+    if (typeof rawTransaction !== "string" || !RAW_TX.test(rawTransaction)) {
+      throw new GateRelayerError("PREFLIGHT_FAILED", "relayer signing returned no usable raw transaction");
+    }
+    let signed;
+    try { signed = Transaction.from(rawTransaction); } catch {
+      throw new GateRelayerError("PREFLIGHT_FAILED", "relayer signing returned an invalid raw transaction");
+    }
+    assertExactTransaction(signed, expected, "signed");
+    if (!signed.hash || !TX_HASH.test(signed.hash)) {
+      throw new GateRelayerError("PREFLIGHT_FAILED", "relayer signing returned no deterministic transaction hash");
+    }
+    return Object.freeze({ txHash: signed.hash.toLowerCase(), rawTransaction: rawTransaction.toLowerCase() });
   }
 
-  async function broadcast({ to, data, value } = {}) {
-    let destination;
-    try {
-      destination = getAddress(String(to));
-    } catch {
-      throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given no usable destination", 400);
+  async function broadcast(prepared) {
+    if (!prepared || Object.keys(prepared).sort().join(",") !== "rawTransaction,txHash"
+        || typeof prepared.rawTransaction !== "string" || !RAW_TX.test(prepared.rawTransaction)
+        || typeof prepared.txHash !== "string" || !TX_HASH.test(prepared.txHash)) {
+      throw new GateRelayerError("PREPARED_TX_REJECTED", "prepared transaction is invalid", 400);
     }
-    if (typeof data !== "string" || !/^0x[0-9a-fA-F]{8,}$/.test(data)) {
-      throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given no usable calldata", 400);
+    let signed;
+    try { signed = Transaction.from(prepared.rawTransaction); } catch {
+      throw new GateRelayerError("PREPARED_TX_REJECTED", "prepared raw transaction is invalid", 400);
     }
-    let wei;
-    try {
-      wei = BigInt(value);
-    } catch {
-      throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer was given an unreadable value", 400);
+    const expectedHash = String(signed.hash).toLowerCase();
+    if (expectedHash !== prepared.txHash.toLowerCase() || signed.chainId !== BigInt(chain)
+        || signed.value !== 0n || !signed.to || !/^0x[0-9a-fA-F]{8,}$/.test(signed.data)) {
+      throw new GateRelayerError("PREPARED_TX_REJECTED", "prepared transaction identity does not match signed bytes", 400);
     }
-    // Gas only. A Gate settlement never sends ETH.
-    if (wei !== 0n) throw new GateRelayerError("PREPARED_TX_REJECTED", "the relayer never sends ETH", 400);
-
-    // The backend estimates gas before it signs, so a settlement that would
-    // revert — a spent EIP-3009 nonce, a payer who moved the USDC after
-    // authorizing — never reaches the chain and costs nothing. That is what
-    // keeps this endpoint from being a way to burn the relayer's ETH, so an
-    // injected broadcasting interface MUST preserve it.
     let sent;
-    try {
-      sent = await backend.sendTransaction({ to: destination, data, value: 0n, chainId: chain });
-    } catch (error) {
+    try { sent = await backend.broadcastTransaction(prepared.rawTransaction); } catch (error) {
       throw new GateRelayerError("BROADCAST_FAILED", `relayer broadcast failed: ${error?.message ?? "unknown error"}`);
     }
     const hash = typeof sent === "string" ? sent : sent?.hash;
-    if (typeof hash !== "string" || !TX_HASH.test(hash)) {
-      throw new GateRelayerError("BROADCAST_FAILED", "the relayer returned no usable transaction hash");
+    if (typeof hash !== "string" || !TX_HASH.test(hash) || hash.toLowerCase() !== expectedHash) {
+      throw new GateRelayerError("BROADCAST_FAILED", "relayer broadcast hash did not match the prepared transaction");
     }
-    return hash.toLowerCase();
+    return expectedHash;
+  }
+
+  function broadcastSettlement(prepared) {
+    const next = queue.then(() => broadcast(prepared), () => broadcast(prepared));
+    queue = next.catch(() => {});
+    return next;
   }
 
   const description = `GavelGateRelayer<${backend.address}>`;
   return Object.freeze({
     address: backend.address,
     chainId: chain,
-    sendSettlement,
+    preflightSettlement,
+    broadcastSettlement,
     toJSON: () => description,
     toString: () => description,
     [util.inspect.custom]: () => description,
   });
 }
 
-/**
- * The relayer secret is a Gate-service runtime secret only: it belongs in the
- * deployment secret store, never in the root app `.env`, the browser bundle,
- * the CLI config, Postgres, or any log line.
- *
- * Returns null when no relay is configured, so a Gate deployment that does not
- * relay simply has no relay route. Partial configuration fails startup.
- */
 function createGateRelayerFromEnv(env = {}, { provider, chainId } = {}) {
   const key = env.GAVEL_GATE_RELAYER_KEY;
   const declared = env.GAVEL_GATE_RELAYER_ADDRESS;

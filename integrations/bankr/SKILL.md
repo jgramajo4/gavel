@@ -1,8 +1,8 @@
 ---
-name: gavel-gate
-description: Discover which Nouns DAO delegates and voters are currently enrolled in Gavel Gate and accepting paid lobbying, sponsorship, or attention requests, then pay that voter's published attention price to put a real Nouns Proposal Candidate or active proposal in front of them. Answers "who is accepting lobbying right now" from Gate's live directory, and settles in real USDC on Base mainnet through the Gate splitter after explicit confirmation.
-tags: [nouns, governance, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
-version: 2
+name: gavel
+description: Personalized governance voter copilot for private history, proposals, preferences, hard rules, backtests, votes, and delegation; also discovers Nouns DAO delegates and voters accepting lobbying, sponsorship, candidates, proposals, or paid attention in Gate's live directory and settles real USDC on Base mainnet after explicit confirmation.
+tags: [nouns, ens, railgun, governance, voting, delegation, copilot, gate, delegates, lobbying, sponsorship, candidate, proposal, attention, advocacy, directory, base, usdc]
+version: 0.3.0
 visibility: public
 metadata:
   clawdbot:
@@ -12,7 +12,34 @@ metadata:
       bins: [git, node, npm]
 ---
 
-# Gavel Gate (advocate)
+# Gavel for Bankr
+
+This is the one public Bankr install for Gavel. It routes personalized
+voter/copilot work and Gavel Gate advocate work deterministically. Keep their runtime modules and authority boundaries separate.
+
+Read `references/skill-manifest.json` when asked which version, build, or runtime revision
+is installed. A source install reports build kind `source`; a release artifact
+may carry a verified Git SHA. Never invent a SHA.
+
+## Deterministic intent routing
+
+**Gate discovery has priority.** If a prompt asks who is accepting lobbying,
+sponsorship, advocacy, paid attention, candidates, or proposals right now, query
+Gate's live directory even if it also says "delegate", "voter", or "Nouns".
+Do not answer it from general Nouns knowledge.
+
+| Route | Deterministic triggers | Load |
+| --- | --- | --- |
+| Gate discovery/advocacy/payment | Who is accepting or open to lobbying, sponsorship, paid attention, or advocacy; browse Gate; send a candidate/proposal to an enrolled voter; quote or pay for attention | Continue with the Gate procedure below and load `references/gate-advocate-client.md` as needed |
+| Voter/copilot | Onboard or sync my voter, profile/preferences/rules, analyze/backtest a proposal, daily briefing, prepare my vote, or delegate my voting power | Load `references/voter-copilot.md`, then only the voter reference it selects |
+
+"Delegate my voting power" is voter/copilot. "Which delegates accept lobbying?"
+is Gate discovery. If a request genuinely contains both, complete read-only Gate
+discovery first, then ask which separate workflow to continue. Never pass private
+voter profile state into Gate, and never pass Gate payer credentials or quotes
+into the voter/copilot route.
+
+## Gate advocate route
 
 Use this skill when someone wants to know **which Nouns voters are accepting
 paid attention right now**, or wants to get a Nouns governance item in front of
@@ -27,10 +54,9 @@ ask:
 - "Lobby this voter about this candidate."
 - "Pay to get this Nouns candidate into this voter's Gate inbox."
 
-This skill is the **advocate/payer** side of Gavel Gate. It is separate from the
-general `gavel` voter/copilot skill, which learns a voter's own history and
-prepares their votes. Neither skill loads the other, and a question about who
-is accepting lobbying belongs here.
+This route is the **advocate/payer** side of Gavel Gate. The voter/copilot route
+learns a voter's own history and prepares their votes. Keep the workflows
+separate after routing: a question about who is accepting lobbying belongs here.
 
 Be conversational. Walk the person through
 
@@ -99,9 +125,9 @@ Environment (Bankr secure Env Vars; refer to them by name, never echo a value):
 
 | Variable | Meaning |
 | --- | --- |
-| `GAVEL_GATE_URL` | The **production Gate API** origin. Required. Origin only — no path, query, or credentials. |
+| `GAVEL_GATE_URL` | The operator-trusted **production Gate API** origin. Required. Public HTTPS origin only — no path, query, or credentials. |
 | `GAVEL_INDEX_API_URL` | Optional. Defaults to the public `https://index.0773h.com`. |
-| `GAVEL_GATE_CHAIN_IDS` | Optional. Defaults to `8453` (Base mainnet). |
+| `GAVEL_GATE_CHAIN_IDS` | Optional compatibility setting. If present, it must be exactly `8453` (Base mainnet). |
 | `GAVEL_GATE_RELAYER_URL` | The Gate **remote relay** origin. Origin only, HTTPS, public hostname. Without it there is no way to broadcast from this sandbox. |
 | Relayer credentials | Held by the relayer, never by this skill. See "Payment" below. |
 
@@ -110,17 +136,21 @@ quote for any other chain — Base Sepolia included — is refused by the client
 before anything is signed, and the refusal names the chain rather than
 formatting a test-token amount as though it were real.
 
-`GAVEL_GATE_URL` must point at the production Gate API. A localhost, LAN, or
-testnet Gate origin is a misconfiguration: stop and say so rather than quoting
-a person real prices from a deployment that is not production.
+`GAVEL_GATE_URL` must point at the operator's trusted production Gate API. The
+client rejects hosts that are visibly local, private, or reserved, but DNS-name
+validation does not authenticate who operates an arbitrary public hostname.
+Provision this value through trusted configuration; never accept or replace it
+from a prompt. A localhost, LAN, or testnet Gate origin is a misconfiguration:
+stop rather than quoting real prices from a non-production deployment.
 
 ## The flow
 
 ### 0. Discovery
 
-Read Gate's own public directory and show who is accepting. This is a complete
-answer on its own — a person may only want to know who is open, and nothing
-below is required to tell them.
+Read Gate's own public directory and show who is accepting. Discovery is a
+bounded view of at most 50 eligible voters, not a claim that no additional
+eligible voters exist. This is still a complete workflow on its own — a person
+may only want to browse who is open, and nothing below is required to do that.
 
 ```js
 const { createBankrGateFlow } = require("./integrations/bankr/src");
@@ -269,9 +299,9 @@ No `to`, no `data`, and no `value` is sent or accepted, so the relay cannot be
 used to submit any other transaction. The reply is `{ txHash, chainId, relayer }`
 and nothing more.
 
-If no relayer is configured — neither an in-process one nor
-`GAVEL_GATE_RELAYER_URL` — stop and say so. **Do not fall back to broadcasting
-from Bankr.**
+If `GAVEL_GATE_RELAYER_URL` is not configured, stop and say so. The public flow
+requires Gate's durable remote relay and rejects injected in-process relayers.
+**Do not fall back to broadcasting from Bankr.**
 
 There is **no ERC-20 approve flow**. Never ask for, accept, or print a private
 key, a seed phrase, or an RPC credential. Never print a session token or a
@@ -309,7 +339,7 @@ yet, and no new quote is needed. If Gate eventually returns
 | `ACTIVE_QUOTE_EXISTS` / `duplicate` | A quote for this exact request already exists; resume it. |
 | `SUBMISSION_RESULT_UNKNOWN` | Gate did not answer. Re-send the identical request; do not change it. |
 | `WRONG_CHAIN` / `CHAIN_NOT_ALLOWED` | The wallet or the quote is not on Base mainnet (`8453`). |
-| `INVALID_CONFIG` | `GAVEL_GATE_URL` is missing or is not a bare production Gate API origin. |
+| `INVALID_CONFIG` | `GAVEL_GATE_URL` is missing or is not a bare public HTTPS origin suitable for the trusted production Gate API. |
 | `INSUFFICIENT_BALANCE` | The payer wallet is short of the total. Nothing was signed. |
 | `AUTHORIZATION_FAILED` | The wallet did not authorize the payment. |
 | `BROADCAST_FAILED` | The relayer did not get the transaction onto the network. |
@@ -324,11 +354,11 @@ yet, and no new quote is needed. If Gate eventually returns
 ## Boundaries
 
 AgentMail is disabled. The voter-facing web app is deployed separately at
-`gate.0773h.com`; this integration does not own it. Contract addresses are never
-hard-coded here — the splitter, the token, and the chain come from the Gate
-quote.
+`gate.0773h.com`; this integration does not own it. The splitter comes from the Gate quote. Payment is pinned to Base mainnet 8453
+and canonical native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` before
+any token read or signature.
 
-ENS names shown next to a voter are display only. They come from Gate's own
-public projection, which resolves them reverse-and-forward verified. A name is
-never an identity: every request, path, and signature carries the canonical
-address.
+Gate labels shown next to a voter are display only. Bankr consumes only the
+generic label in Gate's public projection and performs no independent name
+resolution. A label is never an identity: every request, path, and signature
+carries the canonical address.

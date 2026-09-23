@@ -8,163 +8,141 @@ const { Wallet, getAddress } = require("ethers");
 const { createGateRelayer, createGateRelayerFromEnv } = require("../src/gate/relay-signer");
 
 const RELAYER_KEY = `0x${"3".repeat(64)}`;
-const RELAYER_ADDRESS = getAddress(new Wallet(RELAYER_KEY).address);
+const wallet = new Wallet(RELAYER_KEY);
+const RELAYER_ADDRESS = getAddress(wallet.address);
 const SPLITTER = getAddress(`0x${"5e".repeat(20)}`);
 const DATA = `0x0faf632d${"00".repeat(64)}`;
 const CHAIN_ID = 8453;
 
-function backend({ fail = false, hash = `0x${"ab".repeat(32)}` } = {}) {
-  const sent = [];
+function backend({ failBroadcast = false, wrongHash = false } = {}) {
+  const calls = { populate: [], simulate: [], sign: [], send: [], broadcast: [] };
+  const provider = {
+    async call(transaction) { calls.simulate.push(transaction); return "0x"; },
+    async broadcastTransaction(rawTransaction) {
+      calls.broadcast.push(rawTransaction);
+      if (failBroadcast) throw new Error("RPC response lost");
+      const parsed = require("ethers").Transaction.from(rawTransaction);
+      return { hash: wrongHash ? `0x${"cd".repeat(32)}` : parsed.hash };
+    },
+  };
   return {
-    sent,
+    calls,
     signer: {
       address: RELAYER_ADDRESS,
-      async sendTransaction(transaction) {
-        sent.push(transaction);
-        if (fail) throw new Error("insufficient funds for gas");
-        return { hash };
+      provider,
+      async populateTransaction(transaction) {
+        calls.populate.push(transaction);
+        return { ...transaction, nonce: 7, gasLimit: 100000n, maxFeePerGas: 2n,
+          maxPriorityFeePerGas: 1n, type: 2 };
       },
+      async signTransaction(transaction) { calls.sign.push(transaction); return wallet.signTransaction(transaction); },
+      async sendTransaction(transaction) { calls.send.push(transaction); throw new Error("must never be called"); },
     },
   };
 }
 
-test("the relayer broadcasts exactly one zero-value settlement", async () => {
+async function prepared(relayer) {
+  return relayer.preflightSettlement({ to: SPLITTER, data: DATA, value: "0x0" });
+}
+
+test("preflight simulates and signs the exact zero-value settlement without broadcasting", async () => {
   const stub = backend();
   const relayer = createGateRelayer({ signer: stub.signer, chainId: CHAIN_ID });
-  const hash = await relayer.sendSettlement({ to: SPLITTER, data: DATA, value: "0x0" });
+  const result = await prepared(relayer);
 
-  assert.equal(hash, `0x${"ab".repeat(32)}`);
-  assert.equal(stub.sent.length, 1);
-  assert.equal(stub.sent[0].to, SPLITTER);
-  assert.equal(stub.sent[0].value, 0n);
-  assert.equal(stub.sent[0].chainId, CHAIN_ID);
-  assert.equal(relayer.address, RELAYER_ADDRESS);
+  assert.match(result.txHash, /^0x[0-9a-f]{64}$/);
+  assert.match(result.rawTransaction, /^0x[0-9a-f]+$/);
+  assert.equal(stub.calls.populate.length, 1);
+  assert.equal(stub.calls.simulate.length, 1);
+  assert.equal(stub.calls.sign.length, 1);
+  assert.equal(stub.calls.send.length, 0);
+  assert.equal(stub.calls.broadcast.length, 0);
+  const signed = require("ethers").Transaction.from(result.rawTransaction);
+  assert.equal(signed.to, SPLITTER);
+  assert.equal(signed.data, DATA);
+  assert.equal(signed.value, 0n);
+  assert.equal(signed.chainId, BigInt(CHAIN_ID));
 });
 
-test("the relayer refuses to send ETH or malformed calldata", async () => {
+test("broadcast sends only the already prepared raw transaction", async () => {
   const stub = backend();
   const relayer = createGateRelayer({ signer: stub.signer, chainId: CHAIN_ID });
-  const refusals = [
-    { to: SPLITTER, data: DATA, value: "0x1" },
-    { to: SPLITTER, data: DATA, value: "1000000000000000000" },
-    { to: SPLITTER, data: DATA, value: undefined },
-    { to: SPLITTER, data: "0x", value: "0x0" },
-    { to: SPLITTER, data: "not-hex", value: "0x0" },
-    { to: "not-an-address", data: DATA, value: "0x0" },
-    {},
-  ];
-  for (const transaction of refusals) {
-    await assert.rejects(
-      relayer.sendSettlement(transaction),
-      (error) => error.code === "PREPARED_TX_REJECTED",
-      `expected ${JSON.stringify(transaction)} to be refused`,
-    );
-  }
-  assert.equal(stub.sent.length, 0);
+  const result = await prepared(relayer);
+  const hash = await relayer.broadcastSettlement(result);
+  assert.equal(hash, result.txHash);
+  assert.deepEqual(stub.calls.broadcast, [result.rawTransaction]);
+  assert.equal(stub.calls.send.length, 0);
+  assert.equal(stub.calls.populate.length, 1);
+  assert.equal(stub.calls.sign.length, 1);
 });
 
-test("a broadcast failure is reported without leaking the transaction", async () => {
-  const relayer = createGateRelayer({ signer: backend({ fail: true }).signer, chainId: CHAIN_ID });
-  await assert.rejects(
-    relayer.sendSettlement({ to: SPLITTER, data: DATA, value: "0x0" }),
-    (error) => error.code === "BROADCAST_FAILED" && error.statusCode === 502,
-  );
+test("the relayer refuses malformed settlement input before simulation or signing", async () => {
+  const stub = backend();
+  const relayer = createGateRelayer({ signer: stub.signer, chainId: CHAIN_ID });
+  for (const transaction of [
+    { to: SPLITTER, data: DATA, value: "0x1" }, { to: SPLITTER, data: DATA },
+    { to: SPLITTER, data: "0x", value: "0x0" }, { to: "bad", data: DATA, value: "0x0" }, {},
+  ]) await assert.rejects(relayer.preflightSettlement(transaction), (error) => error.code === "PREPARED_TX_REJECTED");
+  assert.equal(stub.calls.simulate.length, 0);
+  assert.equal(stub.calls.sign.length, 0);
+  assert.equal(stub.calls.send.length, 0);
 });
 
-test("a relayer that returns no usable hash is a failure, not a receipt", async () => {
-  for (const hash of ["0xnope", "", null]) {
-    const relayer = createGateRelayer({ signer: backend({ hash }).signer, chainId: CHAIN_ID });
-    await assert.rejects(
-      relayer.sendSettlement({ to: SPLITTER, data: DATA, value: "0x0" }),
-      (error) => error.code === "BROADCAST_FAILED",
-    );
+test("broadcast rejects changed or mismatched prepared transactions", async () => {
+  const stub = backend();
+  const relayer = createGateRelayer({ signer: stub.signer, chainId: CHAIN_ID });
+  const result = await prepared(relayer);
+  await assert.rejects(relayer.broadcastSettlement({ ...result, txHash: `0x${"ef".repeat(32)}` }),
+    (error) => error.code === "PREPARED_TX_REJECTED");
+  await assert.rejects(relayer.broadcastSettlement({ ...result, rawTransaction: "0x12" }),
+    (error) => error.code === "PREPARED_TX_REJECTED");
+  assert.equal(stub.calls.broadcast.length, 0);
+});
+
+test("broadcast failures and returned hash mismatches are ambiguous failures", async () => {
+  for (const options of [{ failBroadcast: true }, { wrongHash: true }]) {
+    const stub = backend(options);
+    const relayer = createGateRelayer({ signer: stub.signer, chainId: CHAIN_ID });
+    const result = await prepared(relayer);
+    await assert.rejects(relayer.broadcastSettlement(result), (error) => error.code === "BROADCAST_FAILED");
+    assert.equal(stub.calls.broadcast.length, 1);
   }
 });
 
 test("the key is unreachable by property access, serialization, or inspection", () => {
-  const relayer = createGateRelayer({
-    signer: RELAYER_KEY,
-    provider: { getTransactionCount: async () => 0 },
-    chainId: CHAIN_ID,
-  });
+  const provider = { getTransactionCount: async () => 0, call: async () => "0x", broadcastTransaction: async () => ({}) };
+  const relayer = createGateRelayer({ signer: RELAYER_KEY, provider, chainId: CHAIN_ID });
   const description = `GavelGateRelayer<${RELAYER_ADDRESS}>`;
   assert.equal(String(relayer), description);
   assert.equal(JSON.stringify(relayer), JSON.stringify(description));
   assert.equal(util.inspect(relayer), description);
-  assert.deepEqual(Object.keys(relayer).sort(), ["address", "chainId", "sendSettlement", "toJSON", "toString"]);
+  assert.deepEqual(Object.keys(relayer).sort(), ["address", "broadcastSettlement", "chainId", "preflightSettlement", "toJSON", "toString"]);
   assert.doesNotMatch(JSON.stringify(Object.values(relayer).map(String)), /3{16}/);
 });
 
 test("relay configuration is opt-in and all-or-nothing", () => {
-  const provider = { getTransactionCount: async () => 0 };
+  const provider = { getTransactionCount: async () => 0, call: async () => "0x", broadcastTransaction: async () => ({}) };
   assert.equal(createGateRelayerFromEnv({}, { provider, chainId: CHAIN_ID }), null);
-  assert.equal(createGateRelayerFromEnv({ GAVEL_GATE_RELAYER_KEY: "", GAVEL_GATE_RELAYER_ADDRESS: "" },
-    { provider, chainId: CHAIN_ID }), null);
-
   const failures = [
-    { GAVEL_GATE_RELAYER_KEY: RELAYER_KEY },
-    { GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS },
+    { GAVEL_GATE_RELAYER_KEY: RELAYER_KEY }, { GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS },
     { GAVEL_GATE_RELAYER_KEY: "not-a-key", GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS },
     { GAVEL_GATE_RELAYER_KEY: RELAYER_KEY, GAVEL_GATE_RELAYER_ADDRESS: "not-an-address" },
     { GAVEL_GATE_RELAYER_KEY: RELAYER_KEY, GAVEL_GATE_RELAYER_ADDRESS: `0x${"9".repeat(40)}` },
   ];
-  for (const env of failures) {
-    assert.throws(() => createGateRelayerFromEnv(env, { provider, chainId: CHAIN_ID }), TypeError,
-      `expected ${JSON.stringify(Object.keys(env))} to fail closed`);
-  }
-
-  const relayer = createGateRelayerFromEnv(
-    { GAVEL_GATE_RELAYER_KEY: RELAYER_KEY, GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS.toLowerCase() },
-    { provider, chainId: CHAIN_ID },
-  );
-  assert.equal(relayer.address, RELAYER_ADDRESS);
+  for (const env of failures) assert.throws(() => createGateRelayerFromEnv(env, { provider, chainId: CHAIN_ID }), TypeError);
+  assert.equal(createGateRelayerFromEnv({ GAVEL_GATE_RELAYER_KEY: RELAYER_KEY,
+    GAVEL_GATE_RELAYER_ADDRESS: RELAYER_ADDRESS.toLowerCase() }, { provider, chainId: CHAIN_ID }).address, RELAYER_ADDRESS);
 });
 
-test("a raw key with no Base provider cannot be constructed", () => {
-  assert.throws(() => createGateRelayer({ signer: RELAYER_KEY, chainId: CHAIN_ID }), /Base provider is required/);
+test("preflight requires preparation, simulation, signing, and raw broadcast capabilities", () => {
+  assert.throws(() => createGateRelayer({ signer: RELAYER_KEY, chainId: CHAIN_ID }), /Base provider/);
   assert.throws(() => createGateRelayer({ signer: backend().signer, chainId: 0 }), /chainId/);
-  assert.throws(() => createGateRelayer({ signer: { address: RELAYER_ADDRESS }, chainId: CHAIN_ID }),
-    /sendTransaction/);
-});
-
-test("broadcasts are serialized so two settlements never race one account nonce", async () => {
-  const order = [];
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const relayer = createGateRelayer({
-    chainId: CHAIN_ID,
-    signer: {
-      address: RELAYER_ADDRESS,
-      async sendTransaction({ data }) {
-        order.push(`start:${data.slice(-1)}`);
-        if (data.endsWith("1")) await gate;
-        order.push(`end:${data.slice(-1)}`);
-        return { hash: `0x${"ab".repeat(32)}` };
-      },
-    },
-  });
-
-  const first = relayer.sendSettlement({ to: SPLITTER, data: `${DATA}1`, value: "0x0" });
-  const second = relayer.sendSettlement({ to: SPLITTER, data: `${DATA}2`, value: "0x0" });
-  release();
-  await Promise.all([first, second]);
-  assert.deepEqual(order, ["start:1", "end:1", "start:2", "end:2"]);
-});
-
-test("a failed broadcast does not wedge the account for the next one", async () => {
-  let attempt = 0;
-  const relayer = createGateRelayer({
-    chainId: CHAIN_ID,
-    signer: {
-      address: RELAYER_ADDRESS,
-      async sendTransaction() {
-        attempt += 1;
-        if (attempt === 1) throw new Error("insufficient funds for gas");
-        return { hash: `0x${"cd".repeat(32)}` };
-      },
-    },
-  });
-  await assert.rejects(relayer.sendSettlement({ to: SPLITTER, data: DATA, value: "0x0" }),
-    (error) => error.code === "BROADCAST_FAILED");
-  assert.equal(await relayer.sendSettlement({ to: SPLITTER, data: DATA, value: "0x0" }), `0x${"cd".repeat(32)}`);
+  for (const missing of ["populateTransaction", "signTransaction"]) {
+    const value = backend().signer; delete value[missing];
+    assert.throws(() => createGateRelayer({ signer: value, chainId: CHAIN_ID }), new RegExp(missing));
+  }
+  const noSimulation = backend().signer; delete noSimulation.provider.call;
+  assert.throws(() => createGateRelayer({ signer: noSimulation, chainId: CHAIN_ID }), /provider.call/);
+  const noBroadcast = backend().signer; delete noBroadcast.provider.broadcastTransaction;
+  assert.throws(() => createGateRelayer({ signer: noBroadcast, chainId: CHAIN_ID }), /broadcastTransaction/);
 });

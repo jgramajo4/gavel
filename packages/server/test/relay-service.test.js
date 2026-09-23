@@ -12,6 +12,7 @@ const {
 } = require("@gavel/gate");
 
 const { RECEIVE_WITH_AUTHORIZATION_TYPES, createGateRelayService } = require("../src/gate/relay-service");
+const { MemoryGateStore } = require("../src/gate/store-memory");
 
 const SIGNER_KEY = `0x${"7".repeat(64)}`;
 const PAYER_KEY = `0x${"11".repeat(32)}`;
@@ -65,14 +66,22 @@ async function authorizationSignature({ message = quoteMessage(), splitter = SPL
 
 function relayerStub({ address = RELAYER, fail = false } = {}) {
   const sent = [];
+  const broadcasts = [];
+  const txHash = `0x${"ab".repeat(32)}`;
+  const rawTransaction = `0x02${"12".repeat(100)}`;
   return {
     sent,
+    broadcasts,
     relayer: {
       address,
-      async sendSettlement(transaction) {
+      async preflightSettlement(transaction) {
         sent.push(transaction);
-        if (fail) throw new Error("replacement transaction underpriced");
-        return `0x${"ab".repeat(32)}`;
+        return { txHash, rawTransaction };
+      },
+      async broadcastSettlement(prepared) {
+        broadcasts.push(prepared);
+        if (fail) throw new Error("RPC response lost after broadcast");
+        return txHash;
       },
     },
   };
@@ -102,6 +111,7 @@ async function harness(options = {}) {
   const submissions = submissionStub({ quote, state: options.state, owner: options.owner });
   const service = createGateRelayService({
     relayer: relay.relayer,
+    relayStore: options.store ?? new MemoryGateStore(),
     submissionService: submissions.service,
     deployment: { chainId: CHAIN_ID, splitter: SPLITTER, token: TOKEN, quoteSigner: QUOTE_SIGNER },
     tokenDomain: TOKEN_DOMAIN,
@@ -143,6 +153,35 @@ test("a valid settlement is rebuilt server-side and broadcast gas-only", async (
   assert.equal(decoded.authorization.to, SPLITTER);
   assert.equal(decoded.authorization.value, "1250000");
   assert.notEqual(decoded.authorization.from, RELAYER);
+});
+
+test("every relay state transition uses the lock-scoped database client", async () => {
+  const memory = new MemoryGateStore();
+  const lockedClient = Object.freeze({ kind: "locked-client" });
+  const seen = [];
+  const store = {
+    async withRelayAccountLock(account, operation) {
+      return memory.withRelayAccountLock(account, (claim) => operation(claim, lockedClient));
+    },
+    async claimRelayAttempt(input) { return memory.claimRelayAttempt(input); },
+    async markRelayBroadcasting(input) {
+      seen.push(["broadcasting", input.client]);
+      return memory.markRelayBroadcasting(input);
+    },
+    async completeRelayBroadcast(input) {
+      seen.push(["complete", input.client]);
+      return memory.completeRelayBroadcast(input);
+    },
+    async failRelayAttempt(input) {
+      seen.push(["fail", input.client]);
+      return memory.failRelayAttempt(input);
+    },
+  };
+  const { service } = await harness({ store });
+  await service.relaySettlement({
+    session: SESSION, publicId: PUBLIC_ID, request: relayRequest(await authorizationSignature()),
+  });
+  assert.deepEqual(seen, [["broadcasting", lockedClient], ["complete", lockedClient]]);
 });
 
 test("an arbitrary destination, calldata, or value cannot be submitted", async () => {
@@ -335,12 +374,15 @@ test("relaying the same quote twice broadcasts once and returns the same hash", 
   assert.equal(concurrentB.txHash, first.txHash);
 });
 
-test("a failed broadcast stays retryable and reports no false hash", async () => {
+test("an ambiguous broadcast failure is not retried or reported as a false receipt", async () => {
   const { service, relay } = await harness({ relayer: { fail: true } });
   const request = relayRequest(await authorizationSignature());
-  await assert.rejects(service.relaySettlement({ session: SESSION, publicId: PUBLIC_ID, request }));
-  await assert.rejects(service.relaySettlement({ session: SESSION, publicId: PUBLIC_ID, request }));
-  assert.equal(relay.sent.length, 2);
+  await assert.rejects(service.relaySettlement({ session: SESSION, publicId: PUBLIC_ID, request }),
+    (error) => error.code === "RELAY_RECONCILIATION_REQUIRED");
+  await assert.rejects(service.relaySettlement({ session: SESSION, publicId: PUBLIC_ID, request }),
+    (error) => error.code === "RELAY_RECONCILIATION_REQUIRED");
+  assert.equal(relay.sent.length, 1);
+  assert.equal(relay.broadcasts.length, 1);
 });
 
 test("an unauthenticated or wrong-role session never reaches the store", async () => {
@@ -376,6 +418,7 @@ test("the service refuses to be constructed with a relayer inside the money path
     assert.throws(
       () => createGateRelayService({
         relayer: relayerStub({ address }).relayer,
+        relayStore: new MemoryGateStore(),
         submissionService: submissionStub({ quote }).service,
         deployment: { chainId: CHAIN_ID, splitter: SPLITTER, token: TOKEN, quoteSigner: QUOTE_SIGNER },
         tokenDomain: TOKEN_DOMAIN,
@@ -391,6 +434,7 @@ test("the service refuses an unattested token domain", async () => {
     assert.throws(
       () => createGateRelayService({
         relayer: relayerStub().relayer,
+        relayStore: new MemoryGateStore(),
         submissionService: submissionStub({ quote }).service,
         deployment: { chainId: CHAIN_ID, splitter: SPLITTER, token: TOKEN, quoteSigner: QUOTE_SIGNER },
         tokenDomain,

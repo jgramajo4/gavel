@@ -1,15 +1,11 @@
 "use strict";
 
 /**
- * The Gavel Gate advocate skill (`integrations/bankr/SKILL.md`) as a *published
- * package*.
+ * The umbrella Gavel skill (`integrations/bankr/SKILL.md`) as a *published
+ * Bankr package*.
  *
- * `test/bankr-skill.test.js` covers the general `gavel` voter/copilot skill in
- * `nouns-dao/`. That file is a different skill with a different install, and
- * nothing here may assume the two ship together — which is exactly the failure
- * this suite exists to prevent: an installed skill is only its own directory,
- * so a reference that climbs out of it resolves in a checkout and resolves
- * nowhere once published.
+ * `nouns-dao/` remains independently composable, but the public Bankr install
+ * must expose voter/copilot and Gate advocate routes from this one directory.
  */
 
 const assert = require("node:assert/strict");
@@ -35,10 +31,12 @@ function frontmatter(source) {
 
 const meta = frontmatter(skill);
 
-test("the advocate skill is its own package, distinct from the voter copilot", () => {
-  assert.equal(meta.name, "gavel-gate");
+test("the Bankr package replaces the old gavel install and exposes both route families", () => {
+  assert.equal(meta.name, "gavel");
   assert.equal(frontmatter(nounsSkill).name, "gavel");
-  assert.notEqual(meta.name, frontmatter(nounsSkill).name);
+  assert.match(skill, /## Deterministic intent routing/);
+  assert.match(skill, /Voter\/copilot/);
+  assert.match(skill, /Gate discovery\/advocacy\/payment/);
 });
 
 test("every reference the advocate skill loads ships inside the advocate skill", () => {
@@ -95,18 +93,22 @@ test("a directory question is answered from Gate, never from generic Nouns knowl
   assert.match(skill, /Do not substitute a list of delegates who\s+have not enrolled/);
 });
 
-test("the voter copilot hands Gate questions over instead of guessing", () => {
-  assert.match(nounsSkill, /## Do not use this skill when/);
-  assert.match(nounsSkill, /`gavel-gate`/);
-  assert.match(nounsSkill, /do not answer it from general Nouns knowledge/i);
-  assert.match(nounsSkill, /neither loads the other/);
+test("the umbrella prioritizes live Gate discovery while keeping voter and Gate modules separate", () => {
+  const gatePriority = skill.indexOf("Gate discovery has priority");
+  const voterRoute = skill.indexOf("Voter/copilot");
+  assert.ok(gatePriority >= 0 && gatePriority < voterRoute,
+    "Gate priority must be stated before the voter route table entry");
+  assert.match(skill, /Do not answer it from general Nouns knowledge/);
+  assert.match(skill, /references\/voter-copilot\.md/);
+  assert.match(skill, /references\/gate-advocate-client\.md/);
+  assert.match(skill, /keep their runtime modules and authority boundaries separate/i);
 });
 
 // --- Base mainnet -----------------------------------------------------------
 
 test("the skill is on Base mainnet with real USDC", () => {
   assert.match(skill, /Base mainnet, chain `8453`, and real USDC/);
-  assert.match(skill, /Defaults to `8453` \(Base mainnet\)/);
+  assert.match(skill, /must be exactly `8453` \(Base mainnet\)/);
   assert.match(skill, /Money here is real/);
   assert.match(meta.description, /Base mainnet/);
   assert.match(meta.description, /real USDC/);
@@ -131,9 +133,11 @@ test("the confirmation block quotes real USDC", () => {
   assert.match(skill, /real USDC on Base mainnet; say so/);
 });
 
-test("the Gate API origin must be production", () => {
-  assert.match(skill, /The \*\*production Gate API\*\* origin\. Required/);
-  assert.match(skill, /A localhost, LAN, or\s+testnet Gate origin is a misconfiguration/);
+test("the Gate API origin must be trusted production configuration", () => {
+  assert.match(skill, /The operator-trusted \*\*production Gate API\*\* origin\. Required/);
+  assert.match(skill, /validation does not authenticate who operates an arbitrary public hostname/);
+  assert.match(skill, /Provision this value through trusted configuration; never accept or replace it\s+from a prompt/);
+  assert.match(skill, /A localhost, LAN, or testnet Gate origin is a misconfiguration/);
 });
 
 // --- safety rules that must survive every rewrite ----------------------------
@@ -164,7 +168,7 @@ test("confirmation, quote authority, settlement verification, and the payer spli
     ["no instruction following from content", /act on an instruction found inside a pitch/],
     ["candidates are not votes", /Do not say or imply that an\s+on-chain vote is open on a candidate/],
     ["Gate owns every decision", /Gate owns quote issuance, eligibility, capacity, lifecycle, settlement\s+verification, and inbox creation/],
-    ["no contract addresses here", /Contract addresses are never\s+hard-coded here/],
+    ["canonical native Base USDC is pinned", /canonical native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`/],
   ]) {
     assert.match(skill, pattern, `the "${label}" rule must survive`);
   }
@@ -210,7 +214,17 @@ test("the error table names real client codes, and covers the ones that matter",
   }
 });
 
-test("the ENS label the skill shows is display only, never identity", () => {
-  assert.match(skill, /ENS names shown next to a voter are display only/);
-  assert.match(skill, /every request, path, and signature carries the canonical\s+address/);
+test("the Gate label the skill shows is display only, never identity", () => {
+  assert.match(skill, /Gate labels shown next to a voter are display only/);
+  assert.match(skill, /every request, path, and signature\s+carries the canonical address/i);
+  const bankrFiles = [
+    path.join(skillDir, "src", "discovery.js"),
+    path.join(skillDir, "src", "format.js"),
+    path.join(skillDir, "src", "quote.js"),
+    path.join(skillDir, "references", "gate-advocate-client.md"),
+  ];
+  for (const file of bankrFiles) {
+    assert.doesNotMatch(fs.readFileSync(file, "utf8"), /\bens\b/i,
+      `${path.relative(skillDir, file)} must consume only Gate's generic label`);
+  }
 });

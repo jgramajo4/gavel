@@ -26,6 +26,7 @@ const {
 
 const { createGateHttpServer } = require("../packages/server/src/gate/http");
 const { createGateRelayService } = require("../packages/server/src/gate/relay-service");
+const { MemoryGateStore } = require("../packages/server/src/gate/store-memory");
 const { createBankrGateFlow } = require("../integrations/bankr/src/flow");
 const { parseIssuedQuote } = require("../integrations/bankr/src/quote");
 const { createWalletStub, PAYER, SPLITTER, TOKEN, TOKEN_NAME, TOKEN_VERSION, VOTER } =
@@ -73,7 +74,11 @@ function relayerRecorder() {
     sent,
     relayer: {
       address: RELAYER,
-      async sendSettlement(transaction) { sent.push(transaction); return TX_HASH; },
+      async preflightSettlement(transaction) {
+        sent.push(transaction);
+        return { txHash: TX_HASH, rawTransaction: `0x02${"12".repeat(100)}` };
+      },
+      async broadcastSettlement() { return TX_HASH; },
     },
   };
 }
@@ -83,6 +88,7 @@ async function gateServer(quote) {
   const recorder = relayerRecorder();
   const relayService = createGateRelayService({
     relayer: recorder.relayer,
+    relayStore: new MemoryGateStore(),
     submissionService: {
       async resumeSubmission({ session, publicId }) {
         if (getAddress(session.wallet) !== PAYER || publicId !== PUBLIC_ID) return null;

@@ -3,7 +3,7 @@
 const { BankrGateError } = require("./errors");
 const { createGateApi } = require("./gate-api");
 const { createIndexApi } = require("./index-api");
-const { discoverVoters, selectVoter } = require("./discovery");
+const { discoverVoters, selectTargetVoter, selectVoter } = require("./discovery");
 const { assertPayableQuote, confirmationSummary, parseIssuedQuote, secondsUntilExpiry } = require("./quote");
 const { buildSubmissionRequest, createOrResumeSubmission } = require("./submission");
 const { openBaseSenderSession } = require("./session");
@@ -12,7 +12,6 @@ const { pollUntilTerminal, submitSettlementHint } = require("./settlement");
 const { resolveTarget } = require("./targets");
 const { resolveConfig } = require("./config");
 const { assertWalletCapabilities } = require("./wallet");
-const { assertRelayerCapabilities } = require("./relayer");
 const { createRemoteRelay } = require("./remote-relay");
 
 /**
@@ -50,10 +49,15 @@ function createBankrGateFlow({
     timeoutMs: resolved.requestTimeoutMs,
   });
   if (wallet) assertWalletCapabilities(wallet);
-  if (relayer) assertRelayerCapabilities(relayer);
-  // The funded account is either in process or on the Gate server. A Bankr
-  // sandbox is ephemeral and holds no key, so the remote relay is the normal
-  // production path; an in-process relayer stays supported and takes priority.
+  if (relayer) {
+    throw new BankrGateError(
+      "LOCAL_RELAYER_DISABLED",
+      "The public Bankr flow requires Gate's durable remote relay; an injected in-process relayer is unavailable.",
+    );
+  }
+  // Payment is remote-only so every broadcast passes through Gate's durable
+  // write-ahead and reconciliation boundary. Discovery remains available when
+  // no relay is configured.
   const relay = remoteRelay || (resolved.relayerUrl
     ? createRemoteRelay({ relayUrl: resolved.relayerUrl, fetchImpl, timeoutMs: resolved.requestTimeoutMs })
     : null);
@@ -63,8 +67,8 @@ function createBankrGateFlow({
     config: resolved,
     gateApi: gate,
     indexApi: index,
-    /** Where the gas gets paid: "local", "remote", or null when neither exists. */
-    relayMode: relayer ? "local" : (relay ? "remote" : null),
+    /** Where the gas gets paid: "remote", or null when payment is unavailable. */
+    relayMode: relay ? "remote" : null,
 
     /** 1. Resolve a REAL Nouns candidate or proposal through canonical data. */
     resolveTarget(input) {
@@ -76,9 +80,24 @@ function createBankrGateFlow({
       return discoverVoters(gate, { stage, dao: resolved.dao, minVotingPower, sort, chainId: displayChainId });
     },
 
-    /** 2b. Re-read one voter and confirm acceptance at selection time. */
+    /** 2b. Re-read one canonical wallet and confirm acceptance at selection time. */
     selectVoter(voterWallet, { stage } = {}) {
       return selectVoter(gate, voterWallet, { stage, chainId: displayChainId });
+    },
+
+    /**
+     * 2c. Prefer an explicit wallet/label over a private profile default.
+     * Labels are matched only against the current Gate directory, then the
+     * canonical wallet profile is re-read before selection.
+     */
+    selectTargetVoter({ explicitTarget, profileWallet, stage } = {}) {
+      return selectTargetVoter(gate, {
+        explicitTarget,
+        profileWallet,
+        stage,
+        dao: resolved.dao,
+        chainId: displayChainId,
+      });
     },
 
     /** 3. Compose the advocate's untrusted content into Gate's exact body. */
@@ -141,14 +160,13 @@ function createBankrGateFlow({
      * resolves the quote from its OWN owner-bound record of this submission.
      */
     broadcast({ prepared, quote, session, publicId, onPhase }) {
-      return broadcastPayment({ relayer, remoteRelay: relay, session, publicId, prepared, quote, onPhase, now });
+      return broadcastPayment({ remoteRelay: relay, session, publicId, prepared, quote, onPhase, now });
     },
 
     /** 6. Authorize then broadcast. A broadcast is never success. */
     pay({ quote, confirmed, session, publicId, onPhase }) {
       return payQuote({
         wallet,
-        relayer,
         remoteRelay: relay,
         session,
         publicId,
@@ -189,7 +207,9 @@ function createBankrGateFlow({
 async function sendAttentionRequest({
   flow,
   target: targetInput,
+  voterTarget,
   voterWallet,
+  profileVoterWallet,
   pitch,
   disclosures = "",
   evidenceUrls = [],
@@ -201,7 +221,12 @@ async function sendAttentionRequest({
   const target = targetInput?.stage ? targetInput : await flow.resolveTarget(targetInput ?? {});
   onPhase("target_resolved", { target });
 
-  const voter = await flow.selectVoter(voterWallet, { stage: target.stage });
+  const explicitTarget = voterTarget ?? voterWallet;
+  const voter = await flow.selectTargetVoter({
+    explicitTarget,
+    profileWallet: profileVoterWallet,
+    stage: target.stage,
+  });
   onPhase("voter_selected", { voter });
 
   const request = flow.compose({ target, pitch, disclosures, evidenceUrls });

@@ -274,6 +274,19 @@ test("a session that is not an exact base_sender payer cannot buy a quote", asyn
   assert.equal((await unavailableRpc.store.counts()).submissions, 0);
 });
 
+test("a valid EIP-7702 designator is still rejected as a non-empty-code payer", async () => {
+  const delegate = "11".repeat(20);
+  const delegatedPayer = await harness({
+    service: { basePayerCodeReader: async () => `0xef0100${delegate}` },
+  });
+
+  const error = await rejection(delegatedPayer.submit());
+  assert.equal(error.code, "NOT_ACCEPTING");
+  assert.deepEqual(await delegatedPayer.store.counts(), {
+    snapshots: 0, submissions: 0, quotes: 0, reservations: 0, inboxItems: 0, notifications: 0, monitors: 0,
+  });
+});
+
 test("blocked senders and exhausted quote rate limits issue no quote", async () => {
   const blocked = await harness({
     service: { senderPolicy: { async assertAllowed({ sender }) {

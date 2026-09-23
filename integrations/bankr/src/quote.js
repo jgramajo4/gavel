@@ -2,6 +2,7 @@
 
 const { getAddress } = require("ethers");
 const {
+  CANONICAL_BASE_USDC_ADDRESS,
   GAVEL_FEE_AMOUNT,
   QUOTE_FIELD_NAMES,
   QUOTE_VERSION,
@@ -88,6 +89,12 @@ function assertPayableQuote(quote, nowSeconds, { allowedChainIds = DEFAULT_ALLOW
         allowed.map((id) => chainLabel(id).name).join(", ")}.`,
     );
   }
+  if (Number(quote.chainId) === 8453 && getAddress(quote.token) !== CANONICAL_BASE_USDC_ADDRESS) {
+    throw new BankrGateError(
+      "TOKEN_NOT_ALLOWED",
+      "Base payment requires canonical native USDC. Nothing was signed and nothing was sent.",
+    );
+  }
   let expiry;
   let now;
   try {
@@ -129,7 +136,7 @@ function confirmationSummary({ quote, target, voter }) {
   const attention = formatUsdcWithUnit(quote.message.attentionAmount, chainId);
   const fee = formatUsdcWithUnit(quote.message.gavelFeeAmount, chainId);
   const total = formatUsdcWithUnit(quote.totalAmount, chainId);
-  const voterName = voter?.label || voter?.ens || voter?.wallet || quote.message.voter;
+  const voterName = voter?.label || voter?.wallet || quote.message.voter;
   const title = truncateDisplay(target?.title ?? "");
   const attentionNoun = target?.language?.attentionNoun
     || (target?.stage === "PRE_VOTE" ? "sponsorship attention" : "voting attention");

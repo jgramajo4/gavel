@@ -48,13 +48,15 @@ function shortWallet(wallet) {
 /**
  * A voter's display label.
  *
- * `ens` is a server-supplied display string, not a name this client resolved,
- * so it is stripped of control characters before it reaches a terminal.
+ * Gate's `label` is a server-supplied display string, not a name this client
+ * resolved, so it is stripped of control characters before it reaches a
+ * terminal. No client-side name resolver or alternate name field exists here.
  */
 function voterLabel(profile) {
-  const ens = typeof profile?.ens === "string" ? sanitizeDisplayText(profile.ens).trim() : "";
+  const supplied = typeof profile?.label === "string" ? profile.label : "";
+  const label = sanitizeDisplayText(supplied).trim();
   const wallet = shortWallet(profile?.wallet);
-  return ens ? `${ens} (${wallet})` : wallet;
+  return label ? `${label} (${wallet})` : wallet;
 }
 
 /**

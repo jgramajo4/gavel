@@ -20,7 +20,7 @@ const {
 | `gate-api.js` | HTTP client for the advocate-facing Gate routes. No `/v1/gate/me/*`. |
 | `index-api.js` | Read-only canonical governance index client. |
 | `targets.js` | Candidate/proposal resolution, `PRE_VOTE`/`SPONSOR` vs `VOTING`, stage language. |
-| `discovery.js` | Voter discovery and selection from Gate's public directory. |
+| `discovery.js` | Bounded voter discovery plus complete exact-label selection through Gate. |
 | `session.js` | Gate's `base_sender` WalletSession exchange. |
 | `submission.js` | Advocate content validation, the Gate body, create-or-resume. |
 | `quote.js` | Quote parsing, payability, and the confirmation summary. |
@@ -55,11 +55,10 @@ Relayer       --broadcasts--> splitter.settle()     (pays gas; is NOT the payer)
 
 Bankr signs; it never broadcasts. There is no broadcast fallback.
 
-The relayer is either in process or **remote**. A Bankr sandbox is ephemeral and
-holds no funded key, so the funded wallet normally lives on the Gate server and
-the client reaches it through `remote-relay.js`. An in-process relayer, when one
-is supplied, takes priority; with neither, payment fails by name with
-`RELAYER_UNAVAILABLE`.
+The relayer is **remote**. A Bankr sandbox is ephemeral and holds no funded key,
+so the funded wallet lives on the Gate server and the client reaches it through
+`remote-relay.js`. The public flow rejects an injected in-process relayer; with
+no remote relay, payment fails by name with `RELAYER_UNAVAILABLE`.
 
 ## Wallet capability surface (signing only)
 
@@ -76,16 +75,17 @@ call({ to, data }): Promise<string>                                             
 There is no `sendTransaction`, and the EIP-1193 adapter exposes no
 transaction-sending method.
 
-## Relayer interface
+## Internal transaction-guard test seam
 
 ```ts
 getAddress(): Promise<string>                          // pays gas; MUST NOT be the payer
 sendTransaction({ to, data, value }): Promise<string>   // tx hash
 ```
 
-`{ to, data, value }` is the only object that crosses this boundary. A relayer
-never receives a Gate session token, a Bankr API credential, an RPC credential,
-or any advocate content, and there is no arbitrary-call abstraction.
+This in-process interface is not a production alternative. It is retained only
+for isolated tests of the exact prepared-transaction guard. Public
+`createBankrGateFlow` rejects it and sends payment only through the durable Gate
+remote relay.
 
 Immediately before broadcast, `assertPreparedTransaction` re-derives the
 transaction from the authoritative quote and refuses unless all of these hold:
@@ -125,7 +125,9 @@ signature it sends belongs to this quote and no other.
 IP literal, a loopback, a LAN address, plain HTTP, a path, a query, credentials,
 or a reserved test name (`.local`, `.test`, `.internal`, `example.com`, ...) is
 a configuration failure, not a fallback: the client refuses to build a relay
-with one.
+request with one. This syntactic validation does not authenticate the operator
+behind a public DNS name; provision both Gate origins through trusted
+configuration and never take either value from a prompt.
 
 On a transport failure the outcome is **UNKNOWN** - the relay may have broadcast
 before the connection dropped. Read the submission's Gate status; never sign a
@@ -144,9 +146,8 @@ There is no method that reads, derives, exports, or accepts a private key.
 ```js
 const flow = createBankrGateFlow({
   wallet: createEip1193Wallet(provider),   // signs
-  // Broadcasting: either an in-process `relayer` object, or
-  // GAVEL_GATE_RELAYER_URL in the environment for Gate's remote relay. Both are
-  // separate funded accounts; neither is ever the payer.
+  // Broadcasting requires GAVEL_GATE_RELAYER_URL for Gate's durable remote
+  // relay. Injected in-process relayers are rejected.
   env: process.env,
 });
 
@@ -170,7 +171,8 @@ result.delivered; // true only when Gate returned the authoritative `accepted`
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/gates` | Public voter discovery. |
+| `GET` | `/v1/gates` | Public voter discovery, bounded to at most 50 results. |
+| `GET` | `/v1/gates/matches?label=…&stage=…` | Complete exact-label lookup; returns at most two rows so ambiguity is explicit. |
 | `GET` | `/v1/gates/:wallet` | Public voter profile, price, and policy. |
 | `POST` | `/v1/gate/auth/challenge` | WalletSession challenge for `base_sender`. |
 | `POST` | `/v1/gate/auth/verify` | Exchange the signed proof for a payer session. |
@@ -184,6 +186,10 @@ Index: `GET /v1/gate/daos/nouns/targets/:targetId` and
 
 `/v1/gate/me/profile` and `/v1/gate/me/inbox*` are deliberately absent. They are
 the voter's routes, and this client must never reach them.
+
+Bankr consumes only the public profile's generic `label`. It has no alternate
+name fallback and performs no name-resolution request of its own; canonical
+wallet addresses remain the identity in every path, request, and signature.
 
 ## Never logged
 

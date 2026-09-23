@@ -1,45 +1,6 @@
----
-name: gavel
-description: Personalized governance copilot for Nouns, ENS, and Railgun that learns private history, analyzes proposals with personal precedents and preferences, manages hard rules and backtests, and prepares review-first votes or delegation where supported.
-tags: [nouns, ens, railgun, governance, voting, delegation, dao, copilot]
-version: 8
-visibility: public
-metadata:
-  clawdbot:
-    emoji: "⚖️"
-    homepage: "https://github.com/jgramajo4/gavel"
-    requires:
-      bins: [git, node, npm]
----
+# Voter/copilot route
 
-# Gavel
-
-Gavel helps a person resume DAO governance participation by learning how they
-actually voted, predicting how they would likely vote now, and showing the
-personal evidence behind each recommendation. Be a governance copilot, not a
-generic opinion bot and not a menu of scripts.
-
-## Use this skill when
-
-The user wants to onboard or sync a Nouns, ENS, or Railgun voter, inspect a learned profile, add
-or correct a preference, create a hard rule, analyze a proposal, see personal
-precedents, run a historical backtest, receive a daily governance briefing,
-prepare a vote for review, cast a confirmed vote, or delegate voting power.
-Load `references/supported-daos.md` whenever selecting a DAO, interpreting its
-choices, or preparing a non-Nouns transaction.
-
-## Standalone compatibility boundary
-
-This directory remains independently composable for existing voter/copilot
-users, but it is not the public Bankr install. The one public install at
-`integrations/bankr/` routes voter/copilot and Gate intents under the same
-`gavel` name.
-
-This standalone package has no Gate directory or payment client. Do not answer
-questions about who accepts lobbying, sponsorship, or paid attention from
-general Nouns knowledge or a remembered delegate list. Direct the user to
-replace this compatibility install with the public umbrella; do not improvise a
-Gate result or reach into its payment flow.
+Use this route only after the umbrella router selects voter/copilot intent. Keep it separate from Gate discovery and payment.
 
 ## Non-negotiable boundaries
 
@@ -68,7 +29,7 @@ Gate result or reach into its payment flow.
 
 ## Bankr runtime
 
-Before every Gavel workflow in Bankr, load `references/bankr-runtime.md` and
+Before every Gavel workflow in Bankr, load `references/runtime.md` and
 treat the `execute_cli` sandbox, including `/cli`, as ephemeral. Install the
 runtime inside the current sandbox as directed. Skill resources are instructions,
 not a bundled copy of the application runtime.
@@ -98,7 +59,7 @@ for multiple, empty, and cross-channel results.
 | First Gavel interaction, "start", "help", or unclear onboarding state | Follow `references/interaction-and-formatting.md` → Welcome and choose a path |
 | DAO selection or any ENS/Railgun request | Follow `references/supported-daos.md` first |
 | "Onboard me", "learn my voting", "sync my history" | Follow `references/gavel-workflows.md` → Onboard and sync |
-| "Install Gavel", first Gavel request, or missing runtime | Follow `references/bankr-runtime.md` → Install or verify runtime |
+| "Install Gavel", first Gavel request, or missing runtime | Follow `references/runtime.md` → Install or verify runtime |
 | Missing profile, persistence question, or completed profile write | Follow `references/profile-storage.md` → Discover or verify private durable storage |
 | "What did you learn?", "show my profile", "see/load my profile" | First discover it with `references/profile-storage.md`, then follow `references/gavel-workflows.md` → Explain the profile |
 | "I changed my mind", "remember that I…", "your call was wrong" | Follow `references/policy-and-corrections.md` → Preference or correction |

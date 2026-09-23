@@ -17,6 +17,7 @@ const {
   issuedQuotePayload,
   signIssuedQuote,
 } = require("./quote-issuance");
+const { isRenderableEnsName } = require("./ens");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
@@ -77,6 +78,35 @@ function publicIdFrom(value) {
 }
 function sameTimestamp(a, b) { return new Date(a).valueOf() === new Date(b).valueOf(); }
 function invariant(condition, message) { if (!condition) throw new Error(message); }
+function relayClaimToken(value) {
+  const token = positiveBigint(value, "claimToken");
+  return token;
+}
+function rawTransaction(value) {
+  if (typeof value !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(value)) {
+    throw new TypeError("rawTransaction must be hex bytes");
+  }
+  return value.toLowerCase();
+}
+function relayAttempt(row) {
+  if (!row) return null;
+  return clone({
+    quoteId: row.quoteId ?? row.quote_id,
+    authorizationNonce: row.authorizationNonce ?? row.authorization_nonce,
+    deployment: {
+      chainId: String(row.chainId ?? row.chain_id),
+      splitter: row.splitter,
+      token: row.token,
+    },
+    status: row.status,
+    claimGeneration: Number(row.claimGeneration ?? row.claim_generation),
+    claimExpiresAt: row.claimExpiresAt ?? row.claim_expires_at,
+    txHash: row.txHash ?? row.tx_hash,
+    rawTransaction: row.rawTransaction ?? row.raw_transaction,
+    ...(Object.hasOwn(row, "disposition") ? { disposition: row.disposition } : {}),
+    ...(Object.hasOwn(row, "claimToken") ? { claimToken: row.claimToken } : {}),
+  });
+}
 function explicitDeploymentEnvironment(deployment) {
   const environment = deployment?.config?.environment;
   const chainId = String(deployment?.chain_id ?? deployment?.chainId);
@@ -96,6 +126,9 @@ function publicDisplay(value) {
   if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
   for (const field of fields) {
     if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+    if (field === "ens" && value[field] !== null && !isRenderableEnsName(value[field])) {
+      throw new TypeError("display.ens must be a safe renderable ENS name or null");
+    }
   }
   return value;
 }
@@ -296,11 +329,24 @@ class PostgresGateStore {
 
   async getProfileByWallet(wallet) { return this.#getProfileByWallet(this.pool, wallet); }
 
-  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0, after } = {}) {
     const normalizedDao = dao === undefined ? null : daoSlug(dao);
     if (availability !== undefined && !["accepting_now", "paused", "closed"].includes(availability)) throw new TypeError("invalid availability");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
+    if (after !== undefined) {
+      if (offset !== 0 || !after || typeof after.id !== "string" || !after.id
+          || Number.isNaN(new Date(after.updatedAt).getTime())) throw new TypeError("profile cursor is invalid");
+      const rows = (await this.pool.query(`SELECT DISTINCT p.id,p.wallet,p.wallet_kind AS "walletKind",p.availability,
+        p.profile_version AS "profileVersion",p.enrolled_at AS "enrolledAt",p.updated_at AS "updatedAt",
+        p.base_payout_verified_at AS "basePayoutVerifiedAt",p.base_payout_code_hash AS "basePayoutCodeHash",p.display_cache AS display
+        FROM gate.profiles p LEFT JOIN gate.dao_policies d ON d.profile_id=p.id
+        WHERE ($1::text IS NULL OR d.dao=$1) AND ($2::gate.availability IS NULL OR p.availability=$2)
+          AND (p.updated_at<$3 OR (p.updated_at=$3 AND p.id>$4))
+        ORDER BY p.updated_at DESC,p.id ASC LIMIT $5`,
+      [normalizedDao, availability ?? null, new Date(after.updatedAt), after.id, limit])).rows;
+      return clone(rows);
+    }
     const rows = (await this.pool.query(`SELECT DISTINCT p.id,p.wallet,p.wallet_kind AS "walletKind",p.availability,
       p.profile_version AS "profileVersion",p.enrolled_at AS "enrolledAt",p.updated_at AS "updatedAt",
       p.base_payout_verified_at AS "basePayoutVerifiedAt",p.base_payout_code_hash AS "basePayoutCodeHash",p.display_cache AS display
@@ -719,6 +765,86 @@ class PostgresGateStore {
   async countLiabilities(profileId) {
     const row = (await this.pool.query("SELECT count(*)::text AS total FROM gate.capacity_reservations WHERE profile_id=$1 AND state IN('active','expiry_pending_reconciliation')", [profileId])).rows[0];
     return BigInt(row.total);
+  }
+
+  async withRelayAccountLock({ chainId, relayerAddress, relayIdentity } = {}, operation) {
+    const chain = positiveBigint(chainId, "chainId");
+    const relayer = address(relayerAddress, "relayerAddress");
+    if (typeof operation !== "function") throw new TypeError("relay account operation is required");
+    const id = bytes32(relayIdentity?.quoteId, "quoteId");
+    const nonce = bytes32(relayIdentity?.authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    const identity = [id, nonce, positiveBigint(relayIdentity?.chainId, "chainId"),
+      address(relayIdentity?.splitter, "splitter"), address(relayIdentity?.token, "token"), 30_000];
+    if (identity[2] !== chain) throw new TypeError("relay identity chainId must match relayer lock chainId");
+    const client = await this.pool.connect();
+    const lockKey = `gavel-gate-relay:${chain}:${relayer}`;
+    let locked = false;
+    let destroy = null;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtextextended($1,0))", [lockKey]);
+      locked = true;
+      const ready = (await client.query("SELECT gate.relay_account_ready($1) AS ready", [chain])).rows[0]?.ready;
+      if (ready !== true) {
+        const error = new Error("relay account requires operator reconciliation");
+        error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
+        throw error;
+      }
+      const row = (await client.query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", identity)).rows[0];
+      invariant(row, "relay attempt is unavailable");
+      return await operation(relayAttempt(row), client);
+    } finally {
+      try {
+        if (locked) {
+          const unlocked = (await client.query(
+            "SELECT pg_advisory_unlock(hashtextextended($1,0)) AS unlocked", [lockKey],
+          )).rows[0]?.unlocked;
+          if (unlocked !== true) throw new Error("relay account advisory lock release was not confirmed");
+        }
+      } catch (error) {
+        destroy = error;
+        throw error;
+      } finally {
+        client.release(destroy ?? undefined);
+      }
+    }
+  }
+
+  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000, client } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const nonce = bytes32(authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
+    const row = (await (client ?? this.pool).query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", [
+      id, nonce, positiveBigint(chainId, "chainId"), address(splitter, "splitter"), address(token, "token"), leaseMs,
+    ])).rows[0];
+    invariant(row, "relay attempt is unavailable");
+    return relayAttempt(row);
+  }
+
+  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction: transaction, client } = {}) {
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.mark_relay_broadcasting($1,$2,$3,$4) r", [
+      bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), bytes32(txHash, "txHash"), rawTransaction(transaction),
+    ])).rows[0];
+    invariant(row, "relay claim is unavailable");
+    return relayAttempt(row);
+  }
+
+  async completeRelayBroadcast({ quoteId, txHash, client } = {}) {
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.complete_relay_broadcast($1,$2) r", [
+      bytes32(quoteId, "quoteId"), bytes32(txHash, "txHash"),
+    ])).rows[0];
+    invariant(row, "relay broadcast is unavailable");
+    return relayAttempt(row);
+  }
+
+  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false, client } = {}) {
+    if (typeof definitelyNotSent !== "boolean") throw new TypeError("definitelyNotSent must be boolean");
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.fail_relay_attempt($1,$2,$3) r", [
+      bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), definitelyNotSent,
+    ])).rows[0];
+    invariant(row, "relay attempt is unavailable");
+    return relayAttempt(row);
   }
 
   async getScannerState({ chainId, splitter } = {}) {

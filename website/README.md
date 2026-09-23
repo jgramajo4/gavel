@@ -53,7 +53,7 @@ Reviewed against repository commit
 | Unsigned preparation, review, chain checks, fail-closed behavior | [`PREPARE_VOTE.md`](../docs/PREPARE_VOTE.md) |
 | Runtime-owned storage; no public agent profile | [`PROFILE_STORAGE.md`](../docs/storage/PROFILE_STORAGE.md) |
 | Exact Hermes install command and first-use bootstrap | [`runtime.md`](../integrations/hermes/references/runtime.md), [`SKILL.md`](../integrations/hermes/SKILL.md) |
-| Bankr skill installation and private artifact lifecycle | [`README.md`](../integrations/bankr/README.md), [`bankr-runtime.md`](../nouns-dao/references/bankr-runtime.md) |
+| One Bankr skill installation, voter/Gate routing, and private artifact lifecycle | [`README.md`](../integrations/bankr/README.md), [`runtime.md`](../integrations/bankr/references/runtime.md) |
 | BYOH JSON and error contract | [`generic-cli.md`](../docs/runtimes/generic-cli.md) |
 | TUI commands and architecture (status updated by maintainer) | [`TUI README`](../packages/tui/README.md), [`migration`](../docs/architecture/TUI_MIGRATION.md) |
 | One core and reserved server boundary | [`architecture`](../docs/architecture/MONOREPO_AUDIT_AND_PLAN.md), [`server`](../packages/server/README.md) |

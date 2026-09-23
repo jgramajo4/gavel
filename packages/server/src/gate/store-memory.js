@@ -37,6 +37,7 @@ const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
 const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const { isRenderableEnsName } = require("./ens");
 
 function clone(value) { return value == null ? value : structuredClone(value); }
 function publicDisplay(value) {
@@ -45,6 +46,9 @@ function publicDisplay(value) {
   if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
   for (const field of fields) {
     if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+    if (field === "ens" && value[field] !== null && !isRenderableEnsName(value[field])) {
+      throw new TypeError("display.ens must be a safe renderable ENS name or null");
+    }
   }
   return value;
 }
@@ -120,6 +124,8 @@ class MemoryGateStore {
   #monitors;
   #authNonces;
   #authSessions;
+  #relayAttempts;
+  #relayAccountQueues;
   #notificationRetryLimit;
 
   constructor(options = {}) {
@@ -150,6 +156,8 @@ class MemoryGateStore {
     this.#monitors = new Map();
     this.#authNonces = new Map();
     this.#authSessions = new Map();
+    this.#relayAttempts = new Map();
+    this.#relayAccountQueues = new Map();
   }
 
   #allocatePublicIdUnsafe() {
@@ -370,16 +378,23 @@ class MemoryGateStore {
 
   async getProfileByWallet(wallet) { return this.#getProfileByWallet(wallet); }
 
-  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0 } = {}) {
+  async listProfiles({ dao, availability, limit = PROFILE_PAGE_LIMIT, offset = 0, after } = {}) {
     const normalizedDao = dao === undefined ? undefined : daoSlug(dao);
     if (availability !== undefined && !AVAILABILITIES.has(availability)) throw new TypeError("invalid availability");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > PROFILE_PAGE_LIMIT) throw new TypeError("profile limit must be an integer from 1 to 50");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > PROFILE_MAX_OFFSET) throw new TypeError("profile offset must be an integer from 0 to 10000");
-    return [...this.#profiles.values()]
+    if (after !== undefined && (offset !== 0 || !after || typeof after.id !== "string"
+        || Number.isNaN(new Date(after.updatedAt).getTime()))) throw new TypeError("profile cursor is invalid");
+    const rows = [...this.#profiles.values()]
       .filter((profile) => availability === undefined || profile.availability === availability)
       .filter((profile) => normalizedDao === undefined || this.#policies.has(`${profile.id}:${normalizedDao}`))
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime() || left.id.localeCompare(right.id))
-      .slice(offset, offset + limit)
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime() || left.id.localeCompare(right.id));
+    const start = after === undefined ? offset : rows.findIndex((profile) => (
+      new Date(profile.updatedAt).getTime() < new Date(after.updatedAt).getTime()
+      || (new Date(profile.updatedAt).getTime() === new Date(after.updatedAt).getTime() && profile.id > after.id)
+    ));
+    return rows
+      .slice(start < 0 ? rows.length : start, (start < 0 ? rows.length : start) + limit)
       .map(clone);
   }
 
@@ -1436,6 +1451,126 @@ class MemoryGateStore {
       if (row.archivedAt == null) row.archivedAt = instant(this.#clock(), "clock");
       return this.#inboxRecord(row);
     });
+  }
+
+  /**
+   * Relay deduplication is keyed by the quote's EIP-3009 nonce (`quoteId`) and
+   * its authoritative deployment tuple. The caller's public id or signature
+   * bytes are deliberately not identity: two valid ECDSA encodings of the same
+   * authorization authorize the same nonce and therefore the same transaction.
+   */
+  async withRelayAccountLock({ chainId, relayerAddress, relayIdentity } = {}, operation) {
+    const account = `${block(chainId, "chainId").raw}:${address(relayerAddress, "relayerAddress")}`;
+    if (typeof operation !== "function") throw new TypeError("relay account operation is required");
+    const prior = this.#relayAccountQueues.get(account) ?? Promise.resolve();
+    let release;
+    const turn = new Promise((resolve) => { release = resolve; });
+    const queued = prior.then(() => turn, () => turn);
+    this.#relayAccountQueues.set(account, queued);
+    await prior.catch(() => {});
+    try {
+      const unresolved = [...this.#relayAttempts.values()].some((attempt) =>
+        attempt.deployment.chainId === block(chainId, "chainId").raw
+          && ["claimed", "broadcasting", "reconciliation_required"].includes(attempt.status));
+      if (unresolved) {
+        const error = new Error("relay account requires operator reconciliation");
+        error.code = "RELAY_ACCOUNT_RECONCILIATION_REQUIRED";
+        throw error;
+      }
+      const claim = await this.claimRelayAttempt(relayIdentity);
+      return await operation(claim, null);
+    } finally {
+      release();
+      if (this.#relayAccountQueues.get(account) === queued) this.#relayAccountQueues.delete(account);
+    }
+  }
+
+  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const nonce = bytes32(authorizationNonce, "authorization nonce");
+    if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
+    const deployment = {
+      chainId: block(chainId, "chainId").raw,
+      splitter: address(splitter, "splitter"),
+      token: address(token, "token"),
+    };
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
+    return this.#serialized(() => {
+      const now = instant(this.#clock(), "clock");
+      let row = this.#relayAttempts.get(id);
+      if (row && (row.authorizationNonce !== nonce || compareShape(row.deployment) !== compareShape(deployment))) {
+        throw new Error("relay identity does not match the authoritative quote authorization");
+      }
+      if (!row) {
+        row = { quoteId: id, authorizationNonce: nonce, deployment, status: "claimed", claimGeneration: 1,
+          claimExpiresAt: new Date(now.getTime() + leaseMs), txHash: null, rawTransaction: null };
+        this.#relayAttempts.set(id, row);
+        return { ...clone(row), disposition: "claimed", claimToken: "1" };
+      }
+      if (row.status === "retryable" || (row.status === "claimed" && row.claimExpiresAt <= now)) {
+        row.status = "claimed";
+        row.claimGeneration += 1;
+        row.claimExpiresAt = new Date(now.getTime() + leaseMs);
+        return { ...clone(row), disposition: "claimed", claimToken: String(row.claimGeneration) };
+      }
+      return { ...clone(row), disposition: "existing", claimToken: null };
+    });
+  }
+
+  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const hash = bytes32(txHash, "txHash");
+    if (typeof rawTransaction !== "string" || !/^0x[0-9a-fA-F]+$/.test(rawTransaction)) {
+      throw new TypeError("rawTransaction must be hex bytes");
+    }
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row || row.status !== "claimed" || String(row.claimGeneration) !== String(claimToken)) {
+        throw new Error("relay claim is unavailable");
+      }
+      row.status = "broadcasting";
+      row.txHash = hash;
+      row.rawTransaction = rawTransaction.toLowerCase();
+      row.claimExpiresAt = null;
+      return clone(row);
+    });
+  }
+
+  async completeRelayBroadcast({ quoteId, txHash } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    const hash = bytes32(txHash, "txHash");
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row || row.txHash !== hash || !["broadcasting", "broadcast"].includes(row.status)) {
+        throw new Error("relay broadcast is unavailable");
+      }
+      row.status = "broadcast";
+      return clone(row);
+    });
+  }
+
+  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    return this.#serialized(() => {
+      const row = this.#relayAttempts.get(id);
+      if (!row) throw new Error("relay attempt is unavailable");
+      if (definitelyNotSent) {
+        if (row.status !== "claimed" || String(row.claimGeneration) !== String(claimToken)) {
+          throw new Error("relay claim is unavailable");
+        }
+        row.status = "retryable";
+        row.claimExpiresAt = null;
+      } else {
+        if (row.status !== "broadcasting" || !row.txHash) throw new Error("relay broadcast is unavailable");
+        row.status = "reconciliation_required";
+      }
+      return clone(row);
+    });
+  }
+
+  async getRelayAttempt({ quoteId } = {}) {
+    const id = bytes32(quoteId, "quoteId");
+    return this.#serialized(() => clone(this.#relayAttempts.get(id) ?? null));
   }
 
   async counts() {

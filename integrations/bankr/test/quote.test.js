@@ -24,15 +24,18 @@ test("a Gate-issued quote parses into exactly the server's payment values", () =
   assert.ok(Object.isFrozen(quote.message));
 });
 
-test("splitter, token, chain, and expiry are read from the quote, never configured", () => {
+test("Base payment refuses a quote whose token is not canonical native USDC", () => {
   const custom = issuedQuote({
     domain: { chainId: 8453, verifyingContract: `0x${"5".repeat(40)}` },
     message: { token: `0x${"6".repeat(40)}`, expiry: "1900000000" },
   });
   const quote = parseIssuedQuote(custom);
   assert.equal(quote.splitter.toLowerCase(), `0x${"5".repeat(40)}`);
-  assert.equal(quote.token.toLowerCase(), `0x${"6".repeat(40)}`);
   assert.equal(quote.message.expiry, "1900000000");
+  assert.throws(
+    () => assertPayableQuote(quote, NOW),
+    (error) => error.code === "TOKEN_NOT_ALLOWED" && /canonical native USDC/.test(error.message),
+  );
 });
 
 test("a quote carrying anything but the fixed Gavel fee is refused", () => {

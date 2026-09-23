@@ -54,11 +54,19 @@ function canonicalOrigin(value, name) {
  */
 function canonicalRelayOrigin(value, name) {
   const origin = canonicalOrigin(value, name);
-  const { protocol, hostname } = new URL(origin);
+  const parsed = new URL(origin);
+  const { protocol } = parsed;
   if (protocol !== "https:") {
     throw new BankrGateError("INVALID_CONFIG", `${name} must be an HTTPS origin.`);
   }
-  const host = hostname.toLowerCase();
+  const rawHost = parsed.hostname.toLowerCase();
+  if (/\.\.$/.test(rawHost)) {
+    throw new BankrGateError(
+      "INVALID_CONFIG",
+      `${name} must be a public HTTPS hostname, not a malformed DNS name.`,
+    );
+  }
+  const host = rawHost.replace(/\.$/, "");
   // An IPv6 literal arrives bracketed; an IPv4 literal is four dotted numbers.
   const isIpLiteral = host.startsWith("[") || /^[0-9]+(\.[0-9]+){3}$/.test(host);
   if (isIpLiteral || !host.includes(".") || RESERVED_RELAY_HOSTS.includes(host)
@@ -69,16 +77,21 @@ function canonicalRelayOrigin(value, name) {
       `${name} must be a public HTTPS hostname, not an IP address, a loopback, a LAN, or a reserved test name.`,
     );
   }
-  return origin;
+  parsed.hostname = host;
+  return parsed.origin;
 }
 
 function chainIds(value) {
-  if (value === undefined || value === null || value === "") return [...DEFAULT_ALLOWED_CHAIN_IDS];
-  const list = (Array.isArray(value) ? value : String(value).split(","))
-    .map((entry) => Number(String(entry).trim()))
-    .filter((entry) => Number.isSafeInteger(entry) && entry > 0);
-  if (list.length === 0) {
-    throw new BankrGateError("INVALID_CONFIG", "GAVEL_GATE_CHAIN_IDS must list at least one chain ID.");
+  const list = (value === undefined || value === null || value === "")
+    ? [...DEFAULT_ALLOWED_CHAIN_IDS]
+    : (Array.isArray(value) ? value : String(value).split(","))
+      .map((entry) => Number(String(entry).trim()))
+      .filter((entry) => Number.isSafeInteger(entry) && entry > 0);
+  if (list.length !== 1 || list[0] !== 8453) {
+    throw new BankrGateError(
+      "INVALID_CONFIG",
+      "GAVEL_GATE_CHAIN_IDS must contain exactly 8453 (Base mainnet).",
+    );
   }
   return list;
 }
@@ -91,7 +104,7 @@ function chainIds(value) {
  * integration never carries a second copy that could drift from it.
  */
 function resolveConfig(env = process.env, overrides = {}) {
-  const gateUrl = canonicalOrigin(overrides.gateUrl ?? env.GAVEL_GATE_URL, "GAVEL_GATE_URL");
+  const gateUrl = canonicalRelayOrigin(overrides.gateUrl ?? env.GAVEL_GATE_URL, "GAVEL_GATE_URL");
   const indexUrl = canonicalOrigin(
     overrides.indexUrl ?? env.GAVEL_INDEX_API_URL ?? DEFAULT_INDEX_URL,
     "GAVEL_INDEX_API_URL",

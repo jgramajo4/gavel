@@ -41,7 +41,7 @@ model this note motivates.
 | --- | --- | --- |
 | CLI | `packages/cli/bin/gavel.js` | Canonical surface. Owns command parsing and private-state paths. |
 | Hermes / BYOH | `integrations/hermes/scripts/gavel.js` | Pinned-revision bootstrapper that execs the CLI. Owns no governance logic. |
-| Bankr | `integrations/bankr/`, `nouns-dao/references/bankr-runtime.md` | Documentation-only skill wrapper over the CLI. |
+| Bankr | `integrations/bankr/` | One umbrella skill: voter/copilot instructions wrap the canonical CLI; a separately routed Gate advocate client wraps Gate APIs and payment authorization. |
 | TUI | `packages/tui/` | TypeScript read/act surface over viem. Holds its own signing path. |
 
 ### State persistence

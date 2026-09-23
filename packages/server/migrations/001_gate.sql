@@ -24,7 +24,7 @@ BEGIN
     'profiles','dao_policies','auth_nonces','auth_sessions','proposal_snapshots','splitter_deployments','submissions','quotes',
     'capacity_reservations','inbox_items','notification_attempts','sender_blocks','rate_limit_events','delivery_settings',
     'settlement_cursors','settlement_scan_ranges','settlement_scan_blocks','settlement_scan_observations','settlement_reorg_monitors',
-    'profile_version_authorizations']);
+    'profile_version_authorizations','relay_attempts']);
   IF marked THEN
     IF to_regprocedure('public.gavel_gate_catalog_manifest()') IS NOT NULL THEN
       SELECT catalog_manifest INTO stored_manifest FROM public.schema_migrations WHERE version='gate/001_gate-v3';
@@ -33,17 +33,24 @@ BEGIN
     IF to_regclass('gate.profiles') IS NULL
        OR current_manifest IS DISTINCT FROM stored_manifest
        OR obj_description(to_regclass('gate.profiles'), 'pg_class') IS DISTINCT FROM 'gavel gate 001 v3'
+       -- Historical checksum fixtures may already contain relay_attempts when an
+       -- operator replays this idempotent migration after staging an upgrade.
+       -- The stored catalog manifest still has to match exactly; tolerate only
+       -- the one additive table that this migration owns.
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          = 'sha256:gate-001-v3-postgres-parity' AND installed_tables <> 19)
+          = 'sha256:gate-001-v3-postgres-parity' AND installed_tables NOT IN (19,21))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          = 'sha256:gate-001-v3-durable-auth-profile' AND installed_tables <> 20)
+          = 'sha256:gate-001-v3-durable-auth-profile' AND installed_tables NOT IN (20,21))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
-          = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables <> 20)
+          = 'sha256:gate-001-v3-durable-auth-profile-hardening' AND installed_tables NOT IN (20,21))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-legacy-upgrade-hardening','sha256:gate-001-v3-closed-base-environments',
             'sha256:gate-001-v3-agentmail-idempotency','sha256:gate-001-v3-bound-delivery-settings',
             'sha256:gate-001-v3-runtime-readiness','sha256:gate-001-v3-atomic-auth-session',
-            'sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND installed_tables <> 20)
+            'sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit')
+          AND installed_tables NOT IN (20,21))
+       OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
+          IN ('sha256:gate-001-v4-durable-relay','sha256:gate-001-v5-relay-account-lock','sha256:gate-001-v6-relay-lock-fence') AND installed_tables <> 21)
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='quotes'
          AND column_name='settlement_scanner_verified' AND is_nullable='YES' AND data_type='boolean')
        OR NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='gate' AND table_name='settlement_scan_ranges'
@@ -51,14 +58,16 @@ BEGIN
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           NOT IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND NOT EXISTS(
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit',
+            'sha256:gate-001-v4-durable-relay','sha256:gate-001-v5-relay-account-lock','sha256:gate-001-v6-relay-lock-fence') AND NOT EXISTS(
             SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
             WHERE n.nspname='gate' AND t.relname='quotes' AND c.contype='c'
               AND pg_get_constraintdef(c.oid) LIKE '%base_chain_id = 8453%'))
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           IN ('sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') AND (
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit',
+            'sha256:gate-001-v4-durable-relay','sha256:gate-001-v5-relay-account-lock','sha256:gate-001-v6-relay-lock-fence') AND (
             NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
               WHERE n.nspname='gate' AND t.relname='quotes' AND c.conname='quotes_base_chain_check')
             OR NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -85,7 +94,8 @@ BEGIN
             'sha256:gate-001-v3-durable-auth-profile-hardening','sha256:gate-001-v3-legacy-upgrade-hardening',
             'sha256:gate-001-v3-closed-base-environments','sha256:gate-001-v3-agentmail-idempotency',
             'sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit')
+            'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit',
+            'sha256:gate-001-v4-durable-relay','sha256:gate-001-v5-relay-account-lock','sha256:gate-001-v6-relay-lock-fence')
        OR ((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3')
           = 'sha256:gate-001-v3-durable-auth-profile' AND (
             to_regclass('gate.auth_sessions') IS NULL
@@ -575,6 +585,110 @@ ALTER TABLE gate.quotes ADD CONSTRAINT quotes_settlement_complete_check CHECK(
 CREATE INDEX IF NOT EXISTS quotes_expiry_idx ON gate.quotes(state,expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS quotes_settled_log_identity_idx
   ON gate.quotes(base_chain_id,splitter,settled_tx_hash,settled_log_index) WHERE settled_tx_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS quotes_relay_identity_idx ON gate.quotes(quote_id,base_chain_id,splitter,token);
+
+CREATE TABLE IF NOT EXISTS gate.relay_attempts (
+ quote_id text PRIMARY KEY REFERENCES gate.quotes(quote_id),
+ authorization_nonce text NOT NULL CHECK(authorization_nonce=quote_id),
+ chain_id bigint NOT NULL CHECK(chain_id>0),
+ splitter text NOT NULL CHECK(splitter ~ '^0x[0-9a-f]{40}$'),
+ token text NOT NULL CHECK(token ~ '^0x[0-9a-f]{40}$'),
+ status text NOT NULL CHECK(status IN('claimed','broadcasting','broadcast','retryable','reconciliation_required')),
+ claim_generation bigint NOT NULL DEFAULT 1 CHECK(claim_generation>0),
+ claim_expires_at timestamptz,
+ tx_hash text CHECK(tx_hash IS NULL OR tx_hash ~ '^0x[0-9a-f]{64}$'),
+ raw_transaction text CHECK(raw_transaction IS NULL OR raw_transaction ~ '^0x(?:[0-9a-f]{2})+$'),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ FOREIGN KEY(quote_id,chain_id,splitter,token) REFERENCES gate.quotes(quote_id,base_chain_id,splitter,token),
+ CHECK((status='claimed' AND claim_expires_at IS NOT NULL AND tx_hash IS NULL AND raw_transaction IS NULL)
+   OR (status='retryable' AND claim_expires_at IS NULL AND tx_hash IS NULL AND raw_transaction IS NULL)
+   OR (status IN('broadcasting','broadcast','reconciliation_required')
+     AND claim_expires_at IS NULL AND tx_hash IS NOT NULL AND raw_transaction IS NOT NULL))
+);
+
+CREATE OR REPLACE FUNCTION gate.relay_account_ready(p_chain_id bigint)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+ SELECT NOT EXISTS(
+   SELECT 1 FROM gate.relay_attempts
+   WHERE chain_id=p_chain_id AND status IN('claimed','broadcasting','reconciliation_required')
+ )
+$$;
+REVOKE ALL ON FUNCTION gate.relay_account_ready(bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.claim_relay_attempt(
+ p_quote_id text,p_authorization_nonce text,p_chain_id bigint,p_splitter text,p_token text,p_lease_ms integer
+) RETURNS TABLE("quoteId" text,"authorizationNonce" text,"chainId" text,splitter text,token text,status text,
+  "claimGeneration" text,"claimExpiresAt" timestamptz,"txHash" text,"rawTransaction" text,disposition text,"claimToken" text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+DECLARE relay gate.relay_attempts; claimed boolean := false;
+BEGIN
+ IF p_authorization_nonce<>p_quote_id THEN RAISE EXCEPTION 'authorization nonce must equal quoteId' USING ERRCODE='23514'; END IF;
+ IF p_lease_ms IS NULL OR p_lease_ms<1 THEN RAISE EXCEPTION 'relay lease must be positive' USING ERRCODE='23514'; END IF;
+ INSERT INTO gate.relay_attempts(quote_id,authorization_nonce,chain_id,splitter,token,status,claim_expires_at)
+ VALUES(p_quote_id,p_authorization_nonce,p_chain_id,p_splitter,p_token,'claimed',clock_timestamp()+make_interval(secs=>p_lease_ms/1000.0))
+ ON CONFLICT(quote_id) DO NOTHING RETURNING * INTO relay;
+ IF FOUND THEN
+  claimed := true;
+ ELSE
+  SELECT r.* INTO relay FROM gate.relay_attempts r WHERE r.quote_id=p_quote_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'relay attempt is unavailable' USING ERRCODE='23514'; END IF;
+  IF (relay.authorization_nonce,relay.chain_id,relay.splitter,relay.token)
+      IS DISTINCT FROM (p_authorization_nonce,p_chain_id,p_splitter,p_token) THEN
+    RAISE EXCEPTION 'relay identity does not match the authoritative quote authorization' USING ERRCODE='23514';
+  END IF;
+  IF relay.status='retryable' OR (relay.status='claimed' AND relay.claim_expires_at<=clock_timestamp()) THEN
+   UPDATE gate.relay_attempts r SET status='claimed',claim_generation=r.claim_generation+1,
+     claim_expires_at=clock_timestamp()+make_interval(secs=>p_lease_ms/1000.0),updated_at=clock_timestamp()
+     WHERE r.quote_id=p_quote_id RETURNING * INTO relay;
+   claimed := true;
+  END IF;
+ END IF;
+ RETURN QUERY SELECT relay.quote_id,relay.authorization_nonce,relay.chain_id::text,relay.splitter,relay.token,relay.status,
+   relay.claim_generation::text,relay.claim_expires_at,relay.tx_hash,relay.raw_transaction,
+   CASE WHEN claimed THEN 'claimed' ELSE 'existing' END,CASE WHEN claimed THEN relay.claim_generation::text END;
+END $$;
+REVOKE ALL ON FUNCTION gate.claim_relay_attempt(text,text,bigint,text,text,integer) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.mark_relay_broadcasting(p_quote_id text,p_claim_generation bigint,p_tx_hash text,p_raw_transaction text)
+RETURNS gate.relay_attempts LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+DECLARE relay gate.relay_attempts;
+BEGIN
+ UPDATE gate.relay_attempts r SET status='broadcasting',claim_expires_at=NULL,tx_hash=p_tx_hash,
+   raw_transaction=p_raw_transaction,updated_at=clock_timestamp()
+ WHERE r.quote_id=p_quote_id AND r.status='claimed' AND r.claim_generation=p_claim_generation
+ RETURNING * INTO relay;
+ IF NOT FOUND THEN RAISE EXCEPTION 'relay claim is unavailable' USING ERRCODE='23514'; END IF;
+ RETURN relay;
+END $$;
+REVOKE ALL ON FUNCTION gate.mark_relay_broadcasting(text,bigint,text,text) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.complete_relay_broadcast(p_quote_id text,p_tx_hash text)
+RETURNS gate.relay_attempts LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+DECLARE relay gate.relay_attempts;
+BEGIN
+ UPDATE gate.relay_attempts r SET status='broadcast',updated_at=clock_timestamp()
+ WHERE r.quote_id=p_quote_id AND r.tx_hash=p_tx_hash AND r.status IN('broadcasting','broadcast') RETURNING * INTO relay;
+ IF NOT FOUND THEN RAISE EXCEPTION 'relay broadcast is unavailable' USING ERRCODE='23514'; END IF;
+ RETURN relay;
+END $$;
+REVOKE ALL ON FUNCTION gate.complete_relay_broadcast(text,text) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION gate.fail_relay_attempt(p_quote_id text,p_claim_generation bigint,p_definitely_not_sent boolean)
+RETURNS gate.relay_attempts LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,gate AS $$
+DECLARE relay gate.relay_attempts;
+BEGIN
+ IF p_definitely_not_sent THEN
+  UPDATE gate.relay_attempts r SET status='retryable',claim_expires_at=NULL,updated_at=clock_timestamp()
+   WHERE r.quote_id=p_quote_id AND r.status='claimed' AND r.claim_generation=p_claim_generation RETURNING * INTO relay;
+  IF NOT FOUND THEN RAISE EXCEPTION 'relay claim is unavailable' USING ERRCODE='23514'; END IF;
+ ELSE
+  UPDATE gate.relay_attempts r SET status='reconciliation_required',updated_at=clock_timestamp()
+   WHERE r.quote_id=p_quote_id AND r.status='broadcasting' AND r.tx_hash IS NOT NULL RETURNING * INTO relay;
+  IF NOT FOUND THEN RAISE EXCEPTION 'relay broadcast is unavailable' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN relay;
+END $$;
+REVOKE ALL ON FUNCTION gate.fail_relay_attempt(text,bigint,boolean) FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS gate.capacity_reservations (
  id text PRIMARY KEY, profile_id text NOT NULL REFERENCES gate.profiles(id), quote_id text NOT NULL UNIQUE REFERENCES gate.quotes(id),
@@ -1321,7 +1435,8 @@ CREATE TRIGGER notifications_state_transition BEFORE INSERT OR UPDATE ON gate.no
 DO $$ BEGIN
  IF COALESCE((SELECT migration_checksum FROM public.schema_migrations WHERE version='gate/001_gate-v3'),'')
     NOT IN ('sha256:gate-001-v3-bound-delivery-settings','sha256:gate-001-v3-runtime-readiness',
-      'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit') THEN
+      'sha256:gate-001-v3-atomic-auth-session','sha256:gate-001-v4-nouns-candidates','sha256:gate-001-v4-runtime-privilege-audit',
+      'sha256:gate-001-v4-durable-relay','sha256:gate-001-v5-relay-account-lock','sha256:gate-001-v6-relay-lock-fence') THEN
   UPDATE gate.notification_attempts SET state='failed',error_code='PROVIDER_IDEMPOTENCY_HISTORY_UNKNOWN',
     manual_reconciliation_at=clock_timestamp(),claimed_until=NULL,updated_at=clock_timestamp()
   WHERE claim_generation>0 AND first_attempt_at IS NULL AND dedupe_deadline IS NULL
@@ -1454,6 +1569,11 @@ DO $$ BEGIN
   REVOKE ALL ON FUNCTION gate.insert_auth_session(text,text,gate.auth_role,bigint,text,bigint,bigint) FROM gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.consume_auth_nonce_and_insert_session(text,text,text,gate.auth_role,bigint,text,text,bigint,bigint,bigint,text,bigint) TO gavel_gate;
   GRANT EXECUTE ON FUNCTION gate.set_delivery_setting(text,text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.relay_account_ready(bigint) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.claim_relay_attempt(text,text,bigint,text,text,integer) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.mark_relay_broadcasting(text,bigint,text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.complete_relay_broadcast(text,text) TO gavel_gate;
+  GRANT EXECUTE ON FUNCTION gate.fail_relay_attempt(text,bigint,boolean) TO gavel_gate;
  END IF;
  IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='gavel_api') THEN
   REVOKE ALL ON SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL TABLES IN SCHEMA gate FROM gavel_api; REVOKE ALL ON ALL SEQUENCES IN SCHEMA gate FROM gavel_api;
@@ -1555,6 +1675,8 @@ LANGUAGE sql STABLE SET search_path=pg_catalog,gate AS $runtime_privilege_audit$
    ('gate.record_scanner_range(text,bigint,bigint,text,timestamp with time zone,jsonb)'),
    ('gate.scanner_range_prereads(text,bigint,bigint)'),('gate.unsettled_settlement_observations(bigint,text,integer)'),
    ('gate.release_expired_reservation(text,text)'),('gate.runtime_migration_status()'),('gate.runtime_privilege_audit()')
+   ,('gate.relay_account_ready(bigint)'),('gate.claim_relay_attempt(text,text,bigint,text,text,integer)'),('gate.mark_relay_broadcasting(text,bigint,text,text)'),
+   ('gate.complete_relay_broadcast(text,text)'),('gate.fail_relay_attempt(text,bigint,boolean)')
  )
  SELECT 'schema:'||schema_name||':'||privilege,has_schema_privilege('gavel_gate',schema_name,privilege)
  FROM required_schema
@@ -1575,7 +1697,7 @@ DO $$ BEGIN
 END $$;
 
 INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest)
- SELECT 'gate/001_gate-v3','sha256:gate-001-v4-runtime-privilege-audit',public.gavel_gate_catalog_manifest()
+ SELECT 'gate/001_gate-v3','sha256:gate-001-v6-relay-lock-fence',public.gavel_gate_catalog_manifest()
  ON CONFLICT(version) DO UPDATE SET
    migration_checksum=EXCLUDED.migration_checksum,
    catalog_manifest=EXCLUDED.catalog_manifest
@@ -1590,13 +1712,16 @@ INSERT INTO public.schema_migrations(version,migration_checksum,catalog_manifest
    'sha256:gate-001-v3-runtime-readiness',
    'sha256:gate-001-v3-atomic-auth-session',
    'sha256:gate-001-v4-nouns-candidates',
-   'sha256:gate-001-v4-runtime-privilege-audit'
+   'sha256:gate-001-v4-runtime-privilege-audit',
+   'sha256:gate-001-v4-durable-relay',
+   'sha256:gate-001-v5-relay-account-lock',
+   'sha256:gate-001-v6-relay-lock-fence'
  );
 DO $$ BEGIN
  IF NOT EXISTS (
    SELECT 1 FROM public.schema_migrations
    WHERE version='gate/001_gate-v3'
-     AND migration_checksum='sha256:gate-001-v4-runtime-privilege-audit'
+     AND migration_checksum='sha256:gate-001-v6-relay-lock-fence'
      AND catalog_manifest IS NOT DISTINCT FROM public.gavel_gate_catalog_manifest()
  ) THEN
   RAISE EXCEPTION 'Gate migration revision is unknown or incomplete';

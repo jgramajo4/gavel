@@ -1,21 +1,18 @@
-# Gate advocate runtime (Bankr)
+# Bankr runtime
 
-This file belongs to the **`gavel-gate` skill package** and is loaded as
-`references/runtime.md` from that package's own `SKILL.md`.
+This reference belongs to the umbrella `gavel` skill and supports both the voter/copilot route and the Gate advocate route. The installed skill is an instruction and client package; the canonical Gavel application runtime is cloned separately.
 
-It is deliberately self-contained. An installed skill is only its own
-directory: a path that climbs out of it (`../../nouns-dao/...`) resolves in a
-repository checkout and resolves nowhere once the skill is published, so the
-Gate advocate skill reaches for nothing outside this folder. `gavel-gate` and
-the general `gavel` voter/copilot skill are separate installs, and neither may
-assume the other is present.
+## Select and inspect the runtime revision
+
+Read `references/skill-manifest.json` before cloning. Report its `version`, content-derived `buildId`, `build`, and `runtime.ref` when the user asks which Gavel is installed.
+
+- A Git-stamped release has `build.kind: "git"`, a verified `build.gitSha`, and the same immutable SHA in `runtime.ref`.
+- A GitHub directory install has `build.kind: "source"`, no claimed Git SHA, a deterministic `sha256:…` package-content `buildId`, and `runtime.ref: "main"`. The build ID changes with the installable package inputs, but mutable `main` still tracks source and is not an immutable release.
+- Never invent or infer a build SHA from a version string.
 
 ## Install inside the current sandbox
 
-Bankr `execute_cli` containers are ephemeral, and arbitrary paths inside them —
-`/cli/gavel` included — are not a persistent installation. Run the install and
-the requested Gate workflow in the **same** `execute_cli` invocation. Use
-`workDir: "workspace"` and never print an environment variable's value.
+Bankr `execute_cli` containers are ephemeral. Run setup and the requested workflow in the same invocation, use `workDir: "workspace"`, and never print environment-variable values.
 
 1. Clone the public runtime:
 
@@ -23,59 +20,60 @@ the requested Gate workflow in the **same** `execute_cli` invocation. Use
    git clone --branch main --single-branch https://github.com/jgramajo4/gavel.git gavel
    ```
 
-   For a catalog release, replace `main` with the immutable release tag built
-   from the validated commit. Do not silently switch revisions mid-workflow.
+2. If `runtime.ref` is an immutable SHA, verify and check out exactly that object before running code:
 
-2. Confirm the remote before running any code:
+   ```bash
+   git -C gavel fetch origin <runtime.ref>
+   git -C gavel checkout --detach <runtime.ref>
+   test "$(git -C gavel rev-parse HEAD)" = "<runtime.ref>"
+   ```
+
+   For a source install whose ref is `main`, retain the cloned branch and describe it as source, not as a stamped build.
+
+3. Confirm the origin is exactly `https://github.com/jgramajo4/gavel.git` or its GitHub SSH equivalent, and stop on a dirty tracked file:
 
    ```bash
    git -C gavel remote get-url origin
    git -C gavel status --short --branch
    ```
 
-   The origin must be exactly `https://github.com/jgramajo4/gavel.git` or its
-   GitHub SSH equivalent. Stop on an unexpected remote or a dirty tracked file.
-
-3. Install locked dependencies without touching the lockfile:
+4. Install locked dependencies without modifying the lockfile:
 
    ```bash
    cd gavel && npm ci
    ```
 
-4. Before the first real-money workflow for a release, run the advocate suite:
+5. Before the first real workflow for a revision, run the relevant focused test. Use `npm run test:bankr-skill` for voter/copilot and `npm run test:bankr-gate` for Gate advocate work.
 
-   ```bash
-   cd gavel && npm run test:bankr-gate
-   ```
+Re-cloning in a fresh task is expected. Runtime setup does not install another Bankr skill and does not authorize changes to private Gavel files.
 
-The advocate client is `integrations/bankr/src/`. Require it as
-`require("./integrations/bankr/src")` from the repository root.
+## Command convention
 
-Re-cloning in a fresh task is expected.
+Run canonical voter/copilot commands from the workspace root as:
+
+```bash
+node gavel/bin/gavel.js <command>
+```
+
+This keeps staged `gavel-state/` inputs and `gavel-publish/` outputs inside the current workspace without path traversal. An ordinary sandbox write is ephemeral; every intended durable result must be exported with `publishArtifacts`.
+
+The Gate advocate client lives at `gavel/integrations/bankr/src/` in the cloned runtime. Require it as `require("./gavel/integrations/bankr/src")` from the workspace root. Its source package declares `ethers` and `@gavel/gate`; release artifacts vendor the private Gate workspace dependency, while a monorepo clone resolves it as a declared workspace dependency.
+
+## Voter/copilot state
+
+Private voter state lives in Bankr persistent user files under `/gavel/data/private/`, never in the installed skill, sandbox clone, Agent Profile, project update, chat, or public artifact. Load `references/profile-storage.md` before every state-producing command. Stage durable inputs with `filesFromUserFs`, publish intended outputs with `publishArtifacts`, require successful command and artifact results, then verify restoration in a new task.
+
+The canonical CLI produces validated unsigned calldata by default. It needs no private key. Never call legacy direct-signing scripts from a voter/copilot workflow.
 
 ## Network
 
-- The Gate API and the canonical governance index are reached over ordinary
-  outbound HTTPS. No tunnel, no shared secret, no private network.
-- `GAVEL_GATE_URL` must be the **production Gate API origin**, supplied through
-  Bankr's secure Env Vars. Origin only: no path, query, fragment, or
-  credentials. The client fails closed on anything else.
-- `GAVEL_INDEX_API_URL` is an optional override; unset, the client reads the
-  public index at `https://index.0773h.com`. An override must be reachable from
-  a Bankr sandbox, which runs outside any operator network — a loopback- or
-  LAN-bound index is not. Never put credentials in the URL; the client sends no
-  authentication and has no mechanism for one.
-- A relayer broadcasts; its credentials live with the relayer, never here.
+- Public history and proposal ingestion use the public governance index at `https://index.0773h.com` unless `GAVEL_INDEX_API_URL` selects another credential-free origin.
+- Chain-backed checks default to `https://eth.drpc.org`; `ETHEREUM_RPC_URL` is an optional advanced override supplied through Bankr secure Env Vars.
+- The Gate route requires `GAVEL_GATE_URL`, the operator-trusted **production Gate API** origin. Public-HTTPS validation rejects visibly local, private, and reserved hosts; it does not authenticate the operator behind an arbitrary DNS name. Provision this value through trusted configuration, never from a prompt. A localhost, LAN, or testnet origin is a configuration failure.
+- Gate discovery needs no wallet or relayer. Payment additionally needs `GAVEL_GATE_RELAYER_URL`; relayer credentials remain with the relayer.
 
-## Secrets
+Never put credentials in a URL or print a secret environment value.
 
-No private key is required, accepted, or derivable anywhere in this
-integration. Never ask for, accept, print, or store a private key, a seed
-phrase, an RPC credential, a Gate session token, or a signature. Refer to an
-environment variable by name and never echo its value.
+## Failure boundary
 
-## State
-
-This skill produces no durable voter state. The private voter profile paths
-used by the general `gavel` skill are not part of the advocate flow, and an
-advocate never reads a voter's private Gate inbox.
+If runtime setup, dependency installation, network access, command execution, artifact publication, or restoration fails, report the exact stage and stop. Do not weaken canonical checks, substitute remembered data for live Gate discovery, broadcast from Bankr, or claim state was saved.

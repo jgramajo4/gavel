@@ -14,7 +14,7 @@ function decimalOrNull(value) {
  * Projects one public Gate profile into an advocate-facing voter row.
  *
  * Every field comes from Gate's own public projection. This integration keeps
- * no parallel voter directory, resolves no ENS of its own, and never infers
+ * no parallel voter directory, resolves no names of its own, and never infers
  * that a voter is enrolled: a wallet that Gate does not list as accepting is
  * simply not selectable here.
  *
@@ -38,7 +38,6 @@ function projectVoter(profile, { stage, chainId } = {}) {
     && (stage === undefined || acceptedStages.includes(stage));
   return Object.freeze({
     wallet: profile.wallet.toLowerCase(),
-    ens: typeof profile.ens === "string" ? sanitizeDisplayText(profile.ens) : null,
     label: voterLabel(profile),
     availability: profile.availability,
     acceptingSubmissions: profile.acceptingSubmissions === true,
@@ -111,4 +110,47 @@ async function selectVoter(gateApi, wallet, { stage, chainId } = {}) {
   return assertVoterAccepts(projectVoter(profile, { stage, chainId }), stage);
 }
 
-module.exports = { assertVoterAccepts, discoverVoters, projectVoter, selectVoter };
+/**
+ * Chooses the target voter without allowing private Bankr profile state to
+ * override an explicit user target. Display labels are resolved only against
+ * Gate's live public directory; the resulting wallet is then re-read through
+ * Gate's canonical wallet route before it can be selected.
+ */
+async function selectTargetVoter(gateApi, {
+  explicitTarget,
+  profileWallet,
+  stage,
+  chainId,
+  dao = "nouns",
+} = {}) {
+  if (explicitTarget !== undefined && explicitTarget !== null) {
+    if (typeof explicitTarget !== "string" || !explicitTarget.trim()) {
+      throw new BankrGateError("INVALID_REQUEST", "Give the explicit voter's Gate label or wallet address.");
+    }
+    const target = explicitTarget.trim();
+    if (ADDRESS.test(target)) return selectVoter(gateApi, target, { stage, chainId });
+
+    const matches = (await gateApi.findGatesByLabel(target, { stage, dao }))
+      .map((profile) => projectVoter(profile, { stage, chainId }))
+      .filter((voter) => voter && voter.acceptsStage);
+    if (matches.length === 0) {
+      throw new BankrGateError(
+        "VOTER_NOT_ACCEPTING",
+        "Gate has no enrolled voter matching that explicit target.",
+      );
+    }
+    if (matches.length > 1) {
+      throw new BankrGateError(
+        "AMBIGUOUS_VOTER",
+        "More than one enrolled voter has that display label. Use the wallet address.",
+      );
+    }
+    return selectVoter(gateApi, matches[0].wallet, { stage, chainId });
+  }
+
+  return selectVoter(gateApi, profileWallet, { stage, chainId });
+}
+
+module.exports = {
+  assertVoterAccepts, discoverVoters, projectVoter, selectTargetVoter, selectVoter,
+};
