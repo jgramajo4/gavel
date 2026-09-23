@@ -18,8 +18,10 @@
 import dotenv from 'dotenv';
 import {
   loadGavelConfig,
+  resolveIndexApiEndpoint,
   saveGavelConfig,
   type GavelConfig,
+  type IndexApiEndpointMetadata,
 } from '@gavel/core';
 import { DEFAULTS } from './constants.js';
 
@@ -39,33 +41,43 @@ export interface Config extends Endpoints {
   gavel: GavelConfig;
   configPath: string;
   dataDir: string;
+  /** Safe-to-render endpoint provenance. The effective URL is never included. */
+  indexApiEndpoint: IndexApiEndpointMetadata;
   /** Migration notes from a legacy config, shown once on first launch. */
   migrationNotes: Array<{ at: string; code: string; message: string }>;
 }
 
-export function loadEndpoints(): Endpoints {
+export function loadEndpoints(): Omit<Endpoints, 'indexApiUrl'> {
   return {
     rpcUrl: process.env.RPC_URL?.trim() || DEFAULTS.RPC_URL,
     subgraphUrl: process.env.SUBGRAPH_URL?.trim() || DEFAULTS.SUBGRAPH_URL,
-    // Unset means the public index. Set but empty is the explicit opt-out back
-    // to a per-DAO source, mirroring the CLI's `--endpoint`.
-    indexApiUrl:
-      process.env.GAVEL_INDEX_API_URL === undefined
-        ? DEFAULTS.INDEX_API_URL
-        : process.env.GAVEL_INDEX_API_URL.trim(),
     easGraphqlUrl: process.env.EAS_GRAPHQL_URL?.trim() || DEFAULTS.EAS_GRAPHQL_URL,
     predictionUrl: process.env.PREDICTION_URL?.trim() || DEFAULTS.PREDICTION_URL,
   };
 }
 
+function resolveTuiIndexEndpoint(config: GavelConfig): {
+  url: string;
+  metadata: IndexApiEndpointMetadata;
+} {
+  try {
+    return resolveIndexApiEndpoint(config, process.env);
+  } catch (error) {
+    const metadata = error && typeof error === 'object' && 'metadata' in error
+      ? (error.metadata as IndexApiEndpointMetadata)
+      : { source: 'default', variable: null, status: 'invalid' } as const;
+    return { url: '', metadata };
+  }
+}
+
 export async function loadConfig(): Promise<Config> {
   const endpoints = loadEndpoints();
   const loaded = await loadGavelConfig({});
+  const indexEndpoint = resolveTuiIndexEndpoint(loaded.config);
   return {
     ...endpoints,
-    // A config-level index override wins over the environment, so a runtime
-    // that configured one in the wizard does not have to also export it.
-    indexApiUrl: loaded.config.runtime.indexApiUrl ?? endpoints.indexApiUrl,
+    indexApiUrl: indexEndpoint.url,
+    indexApiEndpoint: indexEndpoint.metadata,
     gavel: loaded.config,
     configPath: loaded.path,
     dataDir: loaded.dataDir,
@@ -76,7 +88,14 @@ export async function loadConfig(): Promise<Config> {
 /** Persist a changed Gavel config and return the updated TUI config. */
 export async function persistConfig(config: Config, next: GavelConfig): Promise<Config> {
   const saved = await saveGavelConfig(next, { dataDir: config.dataDir, file: config.configPath });
-  return { ...config, gavel: saved.config, migrationNotes: [] };
+  const indexEndpoint = resolveTuiIndexEndpoint(saved.config);
+  return {
+    ...config,
+    indexApiUrl: indexEndpoint.url,
+    indexApiEndpoint: indexEndpoint.metadata,
+    gavel: saved.config,
+    migrationNotes: [],
+  };
 }
 
 /** Whether onboarding still has to run before the main UI opens. */

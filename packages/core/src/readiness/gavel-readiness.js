@@ -25,6 +25,7 @@ const { WalletConnectionType } = require("../wallet/provider");
 const { interactiveExecutionAvailability } = require("../wallet/providers");
 const { findDaoDescriptor } = require("../dao/catalog");
 const { InferenceMode } = require("../config/schema");
+const { resolveIndexApiEndpoint } = require("../config/index-api-endpoint");
 
 const ReadinessLevel = Object.freeze({
   READY: "ready",
@@ -71,6 +72,17 @@ function resolveRuntimeReadiness(input = {}) {
   signals.config = configIssues.length === 0 ? ReadinessLevel.READY : ReadinessLevel.DEGRADED;
   for (const issue of configIssues) {
     reasons.push(reason(issue.code, issue.message, ReasonSeverity.WARNING));
+  }
+
+  let indexEndpoint;
+  try {
+    const resolved = resolveIndexApiEndpoint(config, input.env || process.env);
+    indexEndpoint = resolved.metadata;
+    signals.indexEndpoint = ReadinessLevel.READY;
+  } catch (error) {
+    indexEndpoint = error.metadata || { source: "unknown", variable: null, status: "invalid" };
+    signals.indexEndpoint = ReadinessLevel.UNAVAILABLE;
+    reasons.push(reason(error.code || "INDEX_API_URL_INVALID", error.message, ReasonSeverity.ERROR));
   }
 
   if (input.dataDirWritable === true) {
@@ -177,6 +189,7 @@ function resolveRuntimeReadiness(input = {}) {
     level: worst(...Object.values(signals)),
     signals,
     reasons,
+    indexEndpoint,
     executionMode: mode,
     humanApprovalRequired,
     interactiveAvailable: interactive.available,

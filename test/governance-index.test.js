@@ -371,13 +371,12 @@ test("index client defaults to the public endpoint and treats GAVEL_INDEX_API_UR
   }
 });
 
-// Credentials do not belong in an index URL and no documentation offers them as
-// an option; this proves that a misconfigured endpoint still cannot leak one
-// into a stored history document.
-test("index client rejects unknown DAOs and never leaks credentials into provenance", async () => {
+// Query-bearing private endpoints are allowed internally, but their credentials
+// must never enter provenance stored in a history document.
+test("index client rejects unknown DAOs and never leaks query credentials into provenance", async () => {
   const { IndexApiClient } = require("../packages/governance-index");
   const client = new IndexApiClient({
-    baseUrl: "https://user:secret@index.example/base",
+    baseUrl: "https://index.example/base?token=secret",
     fetch: async (url) => ({ ok: true, status: 200, async json(){
       if (url.includes("/sync-status")) return { sources: [{ sourceId: "s", finalizedHead: "5", updatedAt: new Date().toISOString(), lastError: null }] };
       return { items: [], nextCursor: null };

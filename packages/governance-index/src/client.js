@@ -1,11 +1,11 @@
 const { getAddress } = require("ethers");
 const { historyDocumentSchema, normalizedVoteSchema } = require("../../core/src/schema/governance");
+const { DEFAULT_INDEX_API_URL } = require("../../core/src/config/index-api-endpoint");
 const { sanitizeEndpoint } = require("./provenance");
 
 const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
 // Public read-only index. Used when no operator override is configured, so an
 // ordinary user needs no endpoint, no shared secret, and no network setup.
-const DEFAULT_INDEX_API_URL = "https://index.0773h.com";
 const DEFAULT_MAX_STALENESS_MS = 60 * 60 * 1000;
 const MAX_HISTORY_PAGES = 1000;
 const DEFAULT_MAX_RETRIES = 5;
@@ -28,6 +28,30 @@ class IndexRateLimitedError extends Error {
     this.name = "IndexRateLimitedError";
     this.code = "GAVEL_INDEX_RATE_LIMITED";
   }
+}
+
+const SAFE_TRANSPORT_CAUSES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+class IndexUnreachableError extends Error {
+  constructor(endpoint, transportCause = null, override = "") {
+    const safeCause = transportCause ? ` (${transportCause})` : "";
+    super(`Governance index request to ${endpoint} failed${safeCause}${override}`);
+    this.name = "IndexUnreachableError";
+    this.code = "GAVEL_INDEX_UNREACHABLE";
+    this.transportCause = transportCause;
+  }
+}
+
+function safeTransportCause(error) {
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "ETIMEDOUT";
+  const candidate = String(error?.cause?.code || error?.code || "");
+  return SAFE_TRANSPORT_CAUSES.has(candidate) ? candidate : null;
 }
 
 const RATE_LIMITED_MESSAGE = "The history source is temporarily rate-limited. Try again in a moment. No vote can be prepared until history sync completes.";
@@ -55,7 +79,16 @@ class IndexApiClient {
     const pageSize = Number(options.pageSize || 100);
     if (!Number.isSafeInteger(pageSize) || pageSize < 1) throw new RangeError("pageSize must be a positive integer");
     this.pageSize = Math.min(pageSize, 100);
-    if (!/^https?:\/\//.test(this.baseUrl)) throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    let parsedBaseUrl;
+    try {
+      parsedBaseUrl = new URL(this.baseUrl);
+    } catch {
+      throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    }
+    if (!/^https?:$/.test(parsedBaseUrl.protocol)) throw new TypeError("GAVEL_INDEX_API_URL must be an HTTP(S) URL");
+    if (parsedBaseUrl.username || parsedBaseUrl.password) {
+      throw new TypeError("GAVEL_INDEX_API_URL must not contain URL userinfo");
+    }
     if (typeof this.fetch !== "function") throw new TypeError("fetch is required");
     const staleness = options.maxStalenessMs != null
       ? Number(options.maxStalenessMs)
@@ -136,7 +169,7 @@ class IndexApiClient {
         // Name the endpoint that failed. The default one is chosen silently, so a
         // bare transport error leaves the caller nothing to act on. The sanitized
         // origin is used so the text can never echo a misconfigured secret.
-        throw new Error(`Governance index request to ${this.publicBaseUrl} failed: ${error.message}${override}`);
+        throw new IndexUnreachableError(this.publicBaseUrl, safeTransportCause(error), override);
       }
       if (response.status === 429) {
         if (attempt >= this.maxRetries) throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);

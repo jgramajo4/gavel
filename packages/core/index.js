@@ -37,6 +37,7 @@ module.exports = {
   ...require("./src/dao/proposal-ref"),
   ...require("./src/dao/resolve"),
   ...require("./src/config/secrets"),
+  ...require("./src/config/index-api-endpoint"),
   ...require("./src/config/schema"),
   ...require("./src/config/migrate"),
   ...require("./src/config/store"),

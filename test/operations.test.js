@@ -32,6 +32,14 @@ test("exhausted index rate limits are retryable infrastructure, not a software d
   assert.equal(failure.retryable, true);
 });
 
+test("governance index transport code is retryable without message parsing", () => {
+  const error = new Error("sanitized failure");
+  error.code = "GAVEL_INDEX_UNREACHABLE";
+  const failure = classifyOperationalFailure("history", error);
+  assert.equal(failure.category, "RETRYABLE_INFRASTRUCTURE");
+  assert.equal(failure.retryable, true);
+});
+
 test("redacts likely secrets and long transaction material from operational messages", () => {
   const message = safeOperationMessage(new Error(`RPC failed ?api_key=secret 0x${"a".repeat(128)}`));
   assert.doesNotMatch(message, /secret/);

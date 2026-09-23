@@ -10,7 +10,8 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
-const { DEFAULT_INDEX_API_URL } = require("../packages/governance-index");
+const { IndexApiClient, DEFAULT_INDEX_API_URL } = require("../packages/governance-index");
+const { classifyOperationalFailure } = require("../packages/core/src/operations/failure");
 
 const root = path.resolve(__dirname, "..");
 const cli = path.join(root, "packages", "cli", "bin", "gavel.js");
@@ -106,18 +107,68 @@ test("a transport failure names the endpoint and how to change it", async () => 
       new IndexApiClient({ fetch: failing }).fetchHistory("ens", VOTER),
       (error) => error.message.includes(DEFAULT_INDEX_API_URL)
         && /set GAVEL_INDEX_API_URL/.test(error.message)
-        // Still reads as infrastructure to a structured-error consumer.
-        && /fetch failed/.test(error.message),
+        // Still reads as infrastructure to a structured-error consumer without
+        // copying arbitrary transport text into the diagnostic.
+        && !/fetch failed/.test(error.message),
     );
 
-    // An operator who chose an endpoint is not told to set the variable again,
-    // and a credential-bearing endpoint is never echoed back.
-    const override = new IndexApiClient({ fetch: failing, baseUrl: "https://user:secret@index.example/base" });
-    await assert.rejects(override.fetchHistory("ens", VOTER), (error) =>
-      !/set GAVEL_INDEX_API_URL/.test(error.message) && !/secret/.test(error.message));
+    // Userinfo is rejected before any request, and the credential is never echoed.
+    assert.throws(
+      () => new IndexApiClient({ fetch: failing, baseUrl: "https://user:secret@index.example/base" }),
+      (error) => /must not contain URL userinfo/.test(error.message) && !/secret/.test(error.message),
+    );
+    assert.throws(
+      () => new IndexApiClient({ fetch: failing, baseUrl: "not-a-url-GAVEL_SECRET_SENTINEL" }),
+      (error) => /must be an HTTP\(S\) URL/.test(error.message) && !/GAVEL_SECRET_SENTINEL/.test(error.message),
+    );
   } finally {
     if (previous === undefined) delete process.env.GAVEL_INDEX_API_URL;
     else process.env.GAVEL_INDEX_API_URL = previous;
+  }
+});
+
+test("index transport failures use a stable retryable code and allow-listed cause", async () => {
+  const sentinel = "SENTINEL_N1_REVIEW_556677";
+  const cases = [
+    { label: "connection refused", error: Object.assign(new Error(sentinel), { code: "ECONNREFUSED" }), cause: "ECONNREFUSED" },
+    { label: "DNS missing", error: Object.assign(new Error(sentinel), { cause: { code: "ENOTFOUND" } }), cause: "ENOTFOUND" },
+    { label: "DNS temporary", error: Object.assign(new Error(sentinel), { cause: { code: "EAI_AGAIN" } }), cause: "EAI_AGAIN" },
+    { label: "timeout", error: Object.assign(new Error(sentinel), { name: "TimeoutError" }), cause: "ETIMEDOUT" },
+    { label: "request abort", error: Object.assign(new Error(sentinel), { name: "AbortError" }), cause: "ETIMEDOUT" },
+    { label: "unknown fetch failure", error: new Error(sentinel), cause: null },
+  ];
+
+  for (const entry of cases) {
+    const client = new IndexApiClient({
+      baseUrl: `https://index.example/private/${sentinel}?token=${sentinel}`,
+      fetch: async () => { throw entry.error; },
+    });
+    assert.doesNotMatch(client.publicBaseUrl, new RegExp(sentinel), `${entry.label} provenance`);
+    const error = await client.fetchHistory("ens", VOTER).catch((caught) => caught);
+    assert.equal(error.code, "GAVEL_INDEX_UNREACHABLE", entry.label);
+    assert.equal(error.transportCause, entry.cause, entry.label);
+    assert.doesNotMatch(error.message, new RegExp(sentinel), entry.label);
+    const failure = classifyOperationalFailure("history", error);
+    assert.equal(failure.category, "RETRYABLE_INFRASTRUCTURE", entry.label);
+    assert.equal(failure.retryable, true, entry.label);
+    assert.doesNotMatch(JSON.stringify(failure), new RegExp(sentinel), entry.label);
+  }
+});
+
+test("index HTTP status classification keeps existing 4xx and 5xx policy", async () => {
+  for (const [status, category, retryable] of [
+    [400, "SOFTWARE_DEFECT", false],
+    [503, "RETRYABLE_INFRASTRUCTURE", true],
+  ]) {
+    const client = new IndexApiClient({
+      baseUrl: "https://index.example",
+      fetch: async () => ({ ok: false, status, headers: { get: () => null } }),
+    });
+    const error = await client.fetchHistory("ens", VOTER).catch((caught) => caught);
+    assert.equal(error.code, undefined);
+    const failure = classifyOperationalFailure("history", error);
+    assert.equal(failure.category, category, status);
+    assert.equal(failure.retryable, retryable, status);
   }
 });
 
