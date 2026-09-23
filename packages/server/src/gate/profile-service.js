@@ -1,3 +1,5 @@
+const { isRenderableEnsName } = require("./ens");
+
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
 const AVAILABILITY = new Set(["accepting_now", "paused", "closed"]);
@@ -56,6 +58,9 @@ function publicDisplay(value) {
     if (!Object.hasOwn(value, field)) continue;
     if (typeof value[field] !== "string" && value[field] !== null) {
       throw new ProfileRequestError(`publicDisplay.${field} must be a string or null`);
+    }
+    if (field === "ens" && value[field] !== null && !isRenderableEnsName(value[field])) {
+      throw new ProfileRequestError("publicDisplay.ens must be a safe renderable ENS name or null");
     }
     result[field] = value[field];
   }
@@ -222,14 +227,13 @@ function createProfileService({ repository, authService, indexClient, baseChainI
      */
     async findPublicProfilesByLabel({ label, dao = "nouns", stage } = {}) {
       if (dao !== "nouns") throw new ProfileRequestError("only dao=nouns is supported");
-      if (typeof label !== "string" || !label.trim() || label.length > 100
-          || /[\u0000-\u001f\u007f-\u009f]/.test(label)) {
+      const expected = typeof label === "string" ? label.trim().toLocaleLowerCase("en-US") : "";
+      if (!isRenderableEnsName(expected)) {
         throw new ProfileRequestError("label is invalid");
       }
       if (stage !== undefined && !["PRE_VOTE", "VOTING"].includes(stage)) {
         throw new ProfileRequestError("stage is invalid");
       }
-      const expected = label.trim().toLocaleLowerCase("en-US");
       const matches = [];
       let after;
       while (matches.length < LABEL_MATCH_LIMIT) {
@@ -253,9 +257,11 @@ function createProfileService({ repository, authService, indexClient, baseChainI
               ? (policy.acceptPreVote === true || policy.acceptVoting === true)
               : (stage === "PRE_VOTE" ? policy.acceptPreVote === true : policy.acceptVoting === true));
           if (!acceptsStage || acceptingSubmissions !== true) continue;
-          const result = publicProfile({ ...profile, acceptingSubmissions: true }, policy, power, resolvedEns);
-          if (typeof result.label === "string"
-              && result.label.trim().toLocaleLowerCase("en-US") === expected) {
+          // Display metadata is never identity. Only an authoritative, safely
+          // renderable resolver result can select the canonical wallet.
+          if (resolvedEns?.status === "named" && isRenderableEnsName(resolvedEns.name)
+              && resolvedEns.name === expected) {
+            const result = publicProfile({ ...profile, acceptingSubmissions: true }, policy, power, resolvedEns);
             matches.push(result);
             if (matches.length === LABEL_MATCH_LIMIT) break;
           }

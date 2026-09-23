@@ -257,7 +257,7 @@ function createGateRelayService({
     return Object.freeze({ txHash, chainId, relayer: relayerAddress });
   }
 
-  async function broadcast(quote, signature, claim) {
+  async function broadcast(quote, signature, claim, lockedClient) {
     const quoteId = String(quote.message.quoteId).toLowerCase();
     if (claim.disposition !== "claimed") {
       if (claim.status === "reconciliation_required") {
@@ -280,23 +280,25 @@ function createGateRelayService({
       // before the external side effect begins.
       prepared = await relayer.preflightSettlement(transaction);
     } catch (error) {
-      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken, definitelyNotSent: true });
+      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken,
+        definitelyNotSent: true, client: lockedClient });
       throw error;
     }
     await relayStore.markRelayBroadcasting({ quoteId, claimToken: claim.claimToken,
-      txHash: prepared.txHash, rawTransaction: prepared.rawTransaction });
+      txHash: prepared.txHash, rawTransaction: prepared.rawTransaction, client: lockedClient });
     try {
       const txHash = await relayer.broadcastSettlement(prepared);
       if (String(txHash).toLowerCase() !== String(prepared.txHash).toLowerCase()) {
         throw new Error("relayer broadcast hash did not match the prepared transaction");
       }
-      await relayStore.completeRelayBroadcast({ quoteId, txHash: prepared.txHash });
+      await relayStore.completeRelayBroadcast({ quoteId, txHash: prepared.txHash, client: lockedClient });
       return receipt(prepared.txHash);
     } catch {
       // Once broadcast begins, an RPC error cannot prove that the node did not
       // accept the signed transaction. Keep its deterministic hash and never
       // blindly send another transaction for this authorization.
-      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken, definitelyNotSent: false });
+      await relayStore.failRelayAttempt({ quoteId, claimToken: claim.claimToken,
+        definitelyNotSent: false, client: lockedClient });
       throw new RelayRequestError("relay outcome requires operator reconciliation", 503,
         "RELAY_RECONCILIATION_REQUIRED");
     }
@@ -360,7 +362,7 @@ function createGateRelayService({
     };
     const attempt = remember(quoteId, relayStore.withRelayAccountLock(
       { chainId, relayerAddress, relayIdentity },
-      (claim) => broadcast(quote, signature, claim),
+      (claim, lockedClient) => broadcast(quote, signature, claim, lockedClient),
     ).catch((error) => {
       if (error?.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED") {
         throw new RelayRequestError("relay account requires operator reconciliation", 503,

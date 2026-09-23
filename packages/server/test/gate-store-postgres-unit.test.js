@@ -912,20 +912,32 @@ test("relay account lock claims on the dedicated session and destroys it when un
       if (/relay_account_ready/.test(sql)) return { rows: [{ ready: true }] };
       if (/claim_relay_attempt/.test(sql)) return { rows: [{ ...identity, status: "claimed", claimGeneration: "1",
         claimExpiresAt: new Date(), txHash: null, rawTransaction: null, disposition: "claimed", claimToken: "1" }] };
+      if (/fail_relay_attempt/.test(sql)) return { rows: [{ ...identity, status: "retryable", claimGeneration: "1",
+        claimExpiresAt: new Date(), txHash: null, rawTransaction: null }] };
       if (/pg_advisory_unlock/.test(sql)) return { rows: [{ unlocked: false }] };
       throw new Error(`unexpected SQL: ${sql}`);
     },
     release(error) { releasedWith = error; },
   };
-  const store = new PostgresGateStore({ pool: { connect: async () => client } });
+  const store = new PostgresGateStore({ pool: {
+    connect: async () => client,
+    query() { throw new Error("locked relay work must not acquire a second pooled connection"); },
+  } });
   let operationClaim;
+  let operationClient;
   await assert.rejects(
-    store.withRelayAccountLock({ chainId: "8453", relayerAddress: B, relayIdentity: identity }, async (claim) => {
+    store.withRelayAccountLock({ chainId: "8453", relayerAddress: B, relayIdentity: identity }, async (claim, lockedClient) => {
       operationClaim = claim;
+      operationClient = lockedClient;
+      await store.failRelayAttempt({ quoteId: identity.quoteId, claimToken: claim.claimToken,
+        definitelyNotSent: true, client: lockedClient });
     }),
     /lock release was not confirmed/,
   );
   assert.equal(operationClaim.disposition, "claimed");
+  assert.equal(operationClient, client);
+  assert.ok(calls.findIndex((sql) => /claim_relay_attempt/.test(sql)) < calls.findIndex((sql) => /fail_relay_attempt/.test(sql)));
+  assert.ok(calls.findIndex((sql) => /fail_relay_attempt/.test(sql)) < calls.findIndex((sql) => /pg_advisory_unlock/.test(sql)));
   assert.ok(calls.findIndex((sql) => /claim_relay_attempt/.test(sql)) < calls.findIndex((sql) => /pg_advisory_unlock/.test(sql)));
   assert.match(releasedWith.message, /lock release was not confirmed/);
 });

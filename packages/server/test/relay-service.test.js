@@ -155,6 +155,35 @@ test("a valid settlement is rebuilt server-side and broadcast gas-only", async (
   assert.notEqual(decoded.authorization.from, RELAYER);
 });
 
+test("every relay state transition uses the lock-scoped database client", async () => {
+  const memory = new MemoryGateStore();
+  const lockedClient = Object.freeze({ kind: "locked-client" });
+  const seen = [];
+  const store = {
+    async withRelayAccountLock(account, operation) {
+      return memory.withRelayAccountLock(account, (claim) => operation(claim, lockedClient));
+    },
+    async claimRelayAttempt(input) { return memory.claimRelayAttempt(input); },
+    async markRelayBroadcasting(input) {
+      seen.push(["broadcasting", input.client]);
+      return memory.markRelayBroadcasting(input);
+    },
+    async completeRelayBroadcast(input) {
+      seen.push(["complete", input.client]);
+      return memory.completeRelayBroadcast(input);
+    },
+    async failRelayAttempt(input) {
+      seen.push(["fail", input.client]);
+      return memory.failRelayAttempt(input);
+    },
+  };
+  const { service } = await harness({ store });
+  await service.relaySettlement({
+    session: SESSION, publicId: PUBLIC_ID, request: relayRequest(await authorizationSignature()),
+  });
+  assert.deepEqual(seen, [["broadcasting", lockedClient], ["complete", lockedClient]]);
+});
+
 test("an arbitrary destination, calldata, or value cannot be submitted", async () => {
   const { service, relay } = await harness();
   const signature = await authorizationSignature();

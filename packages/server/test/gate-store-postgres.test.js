@@ -1255,6 +1255,7 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
   skip: canRun ? false : skipReason,
 }, async () => {
   const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const saturationPools = [];
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -1277,9 +1278,9 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
       token: TOKEN, gavelRecipient: GAVEL_RECIPIENT, deploymentBlock: "1", contractCodeHash: CODE_HASH,
       issuanceActive: true, config: { environment: "production", overlap: 64 } });
 
-    const makeIdentity = async (suffix) => {
+    const makeIdentity = async (suffix, overridePayerDigit) => {
       const input = issuance(suffix);
-      const payerDigit = { b: "8", c: "9", d: "4", e: "5", f: "6" }[suffix];
+      const payerDigit = overridePayerDigit ?? { b: "8", c: "9", d: "4", e: "5", f: "6" }[suffix] ?? suffix;
       const payer = suffix === "a" ? PAYER : addr(payerDigit);
       input.context.authenticatedSender = payer;
       input.submission.payer = payer;
@@ -1322,18 +1323,18 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     let releaseFirst;
     let secondEntered = false;
     const firstLock = store.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT,
-      relayIdentity: firstLockIdentity }, async (lockClaim) => {
+      relayIdentity: firstLockIdentity }, async (lockClaim, lockedClient) => {
       await new Promise((resolve) => { releaseFirst = resolve; });
       await store.failRelayAttempt({ quoteId: firstLockIdentity.quoteId,
-        claimToken: lockClaim.claimToken, definitelyNotSent: true });
+        claimToken: lockClaim.claimToken, definitelyNotSent: true, client: lockedClient });
     });
     while (!releaseFirst) await new Promise((resolve) => setImmediate(resolve));
     const secondLock = restarted.withRelayAccountLock(
       { chainId: "8453", relayerAddress: GAVEL_RECIPIENT, relayIdentity: secondLockIdentity },
-      async (lockClaim) => {
+      async (lockClaim, lockedClient) => {
         secondEntered = true;
         await restarted.failRelayAttempt({ quoteId: secondLockIdentity.quoteId,
-          claimToken: lockClaim.claimToken, definitelyNotSent: true });
+          claimToken: lockClaim.claimToken, definitelyNotSent: true, client: lockedClient });
       },
     );
     await new Promise((resolve) => setImmediate(resolve));
@@ -1341,6 +1342,100 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     releaseFirst();
     await Promise.all([firstLock, secondLock]);
     assert.equal(secondEntered, true);
+
+    function saturatedStore(max) {
+      const physicalPool = new Pool({ connectionString: databaseUrl, max });
+      saturationPools.push(physicalPool);
+      return { physicalPool, store: new PostgresGateStore({
+        pool: effectiveRolePool(physicalPool, "gavel_gate"),
+      }) };
+    }
+    async function completeUnderLock(lockedStore, relayIdentity, txDigit, duringBroadcast = async () => {}) {
+      return lockedStore.withRelayAccountLock(
+        { chainId: "8453", relayerAddress: GAVEL_RECIPIENT, relayIdentity },
+        async (lockClaim, lockedClient) => {
+          if (lockClaim.disposition !== "claimed") return lockClaim.txHash;
+          const txHash = hash(txDigit);
+          await lockedStore.markRelayBroadcasting({ quoteId: relayIdentity.quoteId,
+            claimToken: lockClaim.claimToken, txHash, rawTransaction, client: lockedClient });
+          await duringBroadcast();
+          await lockedStore.completeRelayBroadcast({ quoteId: relayIdentity.quoteId,
+            txHash, client: lockedClient });
+          return txHash;
+        },
+      );
+    }
+
+    const one = saturatedStore(1);
+    assert.equal(await completeUnderLock(one.store, firstLockIdentity, "d"), hash("d"),
+      "pool size 1 completes without requesting a second connection");
+
+    const two = saturatedStore(2);
+    assert.deepEqual(await Promise.all([
+      completeUnderLock(two.store, retryIdentity, "b"),
+      completeUnderLock(two.store, secondLockIdentity, "e"),
+    ]), [hash("b"), hash("e")], "pool size 2 completes two concurrent different quotes");
+
+    const three = saturatedStore(3);
+    const threeIdentities = await Promise.all([makeIdentity("0", "a"), makeIdentity("1", "b"), makeIdentity("2", "c")]);
+    let active = 0;
+    let peak = 0;
+    await Promise.all(threeIdentities.map((entry, index) => completeUnderLock(three.store, entry,
+      String(index), async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+      })));
+    assert.equal(peak, 1, "pool max N with N operations preserves account nonce serialization");
+
+    const duplicateIdentity = await makeIdentity("f");
+    const duplicate = saturatedStore(2);
+    const duplicateA = new PostgresGateStore({ pool: effectiveRolePool(duplicate.physicalPool, "gavel_gate") });
+    const duplicateB = new PostgresGateStore({ pool: effectiveRolePool(duplicate.physicalPool, "gavel_gate") });
+    let broadcasts = 0;
+    const duplicateResults = await Promise.all([
+      completeUnderLock(duplicateA, duplicateIdentity, "f", async () => { broadcasts += 1; }),
+      completeUnderLock(duplicateB, duplicateIdentity, "f", async () => { broadcasts += 1; }),
+    ]);
+    assert.deepEqual(duplicateResults, [hash("f"), hash("f")]);
+    assert.equal(broadcasts, 1, "same quote across store instances broadcasts once");
+
+    const recovery = saturatedStore(1);
+    const failedIdentity = await makeIdentity("5", "d");
+    await assert.rejects(recovery.store.withRelayAccountLock(
+      { chainId: "8453", relayerAddress: GAVEL_RECIPIENT, relayIdentity: failedIdentity },
+      async (lockClaim, lockedClient) => {
+        await recovery.store.failRelayAttempt({ quoteId: failedIdentity.quoteId,
+          claimToken: lockClaim.claimToken, definitelyNotSent: true, client: lockedClient });
+        throw new Error("simulated operation failure");
+      },
+    ), /simulated operation failure/);
+    assert.equal(await completeUnderLock(recovery.store, failedIdentity, "5"), hash("5"),
+      "an operation error releases the lock for the next relay");
+
+    const timeoutIdentity = await makeIdentity("4", "e");
+    await assert.rejects(recovery.store.withRelayAccountLock(
+      { chainId: "8453", relayerAddress: GAVEL_RECIPIENT, relayIdentity: timeoutIdentity },
+      async (lockClaim, lockedClient) => {
+        try {
+          await lockedClient.query("SET statement_timeout=5");
+          await lockedClient.query("SELECT pg_sleep(0.05)");
+        } catch (error) {
+          await recovery.store.failRelayAttempt({ quoteId: timeoutIdentity.quoteId,
+            claimToken: lockClaim.claimToken, definitelyNotSent: true, client: lockedClient });
+          throw error;
+        }
+      },
+    ), (error) => error.code === "57014");
+    assert.equal(await completeUnderLock(recovery.store, timeoutIdentity, "4"), hash("4"),
+      "a database timeout does not poison the one-connection pool");
+
+    await Promise.all(Array.from({ length: 6 }, () => completeUnderLock(
+      recovery.store, timeoutIdentity, "4")));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(recovery.physicalPool.waitingCount, 0);
+    assert.ok(recovery.physicalPool.totalCount <= 1, "repeated operations do not leak connections");
 
     const ambiguousIdentity = await makeIdentity("c");
     const ambiguousClaim = await store.claimRelayAttempt(ambiguousIdentity);
@@ -1354,7 +1449,7 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     let unsafeOperationRan = false;
     await assert.rejects(
       restarted.withRelayAccountLock({ chainId: "8453", relayerAddress: GAVEL_RECIPIENT,
-        relayIdentity: await makeIdentity("f") }, async () => {
+        relayIdentity: duplicateIdentity }, async () => {
         unsafeOperationRan = true;
       }),
       (error) => error.code === "RELAY_ACCOUNT_RECONCILIATION_REQUIRED",
@@ -1377,6 +1472,7 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     );
     assert.deepEqual((await rolePool.query("SELECT requirement FROM gate.runtime_privilege_audit() WHERE NOT granted")).rows, []);
   } finally {
+    await Promise.all(saturationPools.map((entry) => entry.end().catch(() => {})));
     await pool.query("DROP SCHEMA IF EXISTS gate CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS gate_public CASCADE").catch(() => {});
     await pool.query("DELETE FROM public.schema_migrations WHERE version='gate/001_gate-v3'").catch(() => {});

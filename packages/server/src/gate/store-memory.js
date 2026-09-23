@@ -37,6 +37,7 @@ const PUBLIC_ID_ATTEMPTS = 5;
 const PROFILE_PAGE_LIMIT = 50;
 const PROFILE_MAX_OFFSET = 10_000;
 const PRODUCTION_BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const { isRenderableEnsName } = require("./ens");
 
 function clone(value) { return value == null ? value : structuredClone(value); }
 function publicDisplay(value) {
@@ -45,6 +46,9 @@ function publicDisplay(value) {
   if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
   for (const field of fields) {
     if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+    if (field === "ens" && value[field] !== null && !isRenderableEnsName(value[field])) {
+      throw new TypeError("display.ens must be a safe renderable ENS name or null");
+    }
   }
   return value;
 }
@@ -1474,7 +1478,7 @@ class MemoryGateStore {
         throw error;
       }
       const claim = await this.claimRelayAttempt(relayIdentity);
-      return await operation(claim);
+      return await operation(claim, null);
     } finally {
       release();
       if (this.#relayAccountQueues.get(account) === queued) this.#relayAccountQueues.delete(account);

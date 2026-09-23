@@ -544,6 +544,14 @@ test("profile update persists only allowlisted scalar public display fields", as
   const nested = enrollmentProof();
   nested.publicDisplay = { ens: { destination: "secret@example.com" } };
   await assert.rejects(service.updateProfile({ session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: nested }), /publicDisplay\.ens/);
+
+  for (const ens of ["delegate\u202e.gramajo.eth", "nоuns.eth", "UPPER.eth", "not-ens"]) {
+    const unsafe = enrollmentProof();
+    unsafe.publicDisplay = { ens };
+    await assert.rejects(service.updateProfile({
+      session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: unsafe,
+    }), /publicDisplay\.ens/);
+  }
 });
 
 test("authenticated profile update encrypts a private top-level delivery destination and stores only its envelope transactionally", async () => {

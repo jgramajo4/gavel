@@ -17,6 +17,7 @@ const {
   issuedQuotePayload,
   signIssuedQuote,
 } = require("./quote-issuance");
+const { isRenderableEnsName } = require("./ens");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
@@ -125,6 +126,9 @@ function publicDisplay(value) {
   if (fields.some((field) => !["ens", "message"].includes(field))) throw new TypeError("display contains a non-public field");
   for (const field of fields) {
     if (typeof value[field] !== "string" && value[field] !== null) throw new TypeError(`display.${field} must be a string or null`);
+    if (field === "ens" && value[field] !== null && !isRenderableEnsName(value[field])) {
+      throw new TypeError("display.ens must be a safe renderable ENS name or null");
+    }
   }
   return value;
 }
@@ -788,7 +792,7 @@ class PostgresGateStore {
       }
       const row = (await client.query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", identity)).rows[0];
       invariant(row, "relay attempt is unavailable");
-      return await operation(relayAttempt(row));
+      return await operation(relayAttempt(row), client);
     } finally {
       try {
         if (locked) {
@@ -806,37 +810,37 @@ class PostgresGateStore {
     }
   }
 
-  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000 } = {}) {
+  async claimRelayAttempt({ quoteId, authorizationNonce, chainId, splitter, token, leaseMs = 30_000, client } = {}) {
     const id = bytes32(quoteId, "quoteId");
     const nonce = bytes32(authorizationNonce, "authorization nonce");
     if (nonce !== id) throw new TypeError("authorization nonce must equal quoteId");
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
-    const row = (await this.pool.query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", [
+    const row = (await (client ?? this.pool).query("SELECT * FROM gate.claim_relay_attempt($1,$2,$3,$4,$5,$6)", [
       id, nonce, positiveBigint(chainId, "chainId"), address(splitter, "splitter"), address(token, "token"), leaseMs,
     ])).rows[0];
     invariant(row, "relay attempt is unavailable");
     return relayAttempt(row);
   }
 
-  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction: transaction } = {}) {
-    const row = (await this.pool.query("SELECT r.* FROM gate.mark_relay_broadcasting($1,$2,$3,$4) r", [
+  async markRelayBroadcasting({ quoteId, claimToken, txHash, rawTransaction: transaction, client } = {}) {
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.mark_relay_broadcasting($1,$2,$3,$4) r", [
       bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), bytes32(txHash, "txHash"), rawTransaction(transaction),
     ])).rows[0];
     invariant(row, "relay claim is unavailable");
     return relayAttempt(row);
   }
 
-  async completeRelayBroadcast({ quoteId, txHash } = {}) {
-    const row = (await this.pool.query("SELECT r.* FROM gate.complete_relay_broadcast($1,$2) r", [
+  async completeRelayBroadcast({ quoteId, txHash, client } = {}) {
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.complete_relay_broadcast($1,$2) r", [
       bytes32(quoteId, "quoteId"), bytes32(txHash, "txHash"),
     ])).rows[0];
     invariant(row, "relay broadcast is unavailable");
     return relayAttempt(row);
   }
 
-  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false } = {}) {
+  async failRelayAttempt({ quoteId, claimToken, definitelyNotSent = false, client } = {}) {
     if (typeof definitelyNotSent !== "boolean") throw new TypeError("definitelyNotSent must be boolean");
-    const row = (await this.pool.query("SELECT r.* FROM gate.fail_relay_attempt($1,$2,$3) r", [
+    const row = (await (client ?? this.pool).query("SELECT r.* FROM gate.fail_relay_attempt($1,$2,$3) r", [
       bytes32(quoteId, "quoteId"), relayClaimToken(claimToken), definitelyNotSent,
     ])).rows[0];
     invariant(row, "relay attempt is unavailable");
