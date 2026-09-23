@@ -90,15 +90,15 @@ function publicPolicy(policy) {
  * a verified miss: `unnamed` publishes `null` rather than letting a wallet's
  * own self-declared `publicDisplay.ens` stand in as an identity it never
  * proved. The stored display value survives only where no resolution happened
- * at all — no resolver configured, or the RPC was unreachable — which keeps a
- * deployment without a mainnet endpoint behaving exactly as it did before.
+ * at all — no resolver configured, or the RPC was unreachable — and only when
+ * it satisfies the same safe/renderable format enforced for new writes. This
+ * keeps legacy malformed or bidi-controlled values out of public labels.
  */
 function displayLabel(profile, resolvedEns) {
   if (resolvedEns?.status === "named") return { label: resolvedEns.name };
   if (resolvedEns?.status === "unnamed") return { label: null };
-  return typeof profile.display?.ens === "string" || profile.display?.ens === null
-    ? { label: profile.display.ens }
-    : {};
+  if (profile.display?.ens === null) return { label: null };
+  return isRenderableEnsName(profile.display?.ens) ? { label: profile.display.ens } : {};
 }
 
 function publicProfile(profile, policy, power, resolvedEns) {

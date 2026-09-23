@@ -185,6 +185,14 @@ test("with no resolver configured a stored display name is exposed only as a gen
     await profileServiceWith({ ensResolver: null }).getPublicProfile(WALLET), "label"));
 });
 
+test("legacy malformed or bidi display names are never published as labels", async () => {
+  for (const ens of ["delegate\u202e.gramajo.eth", "nоuns.eth", "UPPER.eth", "not-ens"]) {
+    const service = profileServiceWith({ ensResolver: null, display: { ens } });
+    assert.equal(Object.hasOwn(await service.getPublicProfile(WALLET), "label"), false);
+    assert.equal(Object.hasOwn((await service.listPublicProfiles({}))[0], "label"), false);
+  }
+});
+
 test("an unreachable ENS endpoint never fails a Gate read", async () => {
   const service = profileServiceWith({
     ensResolver: createEnsNameResolver({ provider: stubProvider(async () => { throw new Error("rpc down"); }) }),
