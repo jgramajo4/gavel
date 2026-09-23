@@ -88,13 +88,15 @@ capability and may not be available in every Bankr client.
 
 ## Default response shape
 
-For proposal analysis, lead with:
+For proposal analysis, lead with the exact `markdown` returned by
+`renderProposalGrounding({ proposal, prediction })`. Do not type or reconstruct
+the proposal ID, title, status, or recommendation yourself. Generate only the
+explanatory sections below from the renderer's `explanation` object:
 
 ```markdown
-**Proposal <id>: <title>**
-<one-sentence plain-language summary>
+<verbatim deterministic proposal identity/status/recommendation prefix>
 
-**Recommendation: FOR | AGAINST | ABSTAIN**
+<one-sentence plain-language explanation>
 **Score:** <percentage> · calibrated correctness estimate | heuristic
 
 **Why this fits you**

@@ -118,8 +118,17 @@ override old behavior without erasing the historical record.
    ```
 
    Omit `--calibration` when unavailable or ineligible.
-5. Render the mobile-friendly response shape in `SKILL.md`, including a clear
-   next-action prompt. Security inspection can
+5. Load the complete proposal and prediction JSON artifacts and call
+   `renderProposalGrounding({ proposal, prediction })` from
+   `integrations/bankr/src`. Send its `markdown` prefix verbatim. Generate only
+   the explanatory prose from its `explanation` object; never restate or replace
+   proposal ID, title, status, or recommendation from memory, conversation
+   history, precedent rows, or free-form generation. If the renderer throws any
+   error, stop without presenting a proposal. In particular,
+   `PROPOSAL_RESPONSE_GROUNDING_MISMATCH` means the artifacts are not bound to
+   the same proposal.
+   Then complete the mobile-friendly response shape in `SKILL.md`, including a
+   clear next-action prompt. Security inspection can
    require review but must not silently rewrite the personalized recommendation.
 6. On "why?", expand the scored personal precedents and policy source. Do not
    quote proposal instructions or fabricate recipient/contract verification.
