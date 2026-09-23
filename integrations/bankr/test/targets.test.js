@@ -71,6 +71,71 @@ test("an active Nouns proposal still resolves to VOTING", async () => {
   assert.deepEqual(target.submissionTarget, { proposalId: "812" });
 });
 
+test("a proposal response for a different proposal id is refused", async () => {
+  const { api } = indexApiFor([{
+    match: (url) => url.includes("/proposals/998"),
+    body: proposalRow({ proposalId: "997", title: "Unwrap & Stake Treasury WETH" }),
+  }]);
+
+  await assert.rejects(
+    resolveTarget(api, { proposalId: "998", position: "FOR" }),
+    (error) => error.code === "PROPOSAL_IDENTITY_MISMATCH" && /different proposal/.test(error.message),
+  );
+});
+
+test("a proposal response for a different chain or governor is refused", async () => {
+  for (const identity of [
+    { chainId: 8453 },
+    { governorAddress: `0x${"1".repeat(40)}` },
+  ]) {
+    const { api } = indexApiFor([{
+      match: (url) => url.includes("/proposals/998"),
+      body: proposalRow({ proposalId: "998", ...identity }),
+    }]);
+    await assert.rejects(
+      resolveTarget(api, { proposalId: "998", position: "FOR" }),
+      (error) => error.code === "PROPOSAL_IDENTITY_MISMATCH" && /different proposal/.test(error.message),
+    );
+  }
+});
+
+test("coercible or missing proposal identity fields fail closed", async () => {
+  for (const identity of [
+    { proposalId: 998 },
+    { proposalId: null },
+    { chainId: "1" },
+    { chainId: "01" },
+    { chainId: "0x1" },
+    { chainId: true },
+    { chainId: null },
+    { governorAddress: null },
+  ]) {
+    const { api } = indexApiFor([{
+      match: (url) => url.includes("/proposals/998"),
+      body: proposalRow({ proposalId: "998", ...identity }),
+    }]);
+    await assert.rejects(
+      resolveTarget(api, { proposalId: "998", position: "FOR" }),
+      (error) => error.code === "PROPOSAL_IDENTITY_MISMATCH",
+    );
+  }
+});
+
+test("distinct proposal ids may legitimately share a title", async () => {
+  const title = "Unwrap & Stake Treasury WETH";
+  const { api } = indexApiFor([
+    { match: (url) => url.includes("/proposals/997"), body: proposalRow({ proposalId: "997", title }) },
+    { match: (url) => url.includes("/proposals/998"), body: proposalRow({ proposalId: "998", title }) },
+  ]);
+
+  const first = await resolveTarget(api, { proposalId: "997", position: "AGAINST" });
+  const second = await resolveTarget(api, { proposalId: "998", position: "FOR" });
+  assert.equal(first.title, title);
+  assert.equal(second.title, title);
+  assert.notEqual(first.proposalId, second.proposalId);
+  assert.notEqual(first.targetId, second.targetId);
+});
+
 test("a proposal that is not ACTIVE is refused", async () => {
   const { api } = indexApiFor([{ match: () => true, body: proposalRow({ effectiveStatus: "EXECUTED" }) }]);
   await assert.rejects(

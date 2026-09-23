@@ -16,6 +16,7 @@ const { TrackingState, trackingStateFor } = require("../../core/src/governance/l
 const { redactErrorMessage } = require("./redaction");
 const { canonicalGateActions } = require("./gate-action");
 const { canonicalCandidateTarget } = require("./candidate-target");
+const { DAO_CONFIGS } = require("./config");
 
 // A WARM proposal (succeeded, queued) can still change, but not on the cadence a
 // live vote does. Re-reading it once a quarter hour is enough and keeps a steady
@@ -647,7 +648,8 @@ class PostgresGovernanceStore {
 
   async getGateProposal(daoId, id) {
     const row = (await this.pool.query(`
-      SELECT p.proposal_id::text AS "proposalId",p.effective_status AS "effectiveStatus",
+      SELECT p.proposal_id::text AS "proposalId",p.normalized->>'title' AS title,
+        p.normalized->>'proposer' AS proposer,p.effective_status AS "effectiveStatus",
         provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
         provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
         COALESCE((
@@ -668,7 +670,11 @@ class PostgresGovernanceStore {
     `, [daoId, id])).rows[0];
     if (!row) return null;
     return {
+      chainId: DAO_CONFIGS[daoId].chainId,
+      governorAddress: DAO_CONFIGS[daoId].currentGovernor,
       proposalId: row.proposalId,
+      title: row.title,
+      proposer: row.proposer,
       refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
       sourceBlock: row.sourceBlock,
       sourceBlockHash: row.sourceBlockHash,
