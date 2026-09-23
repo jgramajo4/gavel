@@ -30,6 +30,30 @@ class IndexRateLimitedError extends Error {
   }
 }
 
+const SAFE_TRANSPORT_CAUSES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ECONNRESET",
+]);
+
+class IndexUnreachableError extends Error {
+  constructor(endpoint, transportCause = null, override = "") {
+    const safeCause = transportCause ? ` (${transportCause})` : "";
+    super(`Governance index request to ${endpoint} failed${safeCause}${override}`);
+    this.name = "IndexUnreachableError";
+    this.code = "GAVEL_INDEX_UNREACHABLE";
+    this.transportCause = transportCause;
+  }
+}
+
+function safeTransportCause(error) {
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "ETIMEDOUT";
+  const candidate = String(error?.cause?.code || error?.code || "");
+  return SAFE_TRANSPORT_CAUSES.has(candidate) ? candidate : null;
+}
+
 const RATE_LIMITED_MESSAGE = "The history source is temporarily rate-limited. Try again in a moment. No vote can be prepared until history sync completes.";
 
 function positiveNumber(value, name) {
@@ -145,9 +169,7 @@ class IndexApiClient {
         // Name the endpoint that failed. The default one is chosen silently, so a
         // bare transport error leaves the caller nothing to act on. The sanitized
         // origin is used so the text can never echo a misconfigured secret.
-        const causeCode = String(error?.cause?.code || error?.code || "");
-        const safeCause = /^[A-Z][A-Z0-9_]{1,40}$/.test(causeCode) ? ` (${causeCode})` : "";
-        throw new Error(`Governance index request to ${this.publicBaseUrl} failed${safeCause}${override}`);
+        throw new IndexUnreachableError(this.publicBaseUrl, safeTransportCause(error), override);
       }
       if (response.status === 429) {
         if (attempt >= this.maxRetries) throw new IndexRateLimitedError(RATE_LIMITED_MESSAGE);

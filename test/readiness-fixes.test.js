@@ -294,7 +294,7 @@ test("a disconnected local signer cannot become false-ready through plain connec
 });
 
 test("userinfo and malformed endpoint values fail safely without leaking their sentinel", async () => {
-  const secret = "GAVEL_USERINFO_SECRET_SENTINEL";
+  const secret = "SENTINEL_N1_REVIEW_556677";
   const cases = [
     { runtime: { indexApiUrl: `https://u:${secret}@index.example` }, env: {} },
     { runtime: { indexApiUrlVariable: "MY_IDX" }, env: { MY_IDX: `https://u:${secret}@127.0.0.1:9/` } },
@@ -330,6 +330,40 @@ test("userinfo and malformed endpoint values fail safely without leaking their s
     write: (chunk) => write.push(String(chunk)),
   });
   assert.ok(!write.join("\n").includes(secret));
+
+  for (const referencedUrl of [
+    `http://127.0.0.1:9/private/${secret}`,
+    `http://127.0.0.1:9/private?token=${secret}`,
+  ]) {
+    const statusOutput = [];
+    await readinessCommand(["--json"], {
+      dataDir,
+      env: { MY_IDX: referencedUrl },
+      write: (chunk) => statusOutput.push(String(chunk)),
+    });
+    await configCommand(["show", "--json"], {
+      dataDir,
+      env: { MY_IDX: referencedUrl },
+      write: (chunk) => statusOutput.push(String(chunk)),
+    });
+    assert.doesNotMatch(statusOutput.join("\n"), new RegExp(secret));
+
+    await assert.rejects(
+      execFileAsync(process.execPath, [CLI, "history", VOTER, "--dao", "ens", "--stdout"], {
+        cwd: ROOT,
+        env: {
+          ...process.env,
+          GAVEL_DATA_DIR: dataDir,
+          GAVEL_STRUCTURED_ERRORS: "1",
+          MY_IDX: referencedUrl,
+        },
+      }),
+      (error) => {
+        const output = `${error.stdout}\n${error.stderr}\n${error.message}`;
+        return !output.includes(secret) && /RETRYABLE_INFRASTRUCTURE/.test(output);
+      },
+    );
+  }
 });
 
 test("transport errors retain a safe cause code but never raw fetch text", async () => {
@@ -429,7 +463,9 @@ test("index configuration errors are classified as user correction", () => {
     "INDEX_URL_CARRIES_CREDENTIALS",
   ]) {
     const error = Object.assign(new Error("fix index configuration"), { code });
-    assert.equal(classifyOperationalFailure("history", error).category, "USER_CORRECTION_REQUIRED");
+    const failure = classifyOperationalFailure("history", error);
+    assert.equal(failure.category, "USER_CORRECTION_REQUIRED");
+    assert.equal(failure.retryable, false);
   }
 });
 
