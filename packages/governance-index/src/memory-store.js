@@ -34,6 +34,28 @@ function decodeProposalCursor(value) {
   catch { throw new TypeError("invalid cursor"); }
 }
 const { TrackingState, trackingStateFor, presentProposal } = require("../../core/src/governance/lifecycle");
+const { assertCanonicalProposalIdentity } = require("@gavel/proposal-identity");
+function proposalRead(row) {
+  const normalized = row.normalized || {};
+  for (const key of ["dao", "chainId", "governorAddress"]) {
+    if (row[key] !== undefined && normalized[key] !== undefined
+      && (key === "governorAddress"
+        ? String(row[key]).toLowerCase() !== String(normalized[key]).toLowerCase()
+        : row[key] !== normalized[key])) {
+      throw new Error(`Stored proposal ${key} conflicts with its normalized document`);
+    }
+  }
+  if (row.identity !== undefined && normalized.identity !== undefined) {
+    assertCanonicalProposalIdentity(normalized.identity, row.identity);
+  }
+  return {
+    ...presentProposal(normalized, row), daoId: row.daoId, proposalId: row.proposalId,
+    ...(row.dao !== undefined ? { dao: row.dao } : {}),
+    ...(row.chainId !== undefined ? { chainId: row.chainId } : {}),
+    ...(row.governorAddress !== undefined ? { governorAddress: row.governorAddress } : {}),
+    ...(row.identity !== undefined ? { identity: row.identity } : {}),
+  };
+}
 // Mirrors the Postgres store: a WARM proposal is re-read on a slower cadence
 // than a live vote, and a FINAL one is not re-read at all.
 const DEFAULT_WARM_REFRESH_MS = 15 * 60 * 1000;
@@ -228,7 +250,7 @@ class MemoryGovernanceStore {
   async getDao(id) { return this.daos.get(id) || null; }
   async getProposal(daoId, proposalId) {
     const row = this.proposals.find((x) => x.daoId === daoId && x.proposalId === proposalId);
-    return row ? presentProposal(row.normalized, row) : null;
+    return row ? proposalRead(row) : null;
   }
   async getGateProposal(daoId, proposalId) {
     const proposal = this.proposals.find((row) => row.daoId === daoId && row.proposalId === proposalId);
@@ -275,7 +297,7 @@ class MemoryGovernanceStore {
     if (decoded) rows = rows.filter((x) => BigInt(x.proposalId) < BigInt(decoded));
     const selected = rows.slice(0, limit);
     return {
-      items: selected.map((row) => presentProposal(row.normalized, row)),
+      items: selected.map(proposalRead),
       nextCursor: rows.length > limit ? encodeProposalCursor(selected.at(-1).proposalId) : null,
     };
   }

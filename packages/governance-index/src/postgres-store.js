@@ -712,6 +712,7 @@ class PostgresGovernanceStore {
   async getProposal(daoId, id) {
     const row = (await this.pool.query(`
       SELECT p.dao_id AS dao,p.proposal_id::text AS "proposalId",p.normalized,
+        p.proposal_status AS "proposalStatus",p.outcome,
         p.effective_status AS "effectiveStatus",p.tracking_state AS "trackingState",
         p.lifecycle_reason AS "lifecycleReason",
         provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
@@ -754,13 +755,16 @@ class PostgresGovernanceStore {
       where += " AND proposal_id < $3";
     }
     const rows = (await this.pool.query(`
-      SELECT proposal_id::text AS "proposalId",normalized,
+      SELECT dao_id AS "daoId",proposal_id::text AS "proposalId",normalized,
+        proposal_status AS "proposalStatus",outcome,
         effective_status AS "effectiveStatus",tracking_state AS "trackingState",
         lifecycle_reason AS "lifecycleReason"
       FROM proposals WHERE ${where} ORDER BY proposal_id DESC LIMIT $2
     `, params)).rows;
     const more = rows.length > limit;
-    const items = rows.slice(0, limit).map((row) => presentProposal(row.normalized, row));
+    const items = rows.slice(0, limit).map((row) => ({
+      ...presentProposal(row.normalized, row), daoId: row.daoId, proposalId: row.proposalId,
+    }));
     return { items, nextCursor: more ? encodeProposalCursor(rows[limit - 1].proposalId) : null };
   }
 

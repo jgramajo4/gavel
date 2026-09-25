@@ -10,6 +10,5 @@ const { NounsSubgraphSource } = require("./nouns-source");
 module.exports = { DAO_CONFIGS, MemoryGovernanceStore, GovernanceSyncWorker, EnsGovernorSource, RailgunVotingSource, NounsSubgraphSource, createReadOnlyApi, proposalContentHash, IndexApiClient, IndexStaleError, IndexRateLimitedError, DEFAULT_INDEX_API_URL };
 try {
   const { PostgresGovernanceStore } = require("./postgres-store");
-  const { patchProposalReads } = require("./postgres-proposal-reads");
-  module.exports.PostgresGovernanceStore = patchProposalReads(PostgresGovernanceStore);
+  module.exports.PostgresGovernanceStore = PostgresGovernanceStore;
 } catch (error) { if (error.code !== "MODULE_NOT_FOUND") throw error; }

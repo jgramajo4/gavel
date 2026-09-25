@@ -4,7 +4,7 @@ const { z } = require("zod");
 const { decodeCursor, decodeProposalCursor } = require("./memory-store");
 const { redactErrorMessage } = require("./redaction");
 const { presentProposal } = require("../../core/src/governance/lifecycle");
-const { canonicalProposalIdentity } = require("@gavel/proposal-identity");
+const { assertCanonicalProposalIdentity, canonicalProposalIdentity } = require("@gavel/proposal-identity");
 const { DAO_CONFIGS } = require("./config");
 const { canonicalGateActions } = require("./gate-action");
 
@@ -13,19 +13,32 @@ const daoSchema = z.enum(["nouns", "ens", "railgun-eth"]);
 const proposalSchema = z.string().regex(/^\d+$/).max(78);
 const targetSchema = z.string().regex(/^(proposal:(0|[1-9][0-9]*)|candidate:0x[0-9a-f]{40}:0x[0-9a-f]{64})$/).max(128);
 function json(res, status, body) { const payload = JSON.stringify(body); res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "cache-control": "no-store" }); res.end(payload); }
-function publicProposal(row, requestedDao = null) {
+function publicProposal(row, requestedDao = null, requestedId = null) {
   if (!row) return row;
   const presented = presentProposal(row.normalized || row, row);
   const dao = presented.dao || row.daoId || requestedDao;
+  if ([presented.dao, row.daoId, row.dao, row.normalized?.dao].some((value) => value !== undefined && value !== dao)
+    || requestedDao && dao !== requestedDao) throw new Error("Stored proposal DAO differs from requested DAO");
   const config = DAO_CONFIGS[dao];
+  const proposalId = row.proposalId ?? presented.id;
+  if (requestedId && proposalId !== requestedId) throw new Error("Stored proposal ID differs from requested ID");
+  if (presented.id === undefined || presented.id !== proposalId) throw new Error("Stored proposal ID is missing or inconsistent");
+  const identity = canonicalProposalIdentity({
+    dao, chainId: config?.chainId, governorAddress: config?.currentGovernor, proposalId,
+  });
+  if ([row.chainId, row.normalized?.chainId].some((value) => value !== undefined && value !== identity.chainId)) {
+    throw new Error("Stored proposal chain differs from configured chain");
+  }
+  if ([row.governorAddress, row.normalized?.governorAddress].some((value) => value !== undefined
+    && (typeof value !== "string" || value.toLowerCase() !== identity.governorAddress))) {
+    throw new Error("Stored proposal governor differs from configured governor");
+  }
+  for (const stored of [row.identity, row.normalized?.identity, presented.identity]) {
+    if (stored !== undefined) assertCanonicalProposalIdentity(stored, identity);
+  }
   return {
     ...presented,
-    identity: canonicalProposalIdentity({
-      dao,
-      chainId: config?.chainId,
-      governorAddress: config?.currentGovernor,
-      proposalId: presented.id || row.proposalId,
-    }),
+    identity,
   };
 }
 function gateProposal(row) {
@@ -118,7 +131,7 @@ function createReadOnlyApi({ store, logger = null }) {
         const cursor = decodeProposalCursor(url.searchParams.get("cursor"));
         const page = await store.listProposals({ daoId: dao, limit, cursor }); return json(res, 200, { ...page, items: (page.items || []).map((row) => publicProposal(row, dao)) });
       }
-      if (parts[3] === "proposals" && parts.length === 5) { const id = proposalSchema.parse(parts[4]); const row = await store.getProposal(dao, id); return row ? json(res, 200, publicProposal(row, dao)) : json(res, 404, { error: "proposal_not_found" }); }
+      if (parts[3] === "proposals" && parts.length === 5) { const id = proposalSchema.parse(parts[4]); const row = await store.getProposal(dao, id); return row ? json(res, 200, publicProposal(row, dao, id)) : json(res, 404, { error: "proposal_not_found" }); }
       if (parts[3] === "voters" && parts[5] === "history" && parts.length === 6) { const voter = getAddress(parts[4]); const cursor = decodeCursor(url.searchParams.get("cursor")); const page = await store.listVotes({ daoId: dao, voter, limit, cursor }); return json(res, 200, { dao, chainId: 1, voter, ...page, items: page.items.map(publicVote) }); }
       if (parts[3] === "votes" && parts.length === 4) { const voter = url.searchParams.get("voter"); const cursor = decodeCursor(url.searchParams.get("cursor")); const page = await store.listVotes({ daoId: dao, voter: voter ? getAddress(voter) : null, limit, cursor }); return json(res, 200, { ...page, items: page.items.map(publicVote) }); }
       if (parts[3] === "sync-status" && parts.length === 4) return json(res, 200, { dao, sources: (await store.syncStatus(dao)).map(publicCheckpoint) });
