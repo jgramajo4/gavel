@@ -6,6 +6,7 @@
   "bin": { "gavel-indexer": "bin/gavel-indexer.js" },
   "license": "GPL-3.0-only",
   "dependencies": {
+    "@gavel/proposal-identity": "0.1.0",
     "@gavel/core": "0.2.0",
     "@gavel/ens-adapter": "0.2.0",
     "@gavel/nouns-adapter": "0.2.0",

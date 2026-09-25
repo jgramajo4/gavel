@@ -15,6 +15,7 @@ module.exports = {
   ...require("./gate-api"),
   ...require("./index-api"),
   ...require("./targets"),
+
   ...require("./discovery"),
   ...require("./session"),
   ...require("./quote"),

@@ -168,11 +168,12 @@ test("flow target selection keeps an explicit voter ahead of a profile default",
   assert.equal(voter.wallet, TARGET_VOTER);
 });
 
-test("sendAttentionRequest forwards the explicit voter target ahead of a profile default", async () => {
+test("sendAttentionRequest re-resolves a caller-built target instead of trusting its stage", async () => {
   const selections = [];
+  const resolutions = [];
   const stop = new Error("stop after voter selection");
   const flow = {
-    async resolveTarget() { return { stage: "PRE_VOTE" }; },
+    async resolveTarget(input) { resolutions.push(input); return { stage: "VOTING" }; },
     async selectTargetVoter(input) {
       selections.push(input);
       return { wallet: TARGET_VOTER, label: "delegate.gramajo.eth (0xc180…5425)" };
@@ -192,8 +193,9 @@ test("sendAttentionRequest forwards the explicit voter target ahead of a profile
   assert.deepEqual(selections, [{
     explicitTarget: "delegate.gramajo.eth",
     profileWallet: VOTER,
-    stage: "PRE_VOTE",
+    stage: "VOTING",
   }]);
+  assert.deepEqual(resolutions, [{ stage: "PRE_VOTE" }]);
 });
 
 test("evidence URLs are carried to Gate verbatim and NEVER fetched", async () => {

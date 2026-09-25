@@ -184,7 +184,7 @@ test("read-only API validates pagination, paginates history, and exposes no muta
 
 test("indexed history materializes the existing history schema without collapsing Railgun votes", async () => {
   const { IndexApiClient } = require("../packages/governance-index");
-  const proposal = { id: "3", contentHash: "f".repeat(64), title: "Railgun proposal 3", description: "ipfs://cid", proposer: ADDRESS, state: "ACTIVE", outcome: "ACTIVE", createdBlock: "0", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "0", endBlock: "0", quorumVotes: "1", forVotes: "3", againstVotes: "0", abstainVotes: "0", actions: [], dao: "railgun-eth", chainId: 1, venue: "railgun-voting", timing: "timestamp", startTime: null, endTime: null, choices: ["AGAINST", "FOR"] };
+  const proposal = { id: "3", contentHash: "f".repeat(64), title: "Railgun proposal 3", description: "ipfs://cid", proposer: ADDRESS, state: "ACTIVE", outcome: "ACTIVE", createdBlock: "0", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "0", endBlock: "0", quorumVotes: "1", forVotes: "3", againstVotes: "0", abstainVotes: "0", actions: [], dao: "railgun-eth", chainId: 1, identity: { dao: "railgun-eth", chainId: 1, governorAddress: DAO_CONFIGS["railgun-eth"].currentGovernor.toLowerCase(), proposalId: "3" }, venue: "railgun-voting", timing: "timestamp", startTime: null, endTime: null, choices: ["AGAINST", "FOR"] };
   const events = [0, 1].map((logIndex) => ({ daoId: "railgun-eth", chainId: 1, contractAddress: DAO_CONFIGS["railgun-eth"].contractAddress, proposalId: "3", voter: ADDRESS, support: logIndex ? "AGAINST" : "FOR", reason: null, voteWeight: "1", blockNumber: String(10 + logIndex), timestamp: "2023-11-14T22:13:20.000Z", transactionHash: logIndex ? TX2 : TX, logIndex, sourceKind: "railgun-voting-logs", sourceEndpoint: "https://rpc.example", observedHead: "20" }));
   const client = new IndexApiClient({ baseUrl: "http://index.example", fetch: async (url) => ({ ok: true, status: 200, async json() {
     if (url.includes("/sync-status")) return { sources: [{ sourceId: "voting-logs", finalizedHead: "20", updatedAt: new Date().toISOString(), lastError: null }] };
@@ -563,6 +563,7 @@ function proposalDoc(id) {
     createdAt: "2023-11-14T22:13:20.000Z", startBlock: "0", endBlock: "0",
     quorumVotes: "1", forVotes: "1", againstVotes: "0", abstainVotes: "0",
     actions: [], dao: "nouns", chainId: 1,
+    identity: { dao: "nouns", chainId: 1, governorAddress: DAO_CONFIGS.nouns.currentGovernor.toLowerCase(), proposalId: String(id) },
   };
 }
 

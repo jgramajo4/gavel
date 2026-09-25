@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs/promises");
+const { constants: fsConstants } = require("node:fs");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
 const { Wallet, getAddress } = require("ethers");
@@ -14,7 +15,7 @@ const {
   resolveEthereumRpcUrl,
   inspectNounsProposal,
 } = require("../../nouns-adapter");
-const { IndexApiClient } = require("../../governance-index");
+const { DAO_CONFIGS, IndexApiClient } = require("../../governance-index");
 const { createDaoAdapter: createWiredDaoAdapter } = require("@gavel/daos");
 const {
   ExecutionMode,
@@ -44,6 +45,9 @@ const {
   loadGavelConfig,
   resolveIndexApiEndpoint,
   resolveDaoContext,
+  assertCanonicalProposalIdentity,
+  canonicalProposalIdentity,
+  presentProposalResponse,
 } = require("../../core");
 const { createGateClient, GateClientError, sanitizeHumanText } = require("../gate-client");
 const {
@@ -130,6 +134,13 @@ Usage:
                                                 [--threshold <0-1>]
                                                 [--max-precedents <count>]
                                                 [--calibration <backtest.json>]
+  gavel present <proposal.json> <prediction.json> [--explanation <plain-text-path>]
+                                                     [--output <path>] [--stdout]
+  gavel analyze-present <proposal-id> --dao <dao> --profile <profile.json>
+                          [--explanation <plain-text-path>] [--calibration <backtest.json>]
+                          [--output <path>] [--stdout]
+  gavel present-batch <manifest.json> [--output <path>] [--stdout]
+  gavel analyze-present-batch <manifest.json> [--output <path>] [--stdout]
   gavel backtest <history.json> [--output <path>] [--stdout]
                                 [--min-training-votes <count>]
                                 [--half-life-days <days>]
@@ -183,6 +194,8 @@ Commands:
   proposal  Fetch one indexed proposal; ENS is live-verified against its Governor.
   profile   Build a private three-layer voter profile from normalized history.
   predict   Recommend FOR, AGAINST, or ABSTAIN using personal precedents.
+  present   Render supplied artifacts for offline inspection; does not authenticate their origin.
+  analyze-present  Fetch canonical proposal, predict from private profile, and render in one operation.
   backtest  Run leakage-free chronological evaluation and confidence calibration.
   inspect   Decode and security-check structured Nouns proposal actions.
   prepare-vote  Verify canonical chain state and produce unsigned vote calldata.
@@ -494,6 +507,8 @@ async function predictCommand(argv) {
   process.stdout.write(
     `${JSON.stringify(
       {
+        identity: prediction.identity,
+        proposalContentHash: prediction.proposalContentHash,
         recommendation: prediction.recommendation,
         confidence: prediction.confidence,
         confidencePercent: prediction.confidencePercent,
@@ -561,6 +576,23 @@ async function proposalCommand(argv) {
       proposal = await createDaoAdapter(dao, provider).fetchProposal(positionals[0]);
     }
   }
+  const config = DAO_CONFIGS[dao];
+  const expectedIdentity = canonicalProposalIdentity({
+    dao,
+    chainId: config.chainId,
+    governorAddress: config.currentGovernor,
+    proposalId: positionals[0],
+  });
+  if (proposal.identity) {
+    assertCanonicalProposalIdentity(proposal.identity, expectedIdentity);
+  }
+  assertCanonicalProposalIdentity({
+    dao: proposal.dao ?? expectedIdentity.dao,
+    chainId: proposal.chainId ?? expectedIdentity.chainId,
+    governorAddress: proposal.identity?.governorAddress ?? expectedIdentity.governorAddress,
+    proposalId: proposal.id,
+  }, expectedIdentity);
+  proposal = { ...proposal, identity: expectedIdentity };
   if (values.stdout) {
     process.stdout.write(`${JSON.stringify(proposal, null, 2)}\n`);
     return;
@@ -569,6 +601,217 @@ async function proposalCommand(argv) {
   const destination = values.output || defaultPrivatePath("proposals", dao, `${proposal.id}.json`);
   const absolutePath = await writePrivateJson(destination, proposal);
   process.stdout.write(`${JSON.stringify({ ok: true, dao, proposalId: proposal.id, contentHash: proposal.contentHash, state: proposal.state, actionCount: proposal.actions.length, output: absolutePath }, null, 2)}\n`);
+}
+
+async function analyzePresentCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      dao: { type: "string" },
+      profile: { type: "string" },
+      explanation: { type: "string" },
+      calibration: { type: "string" },
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) { process.stdout.write(usage()); return; }
+  if (positionals.length !== 1 || !values.dao || !values.profile) {
+    throw new Error("analyze-present requires a proposal ID, --dao and --profile");
+  }
+  const presentation = await analyzeCanonicalResponse({
+    dao: values.dao,
+    proposalId: positionals[0],
+    profilePath: values.profile,
+    explanationPath: values.explanation,
+    calibrationPath: values.calibration,
+  });
+  await writePresentation(presentation.markdown, values);
+}
+
+async function analyzeCanonicalResponse({ dao, proposalId, profilePath, profileInput, explanationPath, explanationText, calibrationPath, calibrationDocument }) {
+  const expected = canonicalProposalIdentity({
+    dao,
+    chainId: DAO_CONFIGS[dao]?.chainId,
+    governorAddress: DAO_CONFIGS[dao]?.currentGovernor,
+    proposalId,
+  });
+  const indexEndpoint = await resolveCommandIndexEndpoint();
+  if (!indexEndpoint.url) throw new Error("analyze-present requires an enabled canonical governance index");
+  // No caller-provided proposal or prediction file crosses this boundary.
+  const proposal = await new IndexApiClient({ baseUrl: indexEndpoint.url }).fetchProposal(expected.dao, expected.proposalId);
+  assertCanonicalProposalIdentity(proposal.identity, expected);
+  const profile = profileInput || await readJson(profilePath);
+  if (profile?.dao !== expected.dao || profile?.chainId !== expected.chainId) {
+    throw new Error("profile DAO and chain must match the requested proposal");
+  }
+  let prediction = predictVote(profile, proposal, {
+    proposalInspector: expected.dao === "nouns" ? inspectNounsProposal : undefined,
+    allowedSupports: expected.dao === "railgun-eth" ? [Support.FOR, Support.AGAINST] : undefined,
+  });
+  if (calibrationPath || calibrationDocument) {
+    const calibrationInput = calibrationDocument || await readJson(calibrationPath);
+    prediction = applyCalibrationToPrediction(prediction, calibrationInput.calibrationModel || calibrationInput);
+    if (calibrationInput.calibrationModel && calibrationInput.summary) {
+      prediction = applyBacktestEvaluationToPrediction(prediction, calibrationInput);
+    }
+  }
+  const explanation = explanationText ?? (explanationPath ? await fs.readFile(path.resolve(explanationPath), "utf8") : "");
+  const presentation = presentProposalResponse({ proposal, prediction, explanation });
+  assertCanonicalProposalIdentity(presentation.identity, expected);
+  return presentation;
+}
+
+async function presentCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      explanation: { type: "string" },
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 2) {
+    throw new Error("present requires a proposal JSON path and prediction JSON path");
+  }
+  const [proposal, prediction, explanation] = await Promise.all([
+    readJson(positionals[0]),
+    readJson(positionals[1]),
+    values.explanation ? fs.readFile(path.resolve(values.explanation), "utf8") : "",
+  ]);
+  const presentation = presentProposalResponse({ proposal, prediction, explanation });
+  await writePresentation(presentation.markdown, values);
+}
+
+async function writePresentation(markdown, values) {
+  if (!values.output || values.stdout) process.stdout.write(`${markdown}\n`);
+  if (values.output) {
+    const destination = path.resolve(values.output);
+    await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await fs.writeFile(destination, `${markdown}\n`, { encoding: "utf8", mode: 0o600 });
+  }
+}
+
+function batchPathInside(base, candidate) {
+  const relative = path.relative(base, candidate);
+  return Boolean(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+async function readBatchArtifact(base, filename, { json = true } = {}) {
+  const refused = () => new Error("present-batch artifact must stay within the manifest directory");
+  if (path.isAbsolute(filename)) throw refused();
+  const candidate = path.resolve(base, filename);
+  if (!batchPathInside(base, candidate)) throw refused();
+  // Linux file-descriptor identity binds containment to the object actually read.
+  // Never trust a pathname checked earlier: an attacker can swap a symlink.
+  if (process.platform !== "linux") throw refused();
+  const resolved = await fs.realpath(candidate);
+  if (!batchPathInside(base, resolved)) throw refused();
+  const handle = await fs.open(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const opened = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+    if (!batchPathInside(base, opened) || !(await handle.stat()).isFile()) throw refused();
+    const source = await handle.readFile("utf8");
+    if (!json) return source;
+    try { return JSON.parse(source); }
+    catch (error) { throw new Error(`Invalid JSON in ${candidate}: ${error.message}`); }
+  } finally { await handle.close(); }
+}
+
+async function presentBatchCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (positionals.length !== 1) throw new Error("present-batch requires one manifest JSON path");
+  const manifestPath = path.resolve(positionals[0]);
+  const manifest = await readJson(manifestPath);
+  if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.items)
+      || manifest.items.length === 0 || manifest.items.length > 100) {
+    throw new Error("present-batch manifest must contain 1-100 schemaVersion 1 items");
+  }
+  const base = await fs.realpath(path.dirname(manifestPath));
+  const presentations = [];
+  const identities = new Set();
+  for (const item of manifest.items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+        || typeof item.proposal !== "string" || typeof item.prediction !== "string"
+        || item.explanation !== undefined && typeof item.explanation !== "string") {
+      throw new Error("present-batch items require proposal and prediction paths and an optional explanation path");
+    }
+    const [proposal, prediction, explanation] = await Promise.all([
+      readBatchArtifact(base, item.proposal),
+      readBatchArtifact(base, item.prediction),
+      item.explanation === undefined ? "" : readBatchArtifact(base, item.explanation, { json: false }),
+    ]);
+    const presentation = presentProposalResponse({ proposal, prediction, explanation });
+    const key = `${presentation.identity.dao}:${presentation.identity.chainId}:${presentation.identity.governorAddress}:${presentation.identity.proposalId}`;
+    if (identities.has(key)) throw new Error("present-batch contains a duplicate proposal identity");
+    identities.add(key);
+    presentations.push(presentation.markdown);
+  }
+  await writePresentation(presentations.join("\n\n---\n\n"), values);
+}
+
+async function analyzePresentBatchCommand(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      output: { type: "string", short: "o" },
+      stdout: { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+    },
+  });
+  if (values.help) { process.stdout.write(usage()); return; }
+  if (positionals.length !== 1) throw new Error("analyze-present-batch requires one manifest JSON path");
+  const manifestPath = path.resolve(positionals[0]);
+  const manifest = await readJson(manifestPath);
+  if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.items)
+      || manifest.items.length === 0 || manifest.items.length > 100) {
+    throw new Error("analyze-present-batch manifest requires 1-100 schemaVersion 1 items");
+  }
+  const base = await fs.realpath(path.dirname(manifestPath));
+  const identities = new Set();
+  const presentations = [];
+  for (const item of manifest.items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+        || Object.keys(item).some((key) => !["dao", "proposalId", "profile", "explanation", "calibration"].includes(key))
+        || typeof item.dao !== "string" || typeof item.proposalId !== "string"
+        || typeof item.profile !== "string"
+        || item.explanation !== undefined && typeof item.explanation !== "string"
+        || item.calibration !== undefined && typeof item.calibration !== "string") {
+      throw new Error("analyze-present-batch items require dao, proposalId and profile path");
+    }
+    const profileInput = await readBatchArtifact(base, item.profile);
+    const explanationText = item.explanation === undefined ? "" : await readBatchArtifact(base, item.explanation, { json: false });
+    const calibrationDocument = item.calibration === undefined ? null : await readBatchArtifact(base, item.calibration);
+    const presentation = await analyzeCanonicalResponse({
+      dao: item.dao, proposalId: item.proposalId, profileInput, explanationText, calibrationDocument,
+    });
+    const key = JSON.stringify(presentation.identity);
+    if (identities.has(key)) throw new Error("analyze-present-batch contains a duplicate proposal identity");
+    identities.add(key);
+    presentations.push(presentation.markdown);
+  }
+  await writePresentation(presentations.join("\n\n---\n\n"), values);
 }
 
 async function backtestCommand(argv) {
@@ -1507,6 +1750,10 @@ async function main() {
   if (command === "proposal") return proposalCommand(argv);
   if (command === "profile") return profileCommand(argv);
   if (command === "predict") return predictCommand(argv);
+  if (command === "present") return presentCommand(argv);
+  if (command === "analyze-present") return analyzePresentCommand(argv);
+  if (command === "present-batch") return presentBatchCommand(argv);
+  if (command === "analyze-present-batch") return analyzePresentBatchCommand(argv);
   if (command === "backtest") return backtestCommand(argv);
   if (command === "inspect") return inspectCommand(argv);
   if (command === "prepare-vote") return prepareVoteCommand(argv);

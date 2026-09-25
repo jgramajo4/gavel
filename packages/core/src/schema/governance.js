@@ -11,6 +11,12 @@ const decimalStringSchema = z.string().regex(/^\d+$/, "expected an unsigned inte
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "expected 0x-prefixed hex");
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "expected an EVM address");
 const daoIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "expected a DAO adapter id");
+const proposalIdentitySchema = z.object({
+  dao: daoIdSchema,
+  chainId: z.number().int().positive(),
+  governorAddress: addressSchema,
+  proposalId: z.string().regex(/^(0|[1-9][0-9]*)$/, "expected a canonical proposal id"),
+}).strict();
 
 const proposalActionSchema = z.object({
   index: z.number().int().nonnegative(),
@@ -53,6 +59,7 @@ const normalizedProposalSchema = z.object({
   endTime: z.string().datetime().nullable().optional(),
   metadataUrl: z.string().optional(),
   choices: z.array(supportSchema).min(2).optional(),
+  identity: proposalIdentitySchema.optional(),
 });
 
 const sourceProvenanceSchema = z.object({
@@ -102,6 +109,7 @@ const historyDocumentSchema = z
 
 module.exports = {
   Support,
+  proposalIdentitySchema,
   proposalActionSchema,
   normalizedProposalSchema,
   normalizedVoteSchema,

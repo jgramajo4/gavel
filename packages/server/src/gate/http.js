@@ -1,7 +1,7 @@
 const http = require("node:http");
 const { SubmissionPolicyError } = require("@gavel/gate");
 const { ProfileRequestError } = require("./profile-service");
-const { IndexUnavailableError } = require("./index-client");
+const { IndexIdentityMismatchError, IndexUnavailableError } = require("./index-client");
 const { SettlementRequestError } = require("./settlement-service");
 const { RelayRequestError } = require("./relay-service");
 
@@ -325,6 +325,7 @@ function createGateHttpServer({ authService, profileService, submissionService, 
         });
       }
       const known = error instanceof ProfileRequestError || error instanceof IndexUnavailableError
+        || error instanceof IndexIdentityMismatchError
         || error instanceof SettlementRequestError || error instanceof RelayRequestError;
       const statusCode = known ? error.statusCode : 500;
       const code = known ? error.code : "INTERNAL_ERROR";

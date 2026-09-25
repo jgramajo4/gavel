@@ -2,6 +2,9 @@ const { getAddress } = require("ethers");
 const { historyDocumentSchema, normalizedVoteSchema } = require("../../core/src/schema/governance");
 const { DEFAULT_INDEX_API_URL } = require("../../core/src/config/index-api-endpoint");
 const { sanitizeEndpoint } = require("./provenance");
+const { DAO_CONFIGS } = require("./config");
+const { OPEN_STATUSES, normalizeStatus } = require("../../core/src/governance/lifecycle");
+const { assertCanonicalProposalIdentity, canonicalContentHash, canonicalProposalIdentity } = require("@gavel/proposal-identity");
 
 const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
 // Public read-only index. Used when no operator override is configured, so an
@@ -20,6 +23,27 @@ const DEFAULT_MAX_RATE_LIMIT_WAIT_MS = 90_000;
 
 class IndexStaleError extends Error {
   constructor(message) { super(message); this.name = "IndexStaleError"; this.code = "GAVEL_INDEX_STALE"; }
+}
+class ProposalLifecycleStaleError extends Error {
+  constructor() {
+    super("Canonical proposal has a stale lifecycle: open status cannot be verified against its voting window");
+    this.name = "ProposalLifecycleStaleError";
+    this.code = "GAVEL_PROPOSAL_LIFECYCLE_STALE";
+  }
+}
+
+function assertOpenLifecycleCurrent(proposal, freshness, now) {
+  if (!OPEN_STATUSES.has(normalizeStatus(proposal.effectiveStatus))) return;
+  const stale = () => { throw new ProposalLifecycleStaleError(); };
+  if (proposal.timing === "block") {
+    if (typeof proposal.endBlock !== "string" || !/^[1-9][0-9]*$/.test(proposal.endBlock)
+      || !/^[1-9][0-9]*$/.test(freshness.finalizedHead)) stale();
+    if (BigInt(freshness.finalizedHead) >= BigInt(proposal.endBlock)) stale();
+  } else if (proposal.timing === "timestamp") {
+    const end = typeof proposal.endTime === "string" ? Date.parse(proposal.endTime) : NaN;
+    const current = now.getTime();
+    if (!Number.isFinite(end) || !Number.isFinite(current) || current >= end) stale();
+  } else stale();
 }
 
 class IndexRateLimitedError extends Error {
@@ -186,9 +210,9 @@ class IndexApiClient {
   // The index is a cache of chain state, not an oracle. Serving a history
   // document from a stalled, failed or empty index would look identical to a
   // voter with no history, so every read gates on checkpoint freshness first.
-  async assertFresh(dao, op) {
+  async assertFresh(dao, op, { force = false } = {}) {
     const daoId = IndexApiClient.dao(dao);
-    if (this._freshness.has(daoId)) return this._freshness.get(daoId);
+    if (!force && this._freshness.has(daoId)) return this._freshness.get(daoId);
     const status = await this.request(`/v1/daos/${daoId}/sync-status`, op);
     const sources = Array.isArray(status?.sources) ? status.sources : [];
     if (!sources.length) {
@@ -208,7 +232,7 @@ class IndexApiClient {
       }
       if (!newest || BigInt(row.finalizedHead || 0) > BigInt(newest.finalizedHead || 0)) newest = row;
     }
-    const freshness = { daoId, finalizedHead: String(newest.finalizedHead ?? newest.nextBlock ?? "0"), updatedAt: newest.updatedAt };
+    const freshness = { daoId, finalizedHead: String(newest.finalizedHead ?? "0"), updatedAt: newest.updatedAt };
     this._freshness.set(daoId, freshness);
     return freshness;
   }
@@ -216,9 +240,26 @@ class IndexApiClient {
   async fetchProposal(dao, id, op) {
     return this.runOperation(op, async (budget) => {
       const daoId = IndexApiClient.dao(dao);
-      if (!/^\d+$/.test(String(id)) || String(id).length > 78) throw new TypeError("invalid proposal id");
-      await this.assertFresh(daoId, budget);
-      return this.request(`/v1/daos/${daoId}/proposals/${id}`, budget);
+      if (typeof id !== "string" || !/^(0|[1-9][0-9]*)$/.test(id) || id.length > 78) throw new TypeError("invalid proposal id");
+      const freshness = await this.assertFresh(daoId, budget, { force: !op });
+      const proposal = await this.request(`/v1/daos/${daoId}/proposals/${id}`, budget);
+      const config = DAO_CONFIGS[daoId];
+      const expected = canonicalProposalIdentity({
+        dao: daoId,
+        chainId: config.chainId,
+        governorAddress: config.currentGovernor,
+        proposalId: id,
+      });
+      assertCanonicalProposalIdentity(proposal?.identity, expected);
+      assertCanonicalProposalIdentity({
+        dao: proposal?.dao ?? expected.dao,
+        chainId: proposal?.chainId ?? expected.chainId,
+        governorAddress: proposal?.identity?.governorAddress,
+        proposalId: proposal?.id,
+      }, expected);
+      canonicalContentHash(proposal?.contentHash);
+      assertOpenLifecycleCurrent(proposal, freshness, this.now());
+      return proposal;
     });
   }
 

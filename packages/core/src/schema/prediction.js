@@ -1,6 +1,6 @@
 const { z } = require("zod");
 
-const { Support } = require("./governance");
+const { Support, proposalIdentitySchema } = require("./governance");
 const { proposalSecurityReportSchema } = require("./security");
 
 const supportSchema = z.enum(Object.values(Support));
@@ -57,6 +57,7 @@ const predictionDocumentSchema = z
     voter: addressSchema,
     proposalId: decimalStringSchema,
     proposalContentHash: z.string().regex(/^[0-9a-f]{64}$/),
+    identity: proposalIdentitySchema.optional(),
     recommendation: supportSchema,
     confidence: boundedScore,
     rawConfidence: boundedScore.optional(),

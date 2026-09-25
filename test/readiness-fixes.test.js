@@ -203,7 +203,7 @@ test("CLI operational index reads use the named variable from Gavel config", asy
       ? { dao: "ens", sources: [{ sourceId: "governor-logs", finalizedHead: "500", updatedAt: new Date().toISOString(), lastError: null }] }
       : request.url.split("?")[0].endsWith("/history")
         ? { items: [{ chainId: 1, proposalId: "1", voter: VOTER, support: "FOR", reason: null, blockNumber: "150", timestamp: "2023-11-14T22:15:00.000Z", voteWeight: "5", clientId: 0, sourceKind: "ens-governor", sourceEndpoint: "https://rpc.example", entityId: "e1", transactionHash: `0x${"a".repeat(64)}`, logIndex: 0, observedHead: "500" }], nextCursor: null }
-        : { id: "1", contentHash: crypto.createHash("sha256").update("ens-1").digest("hex"), title: "Indexed", description: "Body", proposer: VOTER, state: "EXECUTED", outcome: "PASSED", createdBlock: "100", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "110", endBlock: "200", quorumVotes: "10", forVotes: "9", againstVotes: "1", abstainVotes: "0", actions: [], dao: "ens", chainId: 1 };
+        : { id: "1", contentHash: crypto.createHash("sha256").update("ens-1").digest("hex"), title: "Indexed", description: "Body", proposer: VOTER, state: "EXECUTED", outcome: "PASSED", createdBlock: "100", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "110", endBlock: "200", quorumVotes: "10", forVotes: "9", againstVotes: "1", abstainVotes: "0", actions: [], dao: "ens", chainId: 1, identity: { dao: "ens", chainId: 1, governorAddress: "0x323a76393544d5ecca80cd6ef2a560c6a395b7e3", proposalId: "1" } };
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
   });
@@ -414,7 +414,7 @@ test("Railgun proposal uses direct, named, and legacy index overrides", async (t
     const pathname = request.url.split("?")[0];
     const body = pathname.endsWith("/sync-status")
       ? { sources: [{ sourceId: "voting-logs", finalizedHead: "500", updatedAt: new Date().toISOString(), lastError: null }] }
-      : { id: "1", dao: "railgun-eth", source: "INDEX_ROUTE_PROVED" };
+      : { id: "1", dao: "railgun-eth", chainId: 1, contentHash: "ab".repeat(32), source: "INDEX_ROUTE_PROVED", identity: { dao: "railgun-eth", chainId: 1, governorAddress: "0xc480f68a3dcc3edd82134fab45c14a0fcf1da3cc", proposalId: "1" } };
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
   });

@@ -120,11 +120,12 @@ test('dedicated Gate target endpoint projects candidates without a numeric propo
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.targetId, targetId);
+    assert.equal(body.dao, 'nouns');
     assert.equal(body.kind, 'candidate');
     assert.equal(body.proposalId, undefined);
     assert.equal(body.eligibility, 'PRE_VOTE');
     assert.deepEqual(Object.keys(body).sort(), [
-      'actions', 'contentHash', 'description', 'eligibility', 'kind', 'mappingVersion', 'nativeState', 'proposer',
+      'actions', 'contentHash', 'dao', 'description', 'eligibility', 'kind', 'mappingVersion', 'nativeState', 'proposer',
       'refreshedAt', 'slug', 'sourceBlock', 'sourceBlockHash', 'targetId', 'title',
     ]);
   });

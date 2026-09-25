@@ -146,10 +146,16 @@ test("Memory replay replaces a moved event whose old placement is outside the re
   assert.equal(store.rawRecords[0].blockNumber, "10");
 });
 
-test("Memory proposal pages match PostgreSQL normalized-document shape", async () => {
-  const store = new MemoryGovernanceStore();
-  store.upsertProposal({ daoId: "ens", proposalId: "1", contentHash: "a".repeat(64), normalized: { id: "1", title: "normalized" } });
-  assert.deepEqual((await store.listProposals({ daoId: "ens", limit: 10 })).items, [{ id: "1", title: "normalized" }]);
+test("Memory and PostgreSQL proposal pages retain stored identity for API validation", async () => {
+  const row = { daoId: "ens", proposalId: "1", contentHash: "a".repeat(64),
+    normalized: { id: "1", title: "normalized" } };
+  const memory = new MemoryGovernanceStore();
+  memory.upsertProposal(row);
+  const { PostgresGovernanceStore } = require("../packages/governance-index/src/postgres-store");
+  const postgres = new PostgresGovernanceStore({ pool: { async query() { return { rows: [row] }; } } });
+  const expected = [{ id: "1", title: "normalized", daoId: "ens", proposalId: "1" }];
+  assert.deepEqual((await memory.listProposals({ daoId: "ens", limit: 10 })).items, expected);
+  assert.deepEqual((await postgres.listProposals({ daoId: "ens", limit: 10 })).items, expected);
 });
 
 test("ENS indexed content hash is recomputed and verified", async () => {

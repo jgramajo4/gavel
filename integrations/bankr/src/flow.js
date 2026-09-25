@@ -9,7 +9,7 @@ const { buildSubmissionRequest, createOrResumeSubmission } = require("./submissi
 const { openBaseSenderSession } = require("./session");
 const { authorizePayment, broadcastPayment, payQuote } = require("./payment");
 const { pollUntilTerminal, submitSettlementHint } = require("./settlement");
-const { resolveTarget } = require("./targets");
+const { isResolvedTarget, resolveTarget } = require("./targets");
 const { resolveConfig } = require("./config");
 const { assertWalletCapabilities } = require("./wallet");
 const { createRemoteRelay } = require("./remote-relay");
@@ -218,7 +218,7 @@ async function sendAttentionRequest({
   poll = {},
 } = {}) {
   if (!flow) throw new BankrGateError("INVALID_CONFIG", "A Bankr Gate flow is required.");
-  const target = targetInput?.stage ? targetInput : await flow.resolveTarget(targetInput ?? {});
+  const target = isResolvedTarget(targetInput) ? targetInput : await flow.resolveTarget(targetInput ?? {});
   onPhase("target_resolved", { target });
 
   const explicitTarget = voterTarget ?? voterWallet;

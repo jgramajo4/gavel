@@ -6,6 +6,7 @@
   "main": "src/gate/runtime.js",
   "license": "GPL-3.0-only",
   "dependencies": {
+    "@gavel/proposal-identity": "0.1.0",
     "@gavel/gate": "^0.2.0",
     "ethers": "^6.17.0",
     "pg": "^8.23.0"

@@ -142,15 +142,30 @@ function presentProposal(normalized, persisted = {}) {
     doc.state,
   );
   const outcome = firstPresent(knownStatus(persisted.outcome), doc.outcome);
-  const effectiveStatus = firstPresent(knownStatus(doc.effectiveStatus), knownStatus(persisted.effectiveStatus), outcome);
+  // An open raw outcome is not a derived lifecycle verdict. Preserve it for
+  // history, but only explicit effective status or a terminal/post-vote outcome
+  // can populate the authoritative presentation field.
+  const derivedOutcome = outcome && !OPEN_STATUSES.has(normalizeStatus(outcome)) ? outcome : undefined;
+  // Migration 003 copied `outcome` verbatim into effective_status. Its OPEN
+  // values may have come from a subgraph that never advanced raw ACTIVE past
+  // the voting window. A fresh sync checkpoint does not make that row fresh.
+  const persistedStatus = knownStatus(persisted.effectiveStatus);
+  const migratedOpen = persisted.lifecycleReason === "migrated_from_outcome"
+    && OPEN_STATUSES.has(normalizeStatus(persistedStatus ?? doc.effectiveStatus));
+  const effectiveStatus = migratedOpen ? undefined : firstPresent(
+    persistedStatus, knownStatus(doc.effectiveStatus), derivedOutcome,
+  );
   const trackingState = firstPresent(
-    doc.trackingState,
     effectiveStatus ? persisted.trackingState : undefined,
+    effectiveStatus ? doc.trackingState : undefined,
   );
   const lifecycleReason = firstPresent(persisted.lifecycleReason, doc.lifecycleReason);
   const state = firstPresent(doc.state, knownStatus(persisted.proposalStatus), sourceState);
+  // Do not leak an unverified status from the normalized JSON via `...doc`.
+  const { effectiveStatus: _unverifiedEffectiveStatus, trackingState: _unverifiedTrackingState,
+    ...withoutLifecycle } = doc;
   return {
-    ...doc,
+    ...withoutLifecycle,
     ...(state ? { state } : {}),
     ...(sourceState ? { sourceState } : {}),
     ...(outcome ? { outcome } : {}),

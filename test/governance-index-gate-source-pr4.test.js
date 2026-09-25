@@ -196,6 +196,21 @@ test("Postgres Gate proposal read is dedicated and uses persisted snapshot block
   });
 });
 
+test("Postgres Gate proposal suppresses migrated open status even with fresh provenance", async () => {
+  const pool = { async query(sql) {
+    assert.match(String(sql), /p\.lifecycle_reason AS "lifecycleReason"/);
+    assert.match(String(sql), /p\.normalized AS normalized/);
+    return { rows: [{ proposalId: "42", title: "Old proposal", proposer: WALLET,
+      normalized: { id: "42", state: "ACTIVE", effectiveStatus: "ACTIVE", outcome: "ACTIVE", endBlock: "3" },
+      lifecycleReason: "migrated_from_outcome", effectiveStatus: "ACTIVE",
+      refreshedAt: new Date("2026-09-25T00:00:00.000Z"), sourceBlock: "100",
+      sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [] }] };
+  } };
+  const store = new PostgresGovernanceStore({ pool });
+  const gate = await store.getGateProposal("nouns", "42");
+  assert.equal(gate.effectiveStatus, undefined);
+});
+
 test("Postgres proposal refresh conditionally rejects stale snapshots", async () => {
   const calls = [];
   const tx = new PostgresTransaction({ async query(sql) {

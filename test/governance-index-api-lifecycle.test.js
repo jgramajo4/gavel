@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { presentProposal } = require("../packages/core/src/governance/lifecycle");
 const { MemoryGovernanceStore } = require("../packages/governance-index/src/memory-store");
+const { PostgresGovernanceStore } = require("../packages/governance-index/src/postgres-store");
 const { createReadOnlyApi } = require("../packages/governance-index/src/api");
 const { toTrainingEvidence } = require("../packages/core/src/backtest/chronology");
 
@@ -78,6 +79,219 @@ function refreshedNouns996() {
     },
   };
 }
+
+test("presentProposal does not upgrade raw ACTIVE/outcome ACTIVE to effective status", () => {
+  const projected = presentProposal({ id: "998", state: "ACTIVE", outcome: "ACTIVE" }, {});
+  assert.equal(projected.effectiveStatus, undefined);
+  assert.equal(projected.outcome, "ACTIVE");
+  const persisted = presentProposal({ id: "998", state: "ACTIVE", outcome: "ACTIVE", effectiveStatus: "ACTIVE" },
+    { effectiveStatus: "DEFEATED" });
+  assert.equal(persisted.effectiveStatus, "DEFEATED");
+});
+
+test("migration-derived open state is never a canonical effective status", async () => {
+  const old = migratedNouns992();
+  const row = {
+    ...old, proposalId: "998", effectiveStatus: "ACTIVE", outcome: "ACTIVE",
+    trackingState: "HOT", lifecycleReason: "migrated_from_outcome",
+    normalized: { ...old.normalized, id: "998", state: "ACTIVE", outcome: "ACTIVE",
+      effectiveStatus: "ACTIVE", endBlock: "3" },
+  };
+  const projected = presentProposal(row.normalized, row);
+  assert.equal(projected.effectiveStatus, undefined);
+  const store = new MemoryGovernanceStore();
+  store.proposals.push(row);
+  const result = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals/998");
+  assert.equal(result.status, 200);
+  assert.equal(result.body.effectiveStatus, undefined);
+  assert.equal(result.body.state, "ACTIVE");
+  const { canonicalEffectiveStatus } = require("../packages/core/src/governance/presentation");
+  assert.throws(() => canonicalEffectiveStatus(result.body), (error) => error.code === "INVALID_PROPOSAL_STATUS");
+  store.rawRecords.push({ daoId: "nouns", proposalId: "998", recordType: "proposal",
+    sourceId: "nouns-subgraph", sourceRecordKey: "proposal:998", contentHash: row.contentHash,
+    blockNumber: "100", blockHash: `0x${"1".repeat(64)}`, ingestedAt: "2026-09-25T00:00:00.000Z" });
+  const gate = await request(createReadOnlyApi({ store }), "/v1/gate/daos/nouns/proposals/998");
+  assert.equal(gate.status, 200);
+  assert.equal(gate.body.effectiveStatus, undefined);
+  const target = await request(createReadOnlyApi({ store }), "/v1/gate/daos/nouns/targets/proposal:998");
+  assert.equal(target.status, 200);
+  assert.equal(target.body.effectiveStatus, undefined);
+});
+
+test("Postgres public detail and list suppress migrated open status", async () => {
+  const row = { ...migratedNouns992(), proposalId: "998", effectiveStatus: "ACTIVE",
+    trackingState: "HOT", lifecycleReason: "migrated_from_outcome",
+    normalized: { ...migratedNouns992().normalized, id: "998", state: "ACTIVE",
+      outcome: "ACTIVE", effectiveStatus: "ACTIVE", endBlock: "3" } };
+  const pool = { async query(sql) {
+    const text = String(sql);
+    assert.match(text, /lifecycle_reason AS "lifecycleReason"/);
+    if (text.includes("LIMIT $2")) return { rows: [row] };
+    return { rows: [{ dao: "nouns", ...row, contentHash: `0x${row.contentHash}`,
+      refreshedAt: new Date("2026-09-25T00:00:00.000Z") }] };
+  } };
+  const store = new PostgresGovernanceStore({ pool });
+  const direct = await store.getProposal("nouns", "998");
+  assert.equal(direct.effectiveStatus, undefined);
+  assert.equal(direct.nativeState, undefined);
+  for (const path of ["/v1/daos/nouns/proposals/998", "/v1/daos/nouns/proposals?limit=10"]) {
+    const response = await request(createReadOnlyApi({ store }), path);
+    assert.equal(response.status, 200);
+    const proposal = response.body.items?.[0] ?? response.body;
+    assert.equal(proposal.effectiveStatus, undefined, path);
+    assert.equal(proposal.state, "ACTIVE", path);
+  }
+});
+
+test("public proposal API refuses a stored DAO that differs from the requested DAO", async () => {
+  const wrong = { ...refreshedNouns996().normalized, dao: "ens" };
+  const store = {
+    async getProposal() { return wrong; },
+    async listProposals() { return { items: [wrong], nextCursor: null }; },
+  };
+  for (const route of ["/v1/daos/nouns/proposals/996", "/v1/daos/nouns/proposals?limit=10"]) {
+    const response = await request(createReadOnlyApi({ store }), route);
+    assert.equal(response.status, 500, route);
+    assert.equal(response.body.error, "internal_error", route);
+  }
+});
+
+test("public proposal API refuses inconsistent stored IDs and identities", async () => {
+  const good = refreshedNouns996();
+  const cases = [
+    { ...good, normalized: { ...good.normalized, id: "997" } },
+    { ...good, identity: { dao: "ens", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "996" } },
+    { ...good, normalized: { ...good.normalized, identity: { dao: "nouns", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "997" } } },
+  ];
+  for (const row of cases) {
+    const store = {
+      async getProposal() { return row; },
+      async listProposals() { return { items: [row], nextCursor: null }; },
+    };
+    for (const route of ["/v1/daos/nouns/proposals/996", "/v1/daos/nouns/proposals?limit=10"]) {
+      const response = await request(createReadOnlyApi({ store }), route);
+      assert.equal(response.status, 500, route);
+      assert.equal(response.body.error, "internal_error", route);
+    }
+  }
+});
+
+test("public proposal detail rejects a different stored proposal even when its row is internally consistent", async () => {
+  const wrong = refreshedNouns996();
+  wrong.proposalId = "997";
+  wrong.normalized.id = "997";
+  const response = await request(createReadOnlyApi({ store: {
+    async getProposal() { return wrong; },
+  } }), "/v1/daos/nouns/proposals/996");
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error, "internal_error");
+});
+
+test("Postgres list rejects a normalized ID that differs from the stored proposal ID", async () => {
+  const row = { ...refreshedNouns996(), proposalId: "997", daoId: "nouns" };
+  const pool = { async query() { return { rows: [row] }; } };
+  const store = new PostgresGovernanceStore({ pool });
+  const response = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals?limit=10");
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error, "internal_error");
+});
+
+test("public proposal API refuses conflicting stored DAO and chain fields", async () => {
+  const good = refreshedNouns996();
+  for (const row of [
+    { ...good, daoId: "ens", normalized: { ...good.normalized, dao: "nouns" } },
+    { ...good, normalized: { ...good.normalized, chainId: 10 } },
+  ]) {
+    const store = {
+      async getProposal() { return row; },
+      async listProposals() { return { items: [row], nextCursor: null }; },
+    };
+    for (const route of ["/v1/daos/nouns/proposals/996", "/v1/daos/nouns/proposals?limit=10"]) {
+      const response = await request(createReadOnlyApi({ store }), route);
+      assert.equal(response.status, 500, route);
+      assert.equal(response.body.error, "internal_error", route);
+    }
+  }
+});
+
+test("memory proposal detail rejects normalized identity mismatched with the stored row", async () => {
+  const store = new MemoryGovernanceStore();
+  store.proposals.push({ ...refreshedNouns996(), normalized: { ...refreshedNouns996().normalized, id: "997" } });
+  const response = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals/996");
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error, "internal_error");
+});
+
+test("memory detail rejects conflicting persisted identity evidence", async () => {
+  for (const fields of [
+    { chainId: 10 },
+    { governorAddress: "0x0000000000000000000000000000000000000001" },
+    { identity: { dao: "ens", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "996" } },
+  ]) {
+    const store = new MemoryGovernanceStore();
+    store.proposals.push({ ...refreshedNouns996(), ...fields });
+    const response = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals/996");
+    assert.equal(response.status, 500, JSON.stringify(fields));
+  }
+});
+
+test("memory proposal list rejects conflicting persisted identity evidence", async () => {
+  for (const fields of [
+    { chainId: 10 },
+    { governorAddress: "0x0000000000000000000000000000000000000001" },
+    { identity: { dao: "ens", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "996" } },
+  ]) {
+    const store = new MemoryGovernanceStore();
+    store.proposals.push({ ...refreshedNouns996(), ...fields });
+    const response = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals?limit=10");
+    assert.equal(response.status, 500, JSON.stringify(fields));
+  }
+});
+
+test("memory detail and list reject normalized identity evidence conflicting with the stored row", async () => {
+  const good = refreshedNouns996();
+  for (const fields of [
+    { dao: "ens" },
+    { chainId: 10 },
+    { governorAddress: "0x0000000000000000000000000000000000000001" },
+    { identity: { dao: "ens", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "996" } },
+  ]) {
+    const store = new MemoryGovernanceStore();
+    store.proposals.push({ ...good, dao: "nouns", chainId: 1,
+      governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+      identity: { dao: "nouns", chainId: 1,
+        governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "996" },
+      normalized: { ...good.normalized, ...fields } });
+    for (const route of ["/v1/daos/nouns/proposals/996", "/v1/daos/nouns/proposals?limit=10"]) {
+      const response = await request(createReadOnlyApi({ store }), route);
+      assert.equal(response.status, 500, `${route}: ${JSON.stringify(fields)}`);
+    }
+  }
+});
+
+test("Postgres detail rejects mismatched stored DAO and missing normalized ID", async () => {
+  for (const row of [
+    { ...refreshedNouns996(), dao: "ens", daoId: undefined },
+    { ...refreshedNouns996(), dao: "nouns", normalized: { title: "Missing ID" } },
+  ]) {
+    const store = new PostgresGovernanceStore({ pool: { async query() { return { rows: [row] }; } } });
+    const response = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals/996");
+    assert.equal(response.status, 500);
+  }
+});
+
+test("persisted lifecycle tracking outranks stale normalized tracking", () => {
+  const row = migratedNouns992();
+  row.normalized = { ...row.normalized, effectiveStatus: "ACTIVE", trackingState: "HOT" };
+  const projected = presentProposal(row.normalized, row);
+  assert.equal(projected.effectiveStatus, "DEFEATED");
+  assert.equal(projected.trackingState, "FINAL");
+});
 
 test("presentProposal overlays persisted columns without rewriting state", () => {
   const row = migratedNouns992();
