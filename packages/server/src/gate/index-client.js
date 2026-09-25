@@ -110,7 +110,7 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
         || String(target.proposer).toLowerCase() !== identity.proposer
         || keccak256(toUtf8Bytes(target.slug)).toLowerCase() !== identity.slugHash
         || target.slugHash !== undefined && target.slugHash !== identity.slugHash) {
-      throw new IndexUnavailableError("candidate target identity mismatch");
+      throw new IndexIdentityMismatchError("candidate target identity mismatch");
     }
     const refreshedAt = await assertFresh({ healthy: true, refreshedAt: target.refreshedAt }, "candidate target");
     if (target.mappingVersion !== "nouns-candidate-lifecycle/1"

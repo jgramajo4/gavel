@@ -50,8 +50,16 @@ function explanatoryProse(value) {
   if (lines.some((line) => FORGED_FIELD.test(line))) {
     fail("FORGED_AUTHORITATIVE_METADATA", "Explanation may not introduce proposal, status, or recommendation fields");
   }
-  const escaped = lines.map((line) => line === "" ? "" : inlineText(line, "explanation line")).join("\n").trim();
-  return escaped.split("\n").map((line) => line ? `> ${line}` : ">").join("\n");
+  const escaped = lines.map((line) => {
+    if (!line) return ">";
+    // Each line is a literal inline code span inside the explanation quote.
+    // A delimiter longer than any run in the source keeps backticks literal;
+    // Markdown block syntax, inline links, HTML and linkification are inert.
+    const longest = Math.max(0, ...[...line.matchAll(/`+/g)].map(([run]) => run.length));
+    const fence = "`".repeat(longest + 1);
+    return `> ${fence} ${line} ${fence}`;
+  });
+  return escaped.join("\n");
 }
 
 function presentProposalResponse({ proposal: proposalInput, prediction: predictionInput, explanation = "" } = {}) {

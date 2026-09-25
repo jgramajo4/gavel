@@ -99,7 +99,7 @@ test('index client reads and validates a dedicated candidate target snapshot', a
     refreshedAt: '2026-09-18T00:09:00.000Z', sourceBlock: '123', sourceBlockHash: BLOCK_HASH,
     contentHash: CONTENT_HASH, actions: [],
   });
-  await assert.rejects(client.getTargetSnapshot(TARGET), /identity mismatch/i);
+  await assert.rejects(client.getTargetSnapshot(TARGET), (error) => error.code === 'PROPOSAL_IDENTITY_MISMATCH' && error.statusCode === 409);
 
   source.getTarget = async () => ({
     dao: 'nouns', targetId: TARGET, kind: 'candidate', proposer: PROPOSER, slug: 'fund nouns',

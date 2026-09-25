@@ -48,7 +48,7 @@ function gateTarget(row) {
   if (!row) return row;
   if (row.kind !== "candidate") return { targetId: `proposal:${row.proposalId}`, kind: "proposal", ...gateProposal(row) };
   return {
-    targetId: row.targetId, kind: "candidate", proposer: row.proposer, slug: row.slug,
+    dao: "nouns", targetId: row.targetId, kind: "candidate", proposer: row.proposer, slug: row.slug,
     title: row.title, description: row.description,
     refreshedAt: row.refreshedAt, sourceBlock: row.sourceBlock, sourceBlockHash: row.sourceBlockHash,
     nativeState: row.nativeState, eligibility: row.eligibility, mappingVersion: row.mappingVersion,

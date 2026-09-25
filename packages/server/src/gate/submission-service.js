@@ -14,6 +14,7 @@ const {
   verifyQuoteSignature,
 } = require("@gavel/gate");
 const { redactSignerMaterial } = require("./quote-signer");
+const { IndexIdentityMismatchError } = require("./index-client");
 
 const NOUNS_DAO = "nouns";
 const DECODER_VERSION = SUPPORTED_DECODER_VERSIONS[0];
@@ -306,7 +307,8 @@ function createSubmissionService({
       snapshot = submission.targetId
         ? await indexClient.getTargetSnapshot(submission.targetId)
         : await indexClient.getProposalSnapshot(submission.proposalId);
-    } catch {
+    } catch (error) {
+      if (error instanceof IndexIdentityMismatchError) throw error;
       throw unavailable();
     }
     const expectedTargetId = submission.targetId ?? `proposal:${submission.proposalId}`;

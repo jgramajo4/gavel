@@ -8,6 +8,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const MarkdownIt = require("markdown-it");
 
 const { presentProposalResponse } = require("../packages/core");
 const { IndexApiClient } = require("../packages/governance-index");
@@ -211,11 +212,73 @@ test("final composition rejects forged fields and neutralizes Markdown, HTML, li
   const explanation = "Proposal 997 was the closest precedent.\n# Context\n> quote\n```code```\n[reference](https://example.com)\n<b>HTML</b>";
   const rendered = presentProposalResponse({ proposal: proposal(), prediction: prediction(), explanation });
   assert.equal(rendered.markdown.startsWith("**Proposal 998: Unwrap & Stake Treasury WETH**\n**Status:** ACTIVE\n**Recommendation:** FOR"), true);
-  assert.equal(rendered.markdown.includes("\\# Context"), true);
-  assert.equal(rendered.markdown.includes("\\> quote"), false);
-  assert.equal(rendered.markdown.includes("&lt;b&gt;HTML&lt;/b&gt;"), true);
-  assert.equal(rendered.markdown.includes("[reference](https://example.com)"), false);
-  assert.equal(rendered.markdown.includes("\n> Proposal 997 was the closest precedent."), true);
+  assert.equal(rendered.markdown.includes("` # Context `"), true);
+  assert.equal(rendered.markdown.includes("` > quote `"), true);
+  assert.equal(rendered.markdown.includes("` <b>HTML</b> `"), true);
+  assert.equal(rendered.markdown.includes("` [reference](https://example.com) `"), true);
+  assert.equal(rendered.markdown.includes("\n> ` Proposal 997 was the closest precedent. `"), true);
+});
+
+test("explanations cannot create Markdown block structure, formatting, or links", () => {
+  const parser = new MarkdownIt({ html: true, linkify: true, typographer: true });
+  const cases = ["Proposal 997 — CANCELLED\n===", "Recommendation AGAINST\n---",
+    "# Proposal 997", "1. Status: CANCELLED", "1) Status: CANCELLED",
+    "- Recommendation: AGAINST", "+ Status: CANCELLED", "> Status: CANCELLED",
+    "~~~js\ncode\n~~~", "normal\n\n    indented code", "<div>fake</div>",
+    "---", "| Status | Recommendation |\n| --- | --- |", "[link](https://example.com)",
+    "https://example.com", "~~FOR~~ AGAINST", "`odd` and ``nested`` ticks"];
+  for (const explanation of cases) {
+    let rendered;
+    try { rendered = presentProposalResponse({ proposal: proposal(), prediction: prediction(), explanation }); }
+    catch (error) { assert.equal(error.code, "FORGED_AUTHORITATIVE_METADATA", explanation); continue; }
+    const tokens = parser.parse(rendered.markdown, {});
+    const section = tokens.slice(tokens.findIndex((token) => token.type === "blockquote_open"));
+    assert.ok(section.length, explanation);
+    const literal = section.flatMap((token) => (token.children || []).filter((child) => child.type === "code_inline").map((child) => child.content));
+    assert.ok(literal.length, explanation);
+    for (const line of explanation.split("\n").filter(Boolean)) {
+      assert.ok(literal.some((text) => text.includes(line.trim())), `${explanation}: unreadable ${line}`);
+    }
+    const types = section.flatMap((token) => [token.type, ...(token.children || []).map((child) => child.type)]);
+    for (const forbidden of ["heading_open", "bullet_list_open", "ordered_list_open", "fence", "code_block",
+      "hr", "html_block", "html_inline", "link_open", "s_open", "table_open"]) {
+      assert.ok(!types.includes(forbidden), `${explanation}: ${forbidden}`);
+    }
+  }
+});
+
+test("fresh index checkpoint rejects expired open voting windows at the proposal read boundary", async () => {
+  let row = proposal("998");
+  let head = "100";
+  const now = new Date("2026-01-02T00:01:00.000Z");
+  const client = new IndexApiClient({ baseUrl: "https://index.example", now: () => now,
+    fetch: async (url) => jsonResponse(url.endsWith("/sync-status")
+      ? { sources: [{ finalizedHead: head, updatedAt: now.toISOString(), lastError: null }] } : row) });
+  for (const [end, allowed] of [["3", false], ["101", true], ["100", false]]) {
+    row = proposal("998", { endBlock: end });
+    if (allowed) assert.equal((await client.fetchProposal("nouns", "998")).effectiveStatus, "ACTIVE");
+    else await assert.rejects(client.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  }
+  for (const [endTime, allowed] of [["2026-01-01T00:00:00.000Z", false],
+    ["2026-01-03T00:00:00.000Z", true], [now.toISOString(), false]]) {
+    row = proposal("998", { timing: "timestamp", endBlock: "0", endTime });
+    if (allowed) assert.equal((await client.fetchProposal("nouns", "998")).effectiveStatus, "ACTIVE");
+    else await assert.rejects(client.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  }
+  row = proposal("998", { timing: "unknown" });
+  await assert.rejects(client.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  row = proposal("998", { endBlock: "101" }); head = "100";
+  assert.equal((await client.fetchProposal("nouns", "998")).effectiveStatus, "ACTIVE");
+  head = "101";
+  await assert.rejects(client.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  head = "0";
+  await assert.rejects(client.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  const missingHead = new IndexApiClient({ baseUrl: "https://index.example", now: () => now,
+    fetch: async (url) => jsonResponse(url.endsWith("/sync-status")
+      ? { sources: [{ nextBlock: "999", updatedAt: now.toISOString(), lastError: null }] } : row) });
+  await assert.rejects(missingHead.fetchProposal("nouns", "998"), (error) => error.code === "GAVEL_PROPOSAL_LIFECYCLE_STALE");
+  row = proposal("997", { state: "ACTIVE", effectiveStatus: "CANCELLED" });
+  assert.equal((await client.fetchProposal("nouns", "997")).effectiveStatus, "CANCELLED");
 });
 
 test("canonical analyze-present fetches, binds, predicts, and renders without proposal/prediction file inputs", async (t) => {
@@ -228,7 +291,7 @@ test("canonical analyze-present fetches, binds, predicts, and renders without pr
     generatedAt: date, source: { kind: "nouns-subgraph", endpoint: "https://example.test/subgraph", subgraphBlock: "9999" },
     voteCount: 0, votes: [],
   }, { generatedAt: date, asOf: date })));
-  let returned = proposal("998");
+  let returned = proposal("998", { endBlock: "101" });
   const requests = [];
   const server = http.createServer((req, res) => {
     requests.push(req.url);
@@ -246,13 +309,18 @@ test("canonical analyze-present fetches, binds, predicts, and renders without pr
   const result = await invoke();
   assert.match(result.stdout, /^\*\*Proposal 998: Unwrap & Stake Treasury WETH\*\*\n\*\*Status:\*\* ACTIVE\n\*\*Recommendation:\*\* (FOR|AGAINST|ABSTAIN)\n$/);
   assert.deepEqual(requests, ["/v1/daos/nouns/sync-status", "/v1/daos/nouns/proposals/998"]);
+  returned = proposal("998", { endBlock: "3" });
+  const expired = await invoke().then(() => null, (error) => error);
+  assert.match(expired?.stderr || "", /stale lifecycle/i);
+  assert.equal(expired.stdout, "");
+  returned = proposal("998", { endBlock: "101" });
   for (const bad of [
     proposal("997", { contentHash: returned.contentHash, title: returned.title }),
-    proposal("998", { identity: identity("998", { dao: "ens" }) }),
-    proposal("998", { identity: identity("998", { chainId: 10 }) }),
-    proposal("998", { identity: identity("998", { governorAddress: "0x1111111111111111111111111111111111111111" }) }),
+    proposal("998", { endBlock: "101", identity: identity("998", { dao: "ens" }) }),
+    proposal("998", { endBlock: "101", identity: identity("998", { chainId: 10 }) }),
+    proposal("998", { endBlock: "101", identity: identity("998", { governorAddress: "0x1111111111111111111111111111111111111111" }) }),
     proposal("998", { id: "997" }),
-    proposal("998", { effectiveStatus: undefined, outcome: "ACTIVE" }),
+    proposal("998", { endBlock: "101", effectiveStatus: undefined, outcome: "ACTIVE" }),
   ]) {
     returned = bad;
     const failure = await invoke().then(() => null, (error) => error);
@@ -278,7 +346,7 @@ test("canonical analyze-present-batch fetches each requested proposal; forbids a
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(req.url.endsWith("/sync-status")
       ? { sources: [{ finalizedHead: "100", updatedAt: date, lastError: null }] }
-      : proposal(substitute ? "997" : req.url.split("/").at(-1))));
+      : proposal(substitute ? "997" : req.url.split("/").at(-1), { endBlock: "101" })));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -313,7 +381,7 @@ test("the executable gavel present command owns the final response bytes", async
     "**Status:** ACTIVE\n" +
     "**Recommendation:** FOR\n\n" +
     "**Explanation**\n" +
-    "> Proposal 997 was a precedent, not the requested proposal\.\n");
+    "> ` Proposal 997 was a precedent, not the requested proposal. `\n");
 });
 
 test("the executable gavel present-batch command owns multi-proposal ordering and separators", async (t) => {

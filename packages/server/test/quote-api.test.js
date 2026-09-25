@@ -6,6 +6,8 @@ const { buildQuoteMessage, createQuoteTypedData, verifyQuoteSignature } = requir
 const { MemoryGateStore } = require("../src/gate/store-memory");
 const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { createSubmissionService } = require("../src/gate/submission-service");
+const { createNounsIndexClient } = require("../src/gate/index-client");
+const { candidateTargetId } = require("@gavel/gate");
 
 function loadHttp() { return require("../src/gate/http"); }
 
@@ -55,7 +57,7 @@ async function harness(options = {}) {
   const store = new MemoryGateStore({ clock });
   await store.mutateProfile({
     profile: { id: "profile-1", wallet: VOTER, walletKind: "eoa", availability: "accepting_now" },
-    policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: false, acceptVoting: true,
+    policy: { dao: "nouns", chainId: "1", enabled: true, acceptPreVote: options.acceptPreVote ?? false, acceptVoting: true,
       attentionAmount: "1000000", tags: [] },
   });
   await store.configureDeployment({
@@ -66,7 +68,7 @@ async function harness(options = {}) {
 
   const submissionService = createSubmissionService({
     store,
-    indexClient: {
+    indexClient: options.indexClient || {
       async getProposalSnapshot(proposalId) {
         if (!state.healthy) {
           const error = new Error("unavailable");
@@ -108,6 +110,60 @@ async function harness(options = {}) {
     server: createGateHttpServer({ authService, profileService, submissionService, ...options.server }),
   };
 }
+
+test("real Gate submission composition preserves identity mismatch as 409 and outages as 503", async () => {
+  let mode = "mismatch";
+  const indexClient = createNounsIndexClient({
+    clock: () => new Date(START),
+    source: {
+      async getHealth() {
+        if (mode === "outage") throw new Error("transport unavailable");
+        return { healthy: true, refreshedAt: START.toISOString(), lastError: null };
+      },
+      async getProposal() {
+        return { dao: "nouns", chainId: 1,
+          governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+          proposalId: mode === "mismatch" ? "41" : "42",
+          effectiveStatus: "ACTIVE", refreshedAt: START.toISOString(),
+          sourceBlock: "100", sourceBlockHash: BLOCK_HASH, contentHash: CONTENT_HASH, actions: [] };
+      },
+    },
+  });
+  const gate = await harness({ indexClient });
+  await withServer(gate.server, async (baseUrl) => {
+    const url = `/v1/gates/${VOTER}/submissions`;
+    const mismatch = await requestJson(baseUrl, url, post(body()));
+    assert.equal(mismatch.status, 409);
+    assert.equal(mismatch.body.error.code, "PROPOSAL_IDENTITY_MISMATCH");
+    assert.equal((await gate.store.counts()).submissions, 0);
+    mode = "outage";
+    const unavailable = await requestJson(baseUrl, url, post(body()));
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.error.code, "CANONICAL_DATA_UNAVAILABLE");
+    assert.equal((await gate.store.counts()).submissions, 0);
+  });
+});
+
+test("real Gate candidate submission preserves mismatched target identity as non-retryable 409", async () => {
+  const proposer = `0x${"aa".repeat(20)}`;
+  const targetId = candidateTargetId(proposer, "expected slug");
+  const indexClient = createNounsIndexClient({
+    clock: () => new Date(START),
+    source: {
+      async getHealth() { return { healthy: true, refreshedAt: START.toISOString(), lastError: null }; },
+      async getTarget() { return { dao: "nouns", targetId, kind: "candidate", proposer, slug: "wrong slug" }; },
+    },
+  });
+  const gate = await harness({ indexClient, acceptPreVote: true });
+  await withServer(gate.server, async (baseUrl) => {
+    const response = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body({
+      targetId, stage: "PRE_VOTE", position: "SPONSOR", proposalId: undefined,
+    })));
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, "PROPOSAL_IDENTITY_MISMATCH");
+    assert.equal((await gate.store.counts()).submissions, 0);
+  });
+});
 
 test("a valid submission returns the frozen payment-required quote payload", async () => {
   const gate = await harness();
