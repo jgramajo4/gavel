@@ -26,6 +26,29 @@ function vote(transactionHash) {
   return { daoId: "ens", chainId: 1, contractAddress: DAO_CONFIGS.ens.contractAddress, proposalId: "1", voter: ADDRESS, support: "FOR", reason: null, voteWeight: "1", blockNumber: "10", timestamp: new Date(0).toISOString(), transactionHash, logIndex: 0, sourceKind: "ens-governor-logs", sourceEndpoint: "https://alice:secret@rpc.example/v2/API_KEY?token=hidden#secret", observedHead: "10" };
 }
 
+function proposalRecord(daoId, sourceId, proposalId, blockNumber, blockHash, transactionHash) {
+  const contentHash = proposalId.padStart(64, "0");
+  return {
+    raw: {
+      daoId, sourceId, chainId: 1, contractAddress: DAO_CONFIGS[daoId].contractAddress,
+      transactionHash, logIndex: 0, blockNumber: String(blockNumber), blockHash,
+      recordType: "proposal", proposalId, contentHash, payload: { id: proposalId },
+      sourceKind: DAO_CONFIGS[daoId].source.kind, sourceEndpoint: "https://rpc.example",
+      observedHead: "20",
+    },
+    proposal: {
+      daoId, proposalId, contentHash,
+      normalized: { id: proposalId, contentHash, state: "ACTIVE", createdBlock: String(blockNumber) },
+      actions: [],
+    },
+  };
+}
+
+function snapshotRows(rows, blockNumber, blockHash) {
+  Object.defineProperty(rows, "snapshot", { value: { blockNumber, blockHash } });
+  return rows;
+}
+
 test("credential-bearing transport URLs are never persisted in governance data", async () => {
   for (const [index, sourceEndpoint] of [
     "https://eth-mainnet.g.alchemy.com/v2/SECRET",
@@ -166,6 +189,136 @@ test("Nouns pages are pinned and proposals without votes are enumerated", async 
   assert.equal(requests.at(-2).variables.after, "");
   assert.equal(requests.at(-2).query.includes("skip"), false);
   assert.equal(source.replayBlocks, 8);
+});
+
+test("ENS full enumeration accepts proposal creation hashes from different blocks", async () => {
+  const store = new MemoryGovernanceStore();
+  const records = [
+    proposalRecord("ens", "governor-logs", "1", 10, `0x${"01".repeat(32)}`, TX),
+    proposalRecord("ens", "governor-logs", "2", 11, `0x${"02".repeat(32)}`, TX2),
+  ];
+  const source = {
+    id: "governor-logs", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS.ens,
+    rpcUrl: "https://rpc.example",
+    async head() { return 20; },
+    async fetchProposals() { return records; },
+    async fetchRange() { return []; },
+    async normalizeLog() { throw new Error("unexpected log"); },
+  };
+
+  const result = await new GovernanceSyncWorker({ store, sources: { ens: source }, batchSize: 100 })
+    .syncDao("ens", { fullProposalScan: true });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(store.rawRecords.map((row) => row.blockHash), records.map((row) => row.raw.blockHash));
+  assert.equal(store.getCheckpoint("ens", "governor-logs").nextBlock, 21);
+});
+
+test("one DAO refresh failure does not starve peers and recovers on the next cycle", async () => {
+  const store = new MemoryGovernanceStore();
+  const heads = { nouns: 20, ens: 20, "railgun-eth": 20 };
+  const attempts = { nouns: 0, ens: 0, "railgun-eth": 0 };
+  let ensFails = true;
+  let candidateReads = 0;
+  const nounsHash = `0x${"aa".repeat(32)}`;
+  const sources = {
+    nouns: {
+      id: "nouns-subgraph", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS.nouns,
+      async head() { attempts.nouns += 1; return heads.nouns; },
+      async fetchProposals() { return snapshotRows([], heads.nouns, nounsHash); },
+      async fetchCandidates() { candidateReads += 1; return snapshotRows([], heads.nouns, nounsHash); },
+      async fetchRange() { return []; },
+      async normalizeLog() { throw new Error("unexpected Nouns log"); },
+    },
+    ens: {
+      id: "governor-logs", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS.ens,
+      rpcUrl: "https://rpc.example",
+      async head() { attempts.ens += 1; return heads.ens; },
+      async fetchProposals() {
+        if (ensFails) throw new Error("ENS snapshot-integrity failure");
+        return [
+          proposalRecord("ens", "governor-logs", "1", 10, `0x${"01".repeat(32)}`, TX),
+          proposalRecord("ens", "governor-logs", "2", 11, `0x${"02".repeat(32)}`, TX2),
+        ];
+      },
+      async fetchRange() { return []; },
+      async normalizeLog() { throw new Error("unexpected ENS log"); },
+    },
+    "railgun-eth": {
+      id: "voting-logs", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS["railgun-eth"],
+      rpcUrl: "https://rpc.example",
+      async head() { attempts["railgun-eth"] += 1; return heads["railgun-eth"]; },
+      async fetchProposals() { return []; },
+      async fetchRange() { return []; },
+      async normalizeLog() { throw new Error("unexpected Railgun log"); },
+    },
+  };
+  const worker = new GovernanceSyncWorker({ store, sources, batchSize: 100 });
+
+  await assert.rejects(worker.syncAll({ fullProposalScan: true }), (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.message, "DAO sync failed for: ens");
+    assert.match(error.errors[0].message, /ENS snapshot-integrity failure/);
+    return true;
+  });
+  const first = Object.fromEntries([...store.checkpoints.values()].map((row) => [row.daoId, row]));
+  assert.equal(first.nouns.nextBlock, 21);
+  assert.equal(first.nouns.lastError, null);
+  assert.equal(first.ens.nextBlock, 1);
+  assert.match(first.ens.lastError, /snapshot-integrity failure/);
+  assert.equal(first["railgun-eth"].nextBlock, 21);
+  assert.equal(first["railgun-eth"].lastError, null);
+  assert.deepEqual(attempts, { nouns: 1, ens: 1, "railgun-eth": 1 });
+  assert.equal(healthStatus({ checkpoints: Object.values(first) }, Object.keys(sources), { maxAgeSeconds: 3600 }).ok, false);
+  assert.deepEqual(healthStatus({ checkpoints: Object.values(first) }, Object.keys(sources), { maxAgeSeconds: 3600 }).errors.map((row) => row.daoId), ["ens"]);
+
+  ensFails = false;
+  heads.nouns = 21; heads.ens = 21; heads["railgun-eth"] = 21;
+  const results = await worker.syncAll({ fullProposalScan: true });
+  const second = Object.fromEntries([...store.checkpoints.values()].map((row) => [row.daoId, row]));
+  assert.deepEqual(results.map((row) => row.dao), ["nouns", "ens", "railgun-eth"]);
+  assert.deepEqual(attempts, { nouns: 2, ens: 2, "railgun-eth": 2 });
+  assert.equal(candidateReads, 2, "only the Nouns source exposes candidate snapshot state");
+  assert.equal(second.nouns.nextBlock, 22);
+  assert.equal(second.ens.nextBlock, 22);
+  assert.equal(second.ens.lastError, null);
+  assert.equal(second["railgun-eth"].nextBlock, 22);
+  assert.equal(healthStatus({ checkpoints: Object.values(second) }, Object.keys(sources), { maxAgeSeconds: 3600 }).ok, true);
+  assert.deepEqual(new Set(store.rawRecords.map((row) => row.daoId)), new Set(["ens"]));
+});
+
+test("a pre-enumeration DAO failure replaces a clean checkpoint with failed health", async () => {
+  const now = new Date().toISOString();
+  const store = new MemoryGovernanceStore();
+  await store.transaction(async (tx) => {
+    tx.setCheckpoint({ daoId: "ens", sourceId: "governor-logs", nextBlock: 21, finalizedHead: 20, updatedAt: now, lastError: null });
+    tx.setCheckpoint({ daoId: "railgun-eth", sourceId: "voting-logs", nextBlock: 21, finalizedHead: 20, updatedAt: now, lastError: null });
+  });
+  const sources = {
+    ens: {
+      id: "governor-logs", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS.ens,
+      rpcUrl: "https://rpc.example",
+      async head() { throw new Error("ENS head unavailable"); },
+    },
+    "railgun-eth": {
+      id: "voting-logs", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS["railgun-eth"],
+      rpcUrl: "https://rpc.example",
+      async head() { return 21; }, async fetchProposals() { return []; }, async fetchRange() { return []; },
+      async normalizeLog() { throw new Error("unexpected Railgun log"); },
+    },
+  };
+
+  await assert.rejects(new GovernanceSyncWorker({ store, sources, batchSize: 100 }).syncAll(), /DAO sync failed for: ens/);
+
+  const ens = store.getCheckpoint("ens", "governor-logs");
+  const railgun = store.getCheckpoint("railgun-eth", "voting-logs");
+  assert.equal(ens.nextBlock, 21, "failed head lookup cannot advance the checkpoint");
+  assert.equal(ens.finalizedHead, 20);
+  assert.match(ens.lastError, /head unavailable/);
+  assert.equal(railgun.nextBlock, 22);
+  const health = healthStatus({ checkpoints: [ens, railgun] }, Object.keys(sources), { maxAgeSeconds: 3600 });
+  assert.equal(health.ok, false);
+  assert.deepEqual(health.errors.map((row) => row.daoId), ["ens"]);
 });
 
 test("Nouns proposal records reconcile independently and disappearing proposals are removed", async () => {
