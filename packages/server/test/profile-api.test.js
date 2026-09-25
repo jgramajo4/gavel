@@ -70,7 +70,7 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
     async getHealth() { return { healthy: true, refreshedAt: "2026-09-14T00:00:01.000Z" }; },
     async getProposal() {
       return {
-        dao: "nouns", proposalId: "42", nativeState: "ACTIVE", effectiveStatus: "ACTIVE",
+        dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", nativeState: "ACTIVE", effectiveStatus: "ACTIVE",
         refreshedAt: "2026-09-14T00:00:01.000Z",
         sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH,
         actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
@@ -80,9 +80,62 @@ test("Nouns index client returns a complete fresh canonical proposal snapshot", 
   const client = createNounsIndexClient({ source, clock: () => now });
 
   assert.deepEqual(await client.getProposalSnapshot("42"), {
-    dao: "nouns", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
+    dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
     refreshedAt: "2026-09-14T00:00:01.000Z", sourceBlock: "123", sourceBlockHash: BLOCK_HASH,
     contentHash: HASH, canonicalActions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
+  });
+});
+
+test("Nouns index identity mismatch is non-retryable and distinct from index unavailability", async () => {
+  const { createNounsIndexClient, IndexIdentityMismatchError, IndexUnavailableError } = loadIndexClient();
+  const refreshedAt = "2026-09-14T00:00:01.000Z";
+  const source = {
+    async getHealth() { return { healthy: true, refreshedAt }; },
+    async getProposal() {
+      return {
+        dao: "nouns", chainId: 1,
+        governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+        proposalId: "41", effectiveStatus: "ACTIVE", refreshedAt,
+        sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
+      };
+    },
+  };
+  const error = await createNounsIndexClient({ source, clock: () => new Date("2026-09-14T00:10:00.000Z") })
+    .getProposalSnapshot("42").catch((caught) => caught);
+  assert.ok(error instanceof IndexIdentityMismatchError);
+  assert.equal(error instanceof IndexUnavailableError, false);
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, "PROPOSAL_IDENTITY_MISMATCH");
+});
+
+test("Gate HTTP exposes a non-retryable proposal identity mismatch as 409", async () => {
+  const { createGateHttpServer } = loadHttp();
+  const { IndexIdentityMismatchError } = loadIndexClient();
+  const server = createGateHttpServer({
+    authService: {
+      async issueChallenge() { return {}; },
+      async verifyProof() { return {}; },
+      async authenticateSession() { return { wallet: WALLET, role: "base_sender" }; },
+    },
+    profileService: {
+      async updateProfile() { return {}; },
+      async listPublicProfiles() { return []; },
+      async getPublicProfile() { return null; },
+    },
+    submissionService: {
+      async createSubmission() { throw new IndexIdentityMismatchError(); },
+      async getPublicStatus() { return null; },
+      async resumeSubmission() { return null; },
+    },
+  });
+  await withServer(server, async (baseUrl) => {
+    const result = await requestJson(baseUrl, `/v1/gates/${WALLET}/submissions`, {
+      method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "PROPOSAL_IDENTITY_MISMATCH");
   });
 });
 
@@ -90,7 +143,7 @@ test("Nouns index client rejects malformed or non-canonical proposal actions", a
   const { createNounsIndexClient, IndexUnavailableError } = loadIndexClient();
   const now = new Date("2026-09-14T00:10:00.000Z");
   const base = {
-    dao: "nouns", proposalId: "42", effectiveStatus: "ACTIVE",
+    dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", effectiveStatus: "ACTIVE",
     refreshedAt: "2026-09-14T00:00:01.000Z", sourceBlock: "123",
     sourceBlockHash: BLOCK_HASH, contentHash: HASH,
   };
@@ -172,7 +225,7 @@ test("dedicated governance HTTP projection preserves every field required by Gat
     };
     const client = loadIndexClient().createNounsIndexClient({ source, clock: () => new Date("2026-09-14T00:10:00.000Z") });
     assert.deepEqual(await client.getProposalSnapshot("42"), {
-      dao: "nouns", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
+      dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", nativeState: "ACTIVE", eligibility: "VOTING", mappingVersion: "nouns-lifecycle/1",
       refreshedAt, sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH,
       canonicalActions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
     });
@@ -185,7 +238,7 @@ test("Nouns index client reports aggregate freshness age and health without sour
   const source = {
     async getHealth() { return { healthy: true, refreshedAt: "2026-09-14T00:00:00.000Z" }; },
     async getProposal() { return {
-      dao: "nouns", proposalId: "42", effectiveStatus: "ACTIVE", refreshedAt: "2026-09-14T00:00:00.000Z",
+      dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", effectiveStatus: "ACTIVE", refreshedAt: "2026-09-14T00:00:00.000Z",
       sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
     }; },
   };
@@ -211,7 +264,7 @@ test("Nouns index client never exposes stale ACTIVE as VOTING after canonical te
     async getHealth() { return { healthy: true, refreshedAt: "2026-09-14T00:00:01.000Z" }; },
     async getProposal() {
       return {
-        dao: "nouns", proposalId: "42", nativeState: "ACTIVE", sourceState: "ACTIVE",
+        dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", nativeState: "ACTIVE", sourceState: "ACTIVE",
         effectiveStatus: "DEFEATED", trackingState: "FINAL", refreshedAt: "2026-09-14T00:00:01.000Z",
         sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
       };
@@ -282,7 +335,7 @@ test("Nouns index client bounds every source operation and aborts timed-out work
 test("Nouns index client fails closed for stale data and never interprets numeric lifecycle codes", async () => {
   const { createNounsIndexClient, IndexUnavailableError } = loadIndexClient();
   const proposal = {
-    dao: "nouns", proposalId: "42", nativeState: 1, effectiveStatus: 1,
+    dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: "42", nativeState: 1, effectiveStatus: 1,
     refreshedAt: "2026-09-14T00:00:01.000Z",
     sourceBlock: "123", sourceBlockHash: BLOCK_HASH, contentHash: HASH, actions: [],
   };

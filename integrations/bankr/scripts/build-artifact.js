@@ -56,7 +56,15 @@ for (const [name, range] of Object.entries(gatePackage.dependencies || {})) {
   pkg.dependencies[name] = range;
 }
 pkg.dependencies["@gavel/gate"] = "file:vendor/gate";
-pkg.files = ["README.md", "SKILL.md", "references", "scripts", "src", "vendor/gate"];
+const vendorIdentity = path.join(output, "vendor", "proposal-identity");
+const repositoryIdentity = path.join(repoRoot, "packages", "proposal-identity");
+const identitySource = fs.existsSync(repositoryIdentity)
+  ? repositoryIdentity
+  : path.join(skillDir, "vendor", "proposal-identity");
+if (!fs.existsSync(identitySource)) throw new Error("cannot locate the @gavel/proposal-identity source to vendor");
+fs.cpSync(identitySource, vendorIdentity, { recursive: true });
+pkg.dependencies["@gavel/proposal-identity"] = "file:vendor/proposal-identity";
+pkg.files = ["README.md", "SKILL.md", "references", "scripts", "src", "vendor/gate", "vendor/proposal-identity"];
 fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
 if (buildSha) {

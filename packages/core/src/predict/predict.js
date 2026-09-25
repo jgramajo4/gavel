@@ -229,6 +229,7 @@ function predictVote(profileInput, proposalInput, options = {}) {
     voter: profile.voter,
     proposalId: proposal.id,
     proposalContentHash: proposal.contentHash,
+    ...(proposal.identity ? { identity: proposal.identity } : {}),
     recommendation,
     confidence: confidenceResult.confidence,
     confidencePercent: Math.round(confidenceResult.confidence * 100),

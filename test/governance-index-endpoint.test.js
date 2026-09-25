@@ -18,12 +18,17 @@ const cli = path.join(root, "packages", "cli", "bin", "gavel.js");
 const VOTER = "0xF6e7501dFe7003299108020c5830C4c5B3CA6aA9";
 const TX = `0x${"a".repeat(64)}`;
 
-function indexedProposal() {
+function indexedProposal(dao = "ens") {
+  const governors = {
+    ens: "0x323a76393544d5ecca80cd6ef2a560c6a395b7e3",
+    nouns: "0x6f3e6272a167e8accb32072d08e0957f9c79223d",
+  };
   return {
     id: "1", contentHash: crypto.createHash("sha256").update("ens-1").digest("hex"),
     title: "Indexed", description: "Body", proposer: VOTER, state: "EXECUTED", outcome: "PASSED",
     createdBlock: "100", createdAt: "2023-11-14T22:13:20.000Z", startBlock: "110", endBlock: "200",
-    quorumVotes: "10", forVotes: "9", againstVotes: "1", abstainVotes: "0", actions: [], dao: "ens", chainId: 1,
+    quorumVotes: "10", forVotes: "9", againstVotes: "1", abstainVotes: "0", actions: [], dao, chainId: 1,
+    identity: { dao, chainId: 1, governorAddress: governors[dao], proposalId: "1" },
   };
 }
 
@@ -37,7 +42,7 @@ async function startStubIndex() {
         ? { items: [{ chainId: 1, proposalId: "1", voter: VOTER, support: "FOR", reason: null, blockNumber: "150",
             timestamp: "2023-11-14T22:15:00.000Z", voteWeight: "5", clientId: 0, sourceKind: "ens-governor",
             sourceEndpoint: "https://rpc.example", entityId: "e1", transactionHash: TX, logIndex: 0, observedHead: "500" }], nextCursor: null }
-        : indexedProposal();
+        : indexedProposal(pathname.includes("/nouns/") ? "nouns" : "ens");
     const payload = JSON.stringify(body);
     res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
     res.end(payload);

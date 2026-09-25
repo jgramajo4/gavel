@@ -12,7 +12,7 @@ const {
 const { sanitizeConfig, sanitizeEndpoint, sanitizeProvenance } = require("./provenance");
 const { PROVISIONED_ROLES, auditRoles, ensureRoles, presentRoles, verifyPermissions } = require("./roles");
 
-const { TrackingState, trackingStateFor } = require("../../core/src/governance/lifecycle");
+const { TrackingState, trackingStateFor, presentProposal } = require("../../core/src/governance/lifecycle");
 const { redactErrorMessage } = require("./redaction");
 const { canonicalGateActions } = require("./gate-action");
 const { canonicalCandidateTarget } = require("./candidate-target");
@@ -650,6 +650,7 @@ class PostgresGovernanceStore {
     const row = (await this.pool.query(`
       SELECT p.proposal_id::text AS "proposalId",p.normalized->>'title' AS title,
         p.normalized->>'proposer' AS proposer,p.effective_status AS "effectiveStatus",
+        p.lifecycle_reason AS "lifecycleReason",p.normalized AS normalized,
         provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
         provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
         COALESCE((
@@ -678,7 +679,7 @@ class PostgresGovernanceStore {
       refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
       sourceBlock: row.sourceBlock,
       sourceBlockHash: row.sourceBlockHash,
-      effectiveStatus: row.effectiveStatus,
+      effectiveStatus: presentProposal(row.normalized, row).effectiveStatus,
       contentHash: typeof row.contentHash === "string" && row.contentHash.startsWith("0x") ? row.contentHash : `0x${row.contentHash}`,
       actions: row.actions,
     };
@@ -712,6 +713,7 @@ class PostgresGovernanceStore {
     const row = (await this.pool.query(`
       SELECT p.dao_id AS dao,p.proposal_id::text AS "proposalId",p.normalized,
         p.effective_status AS "effectiveStatus",p.tracking_state AS "trackingState",
+        p.lifecycle_reason AS "lifecycleReason",
         provenance.ingested_at AS "refreshedAt",provenance.block_number::text AS "sourceBlock",
         provenance.block_hash AS "sourceBlockHash",'0x' || p.content_hash AS "contentHash",
         COALESCE((
@@ -732,9 +734,11 @@ class PostgresGovernanceStore {
     if (!row) return null;
     const contentHash = typeof row.contentHash === "string" && row.contentHash.startsWith("0x")
       ? row.contentHash : `0x${row.contentHash}`;
+    const effectiveStatus = presentProposal(row.normalized, row).effectiveStatus;
     return {
       ...row,
-      nativeState: row.effectiveStatus,
+      effectiveStatus,
+      nativeState: effectiveStatus,
       sourceState: row.normalized?.sourceState ?? row.normalized?.state,
       refreshedAt: row.refreshedAt instanceof Date ? row.refreshedAt.toISOString() : row.refreshedAt,
       contentHash,
@@ -750,11 +754,13 @@ class PostgresGovernanceStore {
       where += " AND proposal_id < $3";
     }
     const rows = (await this.pool.query(`
-      SELECT proposal_id::text AS "proposalId",normalized
+      SELECT proposal_id::text AS "proposalId",normalized,
+        effective_status AS "effectiveStatus",tracking_state AS "trackingState",
+        lifecycle_reason AS "lifecycleReason"
       FROM proposals WHERE ${where} ORDER BY proposal_id DESC LIMIT $2
     `, params)).rows;
     const more = rows.length > limit;
-    const items = rows.slice(0, limit).map((row) => row.normalized);
+    const items = rows.slice(0, limit).map((row) => presentProposal(row.normalized, row));
     return { items, nextCursor: more ? encodeProposalCursor(rows[limit - 1].proposalId) : null };
   }
 

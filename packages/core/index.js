@@ -5,6 +5,8 @@
 module.exports = {
   ...require("./src/schema/governance"),
   ...require("./src/governance/lifecycle"),
+  ...require("@gavel/proposal-identity"),
+  ...require("./src/governance/presentation"),
   ...require("./src/schema/execution"),
   ...require("./src/schema/intent"),
   ...require("./src/intent/vote-intent"),

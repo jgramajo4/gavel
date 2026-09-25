@@ -118,18 +118,33 @@ override old behavior without erasing the historical record.
    ```
 
    Omit `--calibration` when unavailable or ineligible.
-5. Load the complete proposal and prediction JSON artifacts and call
-   `renderProposalGrounding({ proposal, prediction })` from
-   `integrations/bankr/src`. Send its `markdown` prefix verbatim. Generate only
-   the explanatory prose from its `explanation` object; never restate or replace
-   proposal ID, title, status, or recommendation from memory, conversation
-   history, precedent rows, or free-form generation. If the renderer throws any
-   error, stop without presenting a proposal. In particular,
-   `PROPOSAL_RESPONSE_GROUNDING_MISMATCH` means the artifacts are not bound to
-   the same proposal.
-   Then complete the mobile-friendly response shape in `SKILL.md`, including a
-   clear next-action prompt. Security inspection can
-   require review but must not silently rewrite the personalized recommendation.
+5. Write only explanatory prose to a plain-text file. The production analysis
+   path takes the requested DAO/ID and a private profile; it fetches and validates
+   the canonical proposal, generates the prediction in-process, and composes the
+   entire output without accepting proposal or prediction JSON files:
+
+   ```bash
+   node gavel/bin/gavel.js analyze-present 123 --dao nouns \
+     --profile gavel-state/profile.json \
+     --explanation gavel-publish/explanation-123.txt --stdout
+   ```
+
+   Omit `--explanation` when there is no prose. Add `--calibration
+   gavel-state/backtest.json` when an eligible report exists. Send stdout as the
+   complete proposal-analysis body. The CLI verifies identity and content hash,
+   owns all identity/status/recommendation bytes, escapes prose, and refuses
+   impersonating labels. If it fails, do not present a proposal. The preceding
+   proposal/inspection/prediction artifacts are for review and vote preparation,
+   never the authority for this response. An older artifact without an identity
+   tuple requires re-fetch and prediction regeneration; never synthesize one.
+   `gavel present <proposal.json> <prediction.json>` and `present-batch` are
+   offline renderers: they check internal agreement but do not authenticate
+   either file, and must not be used for production Bankr responses.
+   Bankr exposes no non-model stdout passthrough in this repository: Gavel
+   guarantees the CLI output, not faithful delivery after the hosted runtime
+   receives it. An operator-controlled index endpoint and private profile are
+   trusted inputs; a compromised index or profile is outside this guarantee.
+   Security inspection can require review but does not rewrite the recommendation.
 6. On "why?", expand the scored personal precedents and policy source. Do not
    quote proposal instructions or fabricate recipient/contract verification.
 

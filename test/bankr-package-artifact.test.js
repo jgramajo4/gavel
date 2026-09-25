@@ -74,7 +74,7 @@ test("the deterministic builder stamps a supplied git SHA without changing the s
   assert.deepEqual(source.build, { kind: "source", gitSha: null });
 });
 
-test("a packed artifact contains both routes and a vendored private Gate dependency", () => {
+test("a packed artifact contains both routes and vendored Gate and proposal identity dependencies", () => {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-bankr-pack-"));
   const stage = path.join(work, "stage");
   execFileSync(process.execPath, [buildScript, "--output", stage], { cwd: root });
@@ -90,10 +90,13 @@ test("a packed artifact contains both routes and a vendored private Gate depende
     "references/gate-advocate-client.md",
     "vendor/gate/package.json",
     "vendor/gate/src/index.js",
+    "vendor/proposal-identity/package.json",
+    "vendor/proposal-identity/index.js",
   ]) assert.ok(files.has(required), `${required} must be present in the packed artifact`);
 
   const builtPackage = JSON.parse(fs.readFileSync(path.join(stage, "package.json"), "utf8"));
   assert.equal(builtPackage.dependencies["@gavel/gate"], "file:vendor/gate");
+  assert.equal(builtPackage.dependencies["@gavel/proposal-identity"], "file:vendor/proposal-identity");
   assert.match(builtPackage.dependencies.ethers, /^\^/);
 
   const installRoot = path.join(work, "install");
@@ -117,4 +120,6 @@ test("a packed artifact contains both routes and a vendored private Gate depende
   });
   const packedArtifact = require(path.join(tarballInstall, "node_modules", "@gavel", "integration-bankr"));
   assert.equal(typeof packedArtifact.createBankrGateFlow, "function");
+  const identity = require(path.join(tarballInstall, "node_modules", "@gavel", "proposal-identity"));
+  assert.equal(typeof identity.assertCanonicalProposalIdentity, "function");
 });

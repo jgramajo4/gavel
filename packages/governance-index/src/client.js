@@ -2,6 +2,8 @@ const { getAddress } = require("ethers");
 const { historyDocumentSchema, normalizedVoteSchema } = require("../../core/src/schema/governance");
 const { DEFAULT_INDEX_API_URL } = require("../../core/src/config/index-api-endpoint");
 const { sanitizeEndpoint } = require("./provenance");
+const { DAO_CONFIGS } = require("./config");
+const { assertCanonicalProposalIdentity, canonicalContentHash, canonicalProposalIdentity } = require("@gavel/proposal-identity");
 
 const SUPPORTED_DAOS = ["nouns", "ens", "railgun-eth"];
 // Public read-only index. Used when no operator override is configured, so an
@@ -216,9 +218,25 @@ class IndexApiClient {
   async fetchProposal(dao, id, op) {
     return this.runOperation(op, async (budget) => {
       const daoId = IndexApiClient.dao(dao);
-      if (!/^\d+$/.test(String(id)) || String(id).length > 78) throw new TypeError("invalid proposal id");
+      if (typeof id !== "string" || !/^(0|[1-9][0-9]*)$/.test(id) || id.length > 78) throw new TypeError("invalid proposal id");
       await this.assertFresh(daoId, budget);
-      return this.request(`/v1/daos/${daoId}/proposals/${id}`, budget);
+      const proposal = await this.request(`/v1/daos/${daoId}/proposals/${id}`, budget);
+      const config = DAO_CONFIGS[daoId];
+      const expected = canonicalProposalIdentity({
+        dao: daoId,
+        chainId: config.chainId,
+        governorAddress: config.currentGovernor,
+        proposalId: id,
+      });
+      assertCanonicalProposalIdentity(proposal?.identity, expected);
+      assertCanonicalProposalIdentity({
+        dao: proposal?.dao ?? expected.dao,
+        chainId: proposal?.chainId ?? expected.chainId,
+        governorAddress: proposal?.identity?.governorAddress,
+        proposalId: proposal?.id,
+      }, expected);
+      canonicalContentHash(proposal?.contentHash);
+      return proposal;
     });
   }
 

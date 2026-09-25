@@ -15,24 +15,26 @@ say so briefly rather than manufacturing engagement.
    fetch → inspect → predict workflow in `gavel-workflows.md`.
 3. Rank ending-soon proposals first, then high-confidence recommendations, then
    low-confidence/manual-review items.
-4. Keep the first view compact and phone-friendly:
+4. Create a schema-version 1 canonical batch manifest in ranked order. Each
+   item contains only `dao`, `proposalId`, a `profile` path relative to the
+   manifest, and optionally relative `explanation` and `calibration` paths:
 
-   ```markdown
-   **Gavel Daily ⚖️**
-   **2 proposals need your attention**
-
-   **Prop 123 — FOR · 84% calibrated**
-   Strong personal precedent; no hard rule triggered.
-
-   **Prop 124 — AGAINST · 61% not yet calibrated**
-   Weak precedent; security review required.
-
-   **What next?**
-   1. Review Prop 123
-   2. Review Prop 124
-   3. Show all active proposals
+   ```json
+   {"schemaVersion":1,"items":[{"dao":"nouns","proposalId":"998","profile":"profile.json"}]}
    ```
 
+   Then run:
+
+   ```bash
+   node gavel/bin/gavel.js analyze-present-batch /tmp/gavel-briefing/manifest.json --stdout
+   ```
+
+   Stage the private profile inside the manifest directory. The CLI fetches
+   each proposal fresh and predicts in-process; the manifest cannot contain
+   proposal/prediction JSON or authoritative title/status/recommendation. Do not
+   use the offline `present-batch` renderer for production Bankr briefings.
+   Send stdout as the complete proposal portion. Do not manufacture a compact
+   `Prop 123 — FOR` line or append a second metadata summary.
 5. Offer evidence, precedents, and draft reasons on drill-down. Never send a
    second proactive briefing the same day merely because tallies changed.
 
@@ -41,9 +43,11 @@ say so briefly rather than manufacturing engagement.
 Preparation produces canonical-verified unsigned calldata, not a broadcast:
 
 1. Re-fetch the proposal and compare its content hash with the analyzed version.
-2. Show the recommendation, score kind, `predictionReview`, policy source,
-   personal precedents, all structural-inspection/hard-rule flags, and the draft
-   reason. Never call a heuristic score an accuracy probability.
+2. Put score kind, `predictionReview`, policy source, personal precedents,
+   structural-inspection/hard-rule flags, and the draft reason into the
+   plain-text explanation file. Run `gavel analyze-present` and send its stdout before
+   any machine-generated preparation receipt. Never append model-authored
+   Markdown to that output or call a heuristic score an accuracy probability.
 3. Ask the user to confirm the exact `FOR`, `AGAINST`, or `ABSTAIN` choice and
    reason. A choice that differs from the prediction requires correcting or
    regenerating the prediction first.

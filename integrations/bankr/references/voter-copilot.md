@@ -88,35 +88,18 @@ capability and may not be available in every Bankr client.
 
 ## Default response shape
 
-For proposal analysis, lead with the exact `markdown` returned by
-`renderProposalGrounding({ proposal, prediction })`. Do not type or reconstruct
-the proposal ID, title, status, or recommendation yourself. Generate only the
-explanatory sections below from the renderer's `explanation` object:
+For proposal analysis, send the exact stdout from `gavel analyze-present`; do not type,
+copy, or reconstruct proposal ID, title, status, or recommendation. The model may
+author only the plain-text explanation file accepted by that command. Put the
+plain-language rationale, evidence quality, score semantics, precedents,
+security caveats, draft reason, and numbered next actions in that file as normal
+sentences. The presenter escapes all formatting and composes the entire final
+body; append nothing after stdout.
 
-```markdown
-<verbatim deterministic proposal identity/status/recommendation prefix>
-
-<one-sentence plain-language explanation>
-**Score:** <percentage> · calibrated correctness estimate | heuristic
-
-**Why this fits you**
-- <personal evidence>
-
-**Closest precedents**
-- Prop <id> — <vote> — <similarity>
-
-**Structural calldata check:** No issue detected | Review needed
-- <hard-rule, security, novelty, or conflict flag when present>
-
-**Draft voting reason**
-> <clearly labeled draft or "insufficient writing evidence">
-
-**What would you like to do next?**
-1. Explain this recommendation
-2. Adjust my preferences
-3. Prepare this vote for review
-4. Show other active proposals
-```
+Normal prose may discuss another proposal as a precedent (for example,
+"Proposal 997 was the closest precedent"). It must not introduce a field-like
+line such as `Proposal:`, `Status:`, or `Recommendation:`; the presenter rejects
+those forms.
 
 Do not hide weak evidence. If calibration is unavailable, call the value a
 heuristic score, not a probability. A clear structural calldata check is not a

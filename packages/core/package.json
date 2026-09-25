@@ -9,6 +9,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@gavel/proposal-identity": "0.1.0",
     "@safe-global/api-kit": "5.0.3",
     "@safe-global/protocol-kit": "8.0.7",
     "@safe-global/types-kit": "4.0.1",

@@ -131,7 +131,8 @@ separate review-only step and must never imply that the vote was broadcast.
 ## Formatting rules
 
 - Use `**bold**` headings and labels; do not use Markdown tables in chat.
-- Use title case for proposal names and sentence case for explanations.
+- Preserve canonical proposal titles byte-for-byte. Use sentence case only for
+  model-authored explanations.
 - Keep the first view scannable on a phone: short paragraphs and one idea per
   bullet.
 - Prefer human dates over raw ISO timestamps; provide exact timestamps only in

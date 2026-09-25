@@ -1,0 +1,11 @@
+{
+  "name": "@gavel/proposal-identity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canonical Gavel proposal identity and content-binding invariants.",
+  "license": "GPL-3.0-only",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  }
+}

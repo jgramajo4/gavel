@@ -1,12 +1,14 @@
 "use strict";
 
 const { candidateTargetId, parseNounsCandidateTargetId } = require("@gavel/gate");
+const { assertCanonicalProposalIdentity, canonicalContentHash } = require("@gavel/proposal-identity");
 const { BankrGateError } = require("./errors");
 const { sanitizeDisplayText, truncateDisplay } = require("./format");
 
 const CANDIDATE_POSITION = "SPONSOR";
 const NOUNS_CHAIN_ID = 1;
 const NOUNS_GOVERNOR_ADDRESS = "0x6f3e6272a167e8accb32072d08e0957f9c79223d";
+const RESOLVED_TARGETS = new WeakSet();
 
 /**
  * Stage language.
@@ -72,6 +74,10 @@ function describeTarget(row, { position } = {}) {
     if (row.nativeState !== "ACTIVE" || row.eligibility !== "PRE_VOTE") {
       throw ineligible("This Proposal Candidate is no longer eligible for sponsorship requests.");
     }
+    if (typeof row.contentHash !== "string" || !/^0x[0-9a-f]{64}$/.test(row.contentHash)) {
+      throw ineligible("This candidate's canonical content hash is invalid.");
+    }
+    canonicalContentHash(row.contentHash.slice(2));
     if (position !== undefined && position !== CANDIDATE_POSITION) {
       throw new BankrGateError(
         "INVALID_TARGET",
@@ -110,6 +116,10 @@ function describeTarget(row, { position } = {}) {
   if (row.effectiveStatus !== "ACTIVE") {
     throw ineligible("This Nouns proposal is not in an open voting window.");
   }
+  if (typeof row.contentHash !== "string" || !/^0x[0-9a-f]{64}$/.test(row.contentHash)) {
+    throw ineligible("This proposal's canonical content hash is invalid.");
+  }
+  canonicalContentHash(row.contentHash.slice(2));
   const trimmed = typeof position === "string" ? position.trim() : "";
   if (!trimmed) {
     throw new BankrGateError("INVALID_TARGET", "State the position you are advocating for on this proposal.");
@@ -161,21 +171,27 @@ async function resolveTarget(indexApi, input = {}) {
   if (id.startsWith("candidate:") && row.targetId !== id) {
     throw ineligible("The canonical index returned a different target than the one requested.");
   }
-  if (id.startsWith("proposal:") && (
-    typeof row.proposalId !== "string"
-    || row.proposalId !== id.slice("proposal:".length)
-    || typeof row.chainId !== "number"
-    || row.chainId !== NOUNS_CHAIN_ID
-    || typeof row.governorAddress !== "string"
-    || !/^0x[0-9a-fA-F]{40}$/.test(row.governorAddress)
-    || row.governorAddress.toLowerCase() !== NOUNS_GOVERNOR_ADDRESS
-  )) {
-    throw new BankrGateError(
-      "PROPOSAL_IDENTITY_MISMATCH",
-      "The canonical index returned a different proposal than the one requested.",
-    );
+  if (id.startsWith("proposal:")) {
+    try {
+      assertCanonicalProposalIdentity(
+        { dao: "nouns", chainId: row.chainId, governorAddress: row.governorAddress, proposalId: row.proposalId },
+        { dao: "nouns", chainId: NOUNS_CHAIN_ID, governorAddress: NOUNS_GOVERNOR_ADDRESS, proposalId: id.slice("proposal:".length) },
+      );
+    } catch (cause) {
+      throw new BankrGateError(
+        "PROPOSAL_IDENTITY_MISMATCH",
+        "The canonical index returned a different proposal than the one requested.",
+        { cause },
+      );
+    }
   }
-  return describeTarget(row, { position });
+  const target = describeTarget(row, { position });
+  RESOLVED_TARGETS.add(target);
+  return target;
+}
+
+function isResolvedTarget(value) {
+  return Boolean(value && typeof value === "object" && RESOLVED_TARGETS.has(value));
 }
 
 module.exports = {
@@ -183,6 +199,7 @@ module.exports = {
   STAGE_LANGUAGE,
   buildCandidateTargetId,
   describeTarget,
+  isResolvedTarget,
   resolveTarget,
   stageLanguage,
 };

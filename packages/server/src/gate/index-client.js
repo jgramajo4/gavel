@@ -1,5 +1,6 @@
 const { keccak256, toUtf8Bytes } = require("ethers");
 const { adaptNounsGateLifecycle, parseNounsCandidateTargetId } = require("@gavel/gate");
+const { ProposalIdentityError, assertCanonicalProposalIdentity } = require("@gavel/proposal-identity");
 
 const DEFAULT_FRESHNESS_MS = 15 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
@@ -14,6 +15,15 @@ class IndexUnavailableError extends Error {
     this.name = "IndexUnavailableError";
     this.code = "INDEX_UNAVAILABLE";
     this.statusCode = 503;
+  }
+}
+
+class IndexIdentityMismatchError extends Error {
+  constructor(message = "Canonical proposal identity mismatch") {
+    super(message);
+    this.name = "IndexIdentityMismatchError";
+    this.code = "PROPOSAL_IDENTITY_MISMATCH";
+    this.statusCode = 409;
   }
 }
 
@@ -82,7 +92,7 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
       ]);
     }
     catch (error) {
-      if (error instanceof IndexUnavailableError) throw error;
+      if (error instanceof IndexUnavailableError || error instanceof IndexIdentityMismatchError) throw error;
       throw new IndexUnavailableError();
     }
     finally { clearTimeout(timer); }
@@ -155,13 +165,23 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
       const id = decimal(String(proposalId), "proposalId");
       await assertFresh(await readSource((signal) => source.getHealth("nouns", { signal })), "index health");
       const proposal = requireObject(await readSource((signal) => source.getProposal("nouns", id, { signal })), "proposal");
-      if (proposal.dao !== "nouns" || String(proposal.proposalId) !== id) throw new IndexUnavailableError("proposal identity mismatch");
+      try {
+        assertCanonicalProposalIdentity(
+          { dao: proposal.dao, chainId: proposal.chainId, governorAddress: proposal.governorAddress, proposalId: proposal.proposalId },
+          { dao: "nouns", chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d", proposalId: id },
+        );
+      } catch (error) {
+        if (error instanceof ProposalIdentityError) throw new IndexIdentityMismatchError();
+        throw error;
+      }
       const refreshedAt = await assertFresh({ healthy: true, refreshedAt: proposal.refreshedAt }, "proposal");
       if (!Array.isArray(proposal.actions)) throw new IndexUnavailableError("proposal actions are invalid");
       const nativeState = proposal.effectiveStatus;
       const lifecycle = adaptNounsGateLifecycle(nativeState);
       return {
         dao: "nouns",
+        chainId: proposal.chainId,
+        governorAddress: proposal.governorAddress,
         proposalId: id,
         nativeState,
         ...lifecycle,
@@ -178,4 +198,10 @@ function createNounsIndexClient({ source, clock = () => new Date(), freshnessMs 
   });
 }
 
-module.exports = { DEFAULT_FRESHNESS_MS, DEFAULT_REQUEST_TIMEOUT_MS, IndexUnavailableError, createNounsIndexClient };
+module.exports = {
+  DEFAULT_FRESHNESS_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  IndexIdentityMismatchError,
+  IndexUnavailableError,
+  createNounsIndexClient,
+};

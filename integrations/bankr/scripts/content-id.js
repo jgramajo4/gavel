@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const SKILL_ENTRIES = Object.freeze(["README.md", "SKILL.md", "package.json", "references", "scripts", "src"]);
 const GATE_ENTRIES = Object.freeze(["package.json", "src"]);
+const IDENTITY_ENTRIES = Object.freeze(["package.json", "index.js"]);
 
 function filesUnder(root, entries) {
   const files = [];
@@ -32,9 +33,11 @@ function normalizedBytes(file) {
 
 function packageContentId({ repoRoot, skillDir }) {
   const gateDir = path.join(repoRoot, "packages", "gate");
+  const identityDir = path.join(repoRoot, "packages", "proposal-identity");
   const files = [
     ...filesUnder(skillDir, SKILL_ENTRIES).map((file) => ({ ...file, logical: `skill/${file.logical}` })),
     ...filesUnder(gateDir, GATE_ENTRIES).map((file) => ({ ...file, logical: `vendor/gate/${file.logical}` })),
+    ...filesUnder(identityDir, IDENTITY_ENTRIES).map((file) => ({ ...file, logical: `vendor/proposal-identity/${file.logical}` })),
   ].sort((left, right) => left.logical.localeCompare(right.logical));
   const digest = crypto.createHash("sha256");
   for (const file of files) {

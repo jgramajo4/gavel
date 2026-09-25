@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { presentProposal } = require("../packages/core/src/governance/lifecycle");
 const { MemoryGovernanceStore } = require("../packages/governance-index/src/memory-store");
+const { PostgresGovernanceStore } = require("../packages/governance-index/src/postgres-store");
 const { createReadOnlyApi } = require("../packages/governance-index/src/api");
 const { toTrainingEvidence } = require("../packages/core/src/backtest/chronology");
 
@@ -78,6 +79,77 @@ function refreshedNouns996() {
     },
   };
 }
+
+test("presentProposal does not upgrade raw ACTIVE/outcome ACTIVE to effective status", () => {
+  const projected = presentProposal({ id: "998", state: "ACTIVE", outcome: "ACTIVE" }, {});
+  assert.equal(projected.effectiveStatus, undefined);
+  assert.equal(projected.outcome, "ACTIVE");
+  const persisted = presentProposal({ id: "998", state: "ACTIVE", outcome: "ACTIVE", effectiveStatus: "ACTIVE" },
+    { effectiveStatus: "DEFEATED" });
+  assert.equal(persisted.effectiveStatus, "DEFEATED");
+});
+
+test("migration-derived open state is never a canonical effective status", async () => {
+  const old = migratedNouns992();
+  const row = {
+    ...old, proposalId: "998", effectiveStatus: "ACTIVE", outcome: "ACTIVE",
+    trackingState: "HOT", lifecycleReason: "migrated_from_outcome",
+    normalized: { ...old.normalized, id: "998", state: "ACTIVE", outcome: "ACTIVE",
+      effectiveStatus: "ACTIVE", endBlock: "3" },
+  };
+  const projected = presentProposal(row.normalized, row);
+  assert.equal(projected.effectiveStatus, undefined);
+  const store = new MemoryGovernanceStore();
+  store.proposals.push(row);
+  const result = await request(createReadOnlyApi({ store }), "/v1/daos/nouns/proposals/998");
+  assert.equal(result.status, 200);
+  assert.equal(result.body.effectiveStatus, undefined);
+  assert.equal(result.body.state, "ACTIVE");
+  const { canonicalEffectiveStatus } = require("../packages/core/src/governance/presentation");
+  assert.throws(() => canonicalEffectiveStatus(result.body), (error) => error.code === "INVALID_PROPOSAL_STATUS");
+  store.rawRecords.push({ daoId: "nouns", proposalId: "998", recordType: "proposal",
+    sourceId: "nouns-subgraph", sourceRecordKey: "proposal:998", contentHash: row.contentHash,
+    blockNumber: "100", blockHash: `0x${"1".repeat(64)}`, ingestedAt: "2026-09-25T00:00:00.000Z" });
+  const gate = await request(createReadOnlyApi({ store }), "/v1/gate/daos/nouns/proposals/998");
+  assert.equal(gate.status, 200);
+  assert.equal(gate.body.effectiveStatus, undefined);
+  const target = await request(createReadOnlyApi({ store }), "/v1/gate/daos/nouns/targets/proposal:998");
+  assert.equal(target.status, 200);
+  assert.equal(target.body.effectiveStatus, undefined);
+});
+
+test("Postgres public detail and list suppress migrated open status", async () => {
+  const row = { ...migratedNouns992(), proposalId: "998", effectiveStatus: "ACTIVE",
+    trackingState: "HOT", lifecycleReason: "migrated_from_outcome",
+    normalized: { ...migratedNouns992().normalized, id: "998", state: "ACTIVE",
+      outcome: "ACTIVE", effectiveStatus: "ACTIVE", endBlock: "3" } };
+  const pool = { async query(sql) {
+    const text = String(sql);
+    assert.match(text, /lifecycle_reason AS "lifecycleReason"/);
+    if (text.includes("LIMIT $2")) return { rows: [row] };
+    return { rows: [{ dao: "nouns", ...row, contentHash: `0x${row.contentHash}`,
+      refreshedAt: new Date("2026-09-25T00:00:00.000Z") }] };
+  } };
+  const store = new PostgresGovernanceStore({ pool });
+  const direct = await store.getProposal("nouns", "998");
+  assert.equal(direct.effectiveStatus, undefined);
+  assert.equal(direct.nativeState, undefined);
+  for (const path of ["/v1/daos/nouns/proposals/998", "/v1/daos/nouns/proposals?limit=10"]) {
+    const response = await request(createReadOnlyApi({ store }), path);
+    assert.equal(response.status, 200);
+    const proposal = response.body.items?.[0] ?? response.body;
+    assert.equal(proposal.effectiveStatus, undefined, path);
+    assert.equal(proposal.state, "ACTIVE", path);
+  }
+});
+
+test("persisted lifecycle tracking outranks stale normalized tracking", () => {
+  const row = migratedNouns992();
+  row.normalized = { ...row.normalized, effectiveStatus: "ACTIVE", trackingState: "HOT" };
+  const projected = presentProposal(row.normalized, row);
+  assert.equal(projected.effectiveStatus, "DEFEATED");
+  assert.equal(projected.trackingState, "FINAL");
+});
 
 test("presentProposal overlays persisted columns without rewriting state", () => {
   const row = migratedNouns992();

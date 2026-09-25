@@ -248,7 +248,7 @@ class MemoryGovernanceStore {
       refreshedAt: provenance.ingestedAt,
       sourceBlock: String(provenance.blockNumber),
       sourceBlockHash: provenance.blockHash,
-      effectiveStatus: proposal.effectiveStatus,
+      effectiveStatus: presentProposal(proposal.normalized, proposal).effectiveStatus,
       contentHash: `0x${String(proposal.contentHash).replace(/^0x/, "")}`,
       actions: canonicalGateActions(this.proposalActions
         .filter((row) => row.daoId === daoId && row.proposalId === proposalId)
