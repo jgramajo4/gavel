@@ -112,16 +112,27 @@ test("memory proposal refresh replaces coherent snapshot provenance for unchange
   assert.equal(store.ingest(refreshed), false);
 
   assert.deepEqual(await store.getGateProposal("nouns", "992"), {
-    proposalId: "992", refreshedAt: now, sourceBlock: "105", sourceBlockHash: `0x${"2".repeat(64)}`,
+    chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+    proposalId: "992", title: proposal.normalized.title, proposer: proposal.normalized.proposer,
+    refreshedAt: now, sourceBlock: "105", sourceBlockHash: `0x${"2".repeat(64)}`,
     effectiveStatus: "DEFEATED", contentHash: `0x${proposal.contentHash}`, actions: [],
   });
+  const gateResponse = await request(createReadOnlyApi({ store }), "/v1/gate/daos/nouns/proposals/992");
+  assert.equal(gateResponse.status, 200);
+  assert.equal(gateResponse.body.proposalId, "992");
+  assert.equal(gateResponse.body.chainId, 1);
+  assert.equal(gateResponse.body.governorAddress, "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d");
+  assert.equal(gateResponse.body.title, proposal.normalized.title);
+  assert.equal(gateResponse.body.proposer, proposal.normalized.proposer);
 
   now = "2026-09-14T00:10:00.000Z";
   const stale = makeRecord("101", `0x${"3".repeat(64)}`);
   stale.proposal = { ...proposal, normalized: { ...proposal.normalized, effectiveStatus: "ACTIVE" } };
   assert.equal(store.ingest(stale), false);
   assert.deepEqual(await store.getGateProposal("nouns", "992"), {
-    proposalId: "992", refreshedAt: "2026-09-14T00:05:00.000Z", sourceBlock: "105",
+    chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+    proposalId: "992", title: proposal.normalized.title, proposer: proposal.normalized.proposer,
+    refreshedAt: "2026-09-14T00:05:00.000Z", sourceBlock: "105",
     sourceBlockHash: `0x${"2".repeat(64)}`, effectiveStatus: "DEFEATED",
     contentHash: `0x${proposal.contentHash}`, actions: [],
   });
@@ -168,6 +179,35 @@ test("a migration-style memory row is hydrated on get and list", async () => {
   assert.equal(byId["992"].effectiveStatus, "DEFEATED");
   assert.equal(byId["992"].state, "ACTIVE");
   assert.equal(byId["996"].effectiveStatus, "PENDING");
+});
+
+test("Nouns proposals 993-998 retain titles across descending pagination", async () => {
+  const store = new MemoryGovernanceStore();
+  const titles = new Map([
+    ["993", "Nounworks for Nouns"],
+    ["994", "Nouns Treasury: Keep USDC Liquid, Earn Yield While It Waits"],
+    ["995", "Nouns Treasury: Keep USDC Liquid, Earn Yield While It Waits"],
+    ["996", "Camp operational costs 2026/2027"],
+    ["997", "Unwrap & Stake Treasury WETH"],
+    ["998", "Unwrap & Stake Treasury WETH"],
+  ]);
+  for (const [proposalId, title] of [...titles].reverse()) {
+    store.upsertProposal({
+      daoId: "nouns", proposalId, contentHash: proposalId.padStart(64, "0"), actions: [],
+      normalized: { id: proposalId, title, state: "ACTIVE", effectiveStatus: "ACTIVE" },
+    });
+  }
+
+  const seen = [];
+  let cursor;
+  do {
+    const page = await store.listProposals({ daoId: "nouns", limit: 2, cursor });
+    seen.push(...page.items.map(({ id, title }) => [id, title]));
+    cursor = page.nextCursor;
+  } while (cursor);
+
+  assert.deepEqual(seen, [...titles].reverse());
+  assert.equal(new Map(seen).size, 6);
 });
 
 test("API list and detail expose the same hydrated lifecycle fields", async () => {

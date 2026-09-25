@@ -5,6 +5,8 @@ const { BankrGateError } = require("./errors");
 const { sanitizeDisplayText, truncateDisplay } = require("./format");
 
 const CANDIDATE_POSITION = "SPONSOR";
+const NOUNS_CHAIN_ID = 1;
+const NOUNS_GOVERNOR_ADDRESS = "0x6f3e6272a167e8accb32072d08e0957f9c79223d";
 
 /**
  * Stage language.
@@ -158,6 +160,20 @@ async function resolveTarget(indexApi, input = {}) {
   if (!row) throw ineligible("The canonical index has no such Nouns target.");
   if (id.startsWith("candidate:") && row.targetId !== id) {
     throw ineligible("The canonical index returned a different target than the one requested.");
+  }
+  if (id.startsWith("proposal:") && (
+    typeof row.proposalId !== "string"
+    || row.proposalId !== id.slice("proposal:".length)
+    || typeof row.chainId !== "number"
+    || row.chainId !== NOUNS_CHAIN_ID
+    || typeof row.governorAddress !== "string"
+    || !/^0x[0-9a-fA-F]{40}$/.test(row.governorAddress)
+    || row.governorAddress.toLowerCase() !== NOUNS_GOVERNOR_ADDRESS
+  )) {
+    throw new BankrGateError(
+      "PROPOSAL_IDENTITY_MISMATCH",
+      "The canonical index returned a different proposal than the one requested.",
+    );
   }
   return describeTarget(row, { position });
 }

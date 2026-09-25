@@ -137,6 +137,8 @@ function candidateRow(overrides = {}) {
 
 function proposalRow(overrides = {}) {
   return {
+    chainId: 1,
+    governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
     proposalId: "812",
     refreshedAt: "2026-09-19T00:00:00.000Z",
     sourceBlock: "21000000",

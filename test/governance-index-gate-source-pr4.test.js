@@ -179,14 +179,18 @@ test("Postgres Gate proposal read is dedicated and uses persisted snapshot block
     assert.match(text, /r\.source_record_key='proposal:' \|\| p\.proposal_id::text/);
     assert.deepEqual(values, ["nouns", "42"]);
     return { rows: [{
-      proposalId: "42", refreshedAt: new Date("2026-09-14T00:00:00.000Z"), sourceBlock: "123",
+      chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+      proposalId: "42", title: "Canonical title", proposer: WALLET,
+      refreshedAt: new Date("2026-09-14T00:00:00.000Z"), sourceBlock: "123",
       sourceBlockHash: BLOCK_HASH, effectiveStatus: "ACTIVE", contentHash: HASH,
       actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
     }] };
   } };
   const store = new PostgresGovernanceStore({ pool });
   assert.deepEqual(await store.getGateProposal("nouns", "42"), {
-    proposalId: "42", refreshedAt: "2026-09-14T00:00:00.000Z", sourceBlock: "123",
+    chainId: 1, governorAddress: "0x6f3E6272A167e8AcCb32072d08E0957F9c79223d",
+      proposalId: "42", title: "Canonical title", proposer: WALLET,
+    refreshedAt: "2026-09-14T00:00:00.000Z", sourceBlock: "123",
     sourceBlockHash: BLOCK_HASH, effectiveStatus: "ACTIVE", contentHash: HASH,
     actions: [{ actionIndex: 0, target: WALLET, valueWei: "0", signature: "", calldata: "0x" }],
   });

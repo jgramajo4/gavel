@@ -18,7 +18,11 @@ function publicProposal(row) {
 function gateProposal(row) {
   if (!row) return row;
   return {
+    chainId: row.chainId,
+    governorAddress: row.governorAddress,
     proposalId: row.proposalId,
+    title: row.title,
+    proposer: row.proposer,
     refreshedAt: row.refreshedAt,
     sourceBlock: row.sourceBlock,
     sourceBlockHash: row.sourceBlockHash,

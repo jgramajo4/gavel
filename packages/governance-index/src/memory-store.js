@@ -2,6 +2,7 @@ const { sanitizeConfig, sanitizeProvenance } = require("./provenance");
 const { redactErrorMessage } = require("./redaction");
 const { canonicalGateActions } = require("./gate-action");
 const { canonicalCandidateTarget } = require("./candidate-target");
+const { DAO_CONFIGS } = require("./config");
 
 function chainEventKey(row) {
   return `${row.chainId}:${String(row.contractAddress).toLowerCase()}:${String(row.transactionHash).toLowerCase()}:${row.logIndex}`;
@@ -239,7 +240,11 @@ class MemoryGovernanceStore {
       .sort((a, b) => BigInt(a.blockNumber) < BigInt(b.blockNumber) ? 1 : -1)[0];
     if (!provenance) return null;
     return {
+      chainId: DAO_CONFIGS[daoId].chainId,
+      governorAddress: DAO_CONFIGS[daoId].currentGovernor,
       proposalId,
+      title: proposal.normalized?.title,
+      proposer: proposal.normalized?.proposer,
       refreshedAt: provenance.ingestedAt,
       sourceBlock: String(provenance.blockNumber),
       sourceBlockHash: provenance.blockHash,

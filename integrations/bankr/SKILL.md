@@ -335,6 +335,7 @@ yet, and no new quote is needed. If Gate eventually returns
 | Empty directory | Nobody is currently enrolled and accepting. Do not name unenrolled delegates instead. |
 | `VOTER_NOT_ACCEPTING` | That voter is not accepting this kind of request right now. |
 | `TARGET_NOT_ELIGIBLE` | That candidate or proposal is no longer eligible. |
+| `PROPOSAL_IDENTITY_MISMATCH` | The index returned a proposal identity different from the requested chain, governor, or proposal ID. Stop; do not present or act on it. |
 | `QUOTE_EXPIRED` | The quote expired. Nothing was charged. Start a new one. |
 | `ACTIVE_QUOTE_EXISTS` / `duplicate` | A quote for this exact request already exists; resume it. |
 | `SUBMISSION_RESULT_UNKNOWN` | Gate did not answer. Re-send the identical request; do not change it. |

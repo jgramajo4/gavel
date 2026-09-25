@@ -131,7 +131,10 @@ test("Nouns index client rejects malformed or non-canonical proposal actions", a
 test("dedicated governance HTTP projection preserves every field required by Gate", async () => {
   const refreshedAt = "2026-09-14T00:00:01.000Z";
   const store = new MemoryGovernanceStore({ clock: () => new Date(refreshedAt) });
-  const normalized = { id: "42", state: "ACTIVE", effectiveStatus: "ACTIVE", actions: [] };
+  const normalized = {
+    id: "42", title: "Canonical title", proposer: WALLET,
+    state: "ACTIVE", effectiveStatus: "ACTIVE", actions: [],
+  };
   store.ingest({
     raw: {
       daoId: "nouns", sourceId: "nouns-subgraph", sourceRecordKey: "proposal:42",
@@ -161,7 +164,8 @@ test("dedicated governance HTTP projection preserves every field required by Gat
         const response = await requestJson(baseUrl, `/v1/gate/daos/nouns/proposals/${proposalId}`);
         assert.equal(response.status, 200);
         assert.deepEqual(Object.keys(response.body).sort(), [
-          "actions", "contentHash", "effectiveStatus", "proposalId", "refreshedAt", "sourceBlock", "sourceBlockHash",
+          "actions", "chainId", "contentHash", "effectiveStatus", "governorAddress", "proposalId", "proposer",
+          "refreshedAt", "sourceBlock", "sourceBlockHash", "title",
         ]);
         return { dao, ...response.body };
       },
