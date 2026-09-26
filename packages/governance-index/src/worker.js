@@ -9,8 +9,30 @@ class GovernanceSyncWorker {
   constructor({ store, sources, batchSize = DEFAULT_LOG_BLOCK_BATCH_SIZE, concurrency = 4, retries = 3, fullScanIntervalMs = 6 * 60 * 60 * 1000, warmRefreshIntervalMs = DEFAULT_WARM_REFRESH_MS, logger = null }) { this.store = store; this.sources = sources; this.batchSize = parseBlockBatchSize(batchSize, "batchSize"); this.concurrency = concurrency; this.retries = retries; this.fullScanIntervalMs = Number(fullScanIntervalMs); this.warmRefreshIntervalMs = Number(warmRefreshIntervalMs); this.logger = logger || { info() {}, warn() {}, error() {} }; if (!store) throw new TypeError("store is required"); if (!Number.isFinite(this.fullScanIntervalMs) || this.fullScanIntervalMs < 0) throw new RangeError("fullScanIntervalMs must be a non-negative number"); if (!Number.isFinite(this.warmRefreshIntervalMs) || this.warmRefreshIntervalMs < 0) throw new RangeError("warmRefreshIntervalMs must be a non-negative number"); }
   async syncDao(daoId, options = {}) {
     const source = this.sources[daoId]; if (!source) throw new Error(`No source configured for ${daoId}`);
-    const run = () => this._syncDao(daoId, source, options);
+    const run = async () => {
+      try { return await this._syncDao(daoId, source, options); }
+      catch (error) {
+        await this._recordDaoFailure(daoId, source, error);
+        throw error;
+      }
+    };
     return this.store.withSourceLock ? this.store.withSourceLock(daoId, source.id, run) : run();
+  }
+  async _recordDaoFailure(daoId, source, error) {
+    const safeError = redactErrorMessage(error);
+    try {
+      const checkpoint = await this.store.getCheckpoint(daoId, source.id);
+      await this.store.transaction(async (tx) => tx.setCheckpoint({
+        daoId,
+        sourceId: source.id,
+        nextBlock: checkpoint?.nextBlock ?? source.fromBlock,
+        finalizedHead: checkpoint?.finalizedHead ?? Math.max(0, Number(source.fromBlock) - 1),
+        updatedAt: new Date().toISOString(),
+        lastError: safeError,
+      }));
+    } catch (checkpointError) {
+      this.logger.error({ event: "checkpoint_error_failed", dao: daoId, error: redactErrorMessage(checkpointError) });
+    }
   }
   _shouldFullScan(checkpoint, options) {
     if (options.fullProposalScan != null) return Boolean(options.fullProposalScan);
@@ -129,18 +151,17 @@ class GovernanceSyncWorker {
             throw new Error(`canonical ${kind} snapshot metadata is required`);
           }
         }
+        const snapshots = [fetchedProposals.snapshot, fetchedCandidates.snapshot];
+        if (snapshots.some((snapshot) => Number(snapshot.blockNumber) !== finalHead)) throw new Error("canonical target snapshot height changed across reads");
+        const snapshotHashes = new Set([
+          ...snapshots.map((snapshot) => snapshot.blockHash),
+          ...[...fetchedProposals, ...fetchedCandidates].map((row) => row?.raw?.blockHash),
+        ].filter(Boolean));
+        if (snapshotHashes.size > 1) throw new Error("canonical target snapshot hash changed across reads");
       }
-      const snapshots = [fetchedProposals.snapshot, fetchedCandidates.snapshot].filter(Boolean);
-      if (snapshots.some((snapshot) => Number(snapshot.blockNumber) !== finalHead)) throw new Error("canonical Nouns snapshot height changed across target reads");
-      const snapshotHashes = new Set([
-        ...snapshots.map((snapshot) => snapshot.blockHash),
-        ...[...fetchedProposals, ...fetchedCandidates].map((row) => row?.raw?.blockHash),
-      ].filter(Boolean));
-      if (snapshotHashes.size > 1) throw new Error("canonical Nouns snapshot hash changed across target reads");
     } catch (error) {
       const safeError = redactErrorMessage(error);
       this.logger.error({ event: "proposal_sync_failed", dao: daoId, source: source.id, error: safeError });
-      try { await this.store.transaction(async (tx) => tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: checkpoint?.nextBlock || start, finalizedHead: checkpoint?.finalizedHead || finalHead, updatedAt: new Date().toISOString(), lastError: safeError })); } catch (checkpointError) { this.logger.error({ event: "checkpoint_error_failed", dao: daoId, error: redactErrorMessage(checkpointError) }); }
       throw error;
     }
     const proposalRecords = fetchedProposals.filter((row) => row?.raw);
@@ -162,7 +183,6 @@ class GovernanceSyncWorker {
       } catch (error) {
         const safeError = redactErrorMessage(error);
         this.logger.error({ event: "sync_failed", dao: daoId, fromBlock: from, toBlock: to, error: safeError });
-        try { await this.store.transaction(async (tx) => tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: checkpoint?.nextBlock || from, finalizedHead: checkpoint?.finalizedHead || finalHead, updatedAt: new Date().toISOString(), lastError: safeError })); } catch (checkpointError) { this.logger.error({ event: "checkpoint_error_failed", dao: daoId, error: redactErrorMessage(checkpointError) }); }
         throw error;
       }
     }
@@ -188,13 +208,25 @@ class GovernanceSyncWorker {
           await tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: Math.max(finalHead + 1, Number(checkpoint?.nextBlock || 0)), finalizedHead: finalHead, updatedAt: new Date().toISOString(), ...(full ? { lastFullScanAt: new Date().toISOString() } : {}), lastError: null });
         });
       } catch (error) {
-        const safeError = redactErrorMessage(error);
-        try { await this.store.transaction(async (tx) => tx.setCheckpoint({ daoId, sourceId: source.id, nextBlock: checkpoint?.nextBlock || start, finalizedHead: checkpoint?.finalizedHead || finalHead, updatedAt: new Date().toISOString(), lastError: safeError })); } catch (checkpointError) { this.logger.error({ event: "checkpoint_error_failed", dao: daoId, error: redactErrorMessage(checkpointError) }); }
         throw error;
       }
     }
     return { ok: true, dao: daoId, fromBlock: start, toBlock: finalHead, batches, records, fullProposalScan: full, proposalsRefreshed: proposalRecords.length + materializedProposals.length, proposalsTerminalizedLocally: proposalContext.terminalized.length };
   }
-  async syncAll(options = {}) { const results = []; for (const daoId of Object.keys(this.sources)) results.push(await this.syncDao(daoId, options)); return results; }
+  async syncAll(options = {}) {
+    const results = [];
+    const failures = [];
+    for (const daoId of Object.keys(this.sources)) {
+      try { results.push(await this.syncDao(daoId, options)); }
+      catch (error) {
+        failures.push({ daoId, error });
+        this.logger.error({ event: "dao_sync_failed", dao: daoId, error: redactErrorMessage(error) });
+      }
+    }
+    if (failures.length) {
+      throw new AggregateError(failures.map(({ error }) => error), `DAO sync failed for: ${failures.map(({ daoId }) => daoId).join(", ")}`);
+    }
+    return results;
+  }
 }
 module.exports = { GovernanceSyncWorker, DEFAULT_WARM_REFRESH_MS };
