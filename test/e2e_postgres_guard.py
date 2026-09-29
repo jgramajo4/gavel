@@ -128,12 +128,12 @@ try:
     health_name = name + "-health"
     health_env = {**os.environ, "PGPASSWORD": password}
     require("disposable health container unavailable", run([
-        "docker", "run", "--rm", "-d", "--name", health_name, "--network", name,
+        "docker", "run", "-d", "--name", health_name, "--network", name,
         "--health-cmd", "node packages/governance-index/bin/gavel-indexer.js health",
         "--health-interval", "2s", "--health-timeout", "5s", "--health-retries", "2",
         "-e", "PGHOST=postgres", "-e", "PGPORT=5432", "-e", "PGUSER=gavel",
         "-e", "PGPASSWORD", "-e", "PGDATABASE=" + database,
-        "-e", "INDEXER_ENABLED_DAOS=ens", "--entrypoint", "sh", image, "-c", "sleep 120"], health_env))
+        "-e", "INDEXER_ENABLED_DAOS=ens", "--entrypoint", "sh", image, "-c", "while :; do sleep 3600; done"], health_env))
     health_started = True
     def health():
         result = run(["docker", "inspect", health_name])
