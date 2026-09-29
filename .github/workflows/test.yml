@@ -43,6 +43,29 @@ jobs:
         env:
           PGPASSWORD: gavel-ci-only
         run: createdb -h 127.0.0.1 -U postgres gavel_gate_ci_disposable
+      - name: Attest isolated Gate and governance test databases
+        shell: bash
+        env:
+          PGPASSWORD: gavel-ci-only
+          PG_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          test -n "$PG_SERVICE_ID"
+          # Prove that the published TCP port and service container are one cluster.
+          cluster_id="$(psql -h 127.0.0.1 -U postgres -d gavel_ci -At -c 'SELECT system_identifier FROM pg_control_system()')"
+          test "$cluster_id" = "$(docker exec "$PG_SERVICE_ID" psql -U postgres -d gavel_ci -At -c 'SELECT system_identifier FROM pg_control_system()')"
+          nonce="$(openssl rand -hex 16)"
+          createdb -h 127.0.0.1 -U postgres gavel_test_ci_disposable
+          psql -h 127.0.0.1 -U postgres -d gavel_test_ci_disposable -v ON_ERROR_STOP=1 \
+            -c "COMMENT ON DATABASE gavel_test_ci_disposable IS 'gavel-disposable:${nonce}'" >/dev/null
+          psql -h 127.0.0.1 -U postgres -d gavel_gate_ci_disposable -v ON_ERROR_STOP=1 \
+            -c "COMMENT ON DATABASE gavel_gate_ci_disposable IS 'gavel-disposable:${nonce}'" >/dev/null
+          docker exec "$PG_SERVICE_ID" sh -c 'printf %s "$1" > "$PGDATA/gavel-disposable-cluster.attestation"' attest "$nonce"
+          {
+            echo "GAVEL_TEST_DATABASE_NONCE=$nonce"
+            echo "GAVEL_TEST_CLUSTER_ID=$cluster_id"
+            echo "GAVEL_TEST_DISPOSABLE_OPT_IN=I_UNDERSTAND_DISPOSABLE_DB"
+          } >> "$GITHUB_ENV"
       - name: PostgreSQL 16 Gate integration (zero skips)
         shell: bash
         env:
@@ -64,7 +87,8 @@ jobs:
           fi
       - run: npm test
         env:
-          GAVEL_TEST_DATABASE_URL: postgres://postgres:gavel-ci-only@127.0.0.1:5432/gavel_ci
+          GAVEL_TEST_DISPOSABLE_OPT_IN: I_UNDERSTAND_DISPOSABLE_DB
+          GAVEL_TEST_DATABASE_URL: postgresql://postgres:gavel-ci-only@127.0.0.1:5432/gavel_test_ci_disposable
       - run: npm test --workspace @gavel/cli
       - run: npm run tui:typecheck
       # The Gate web app is a separate workspace with its own Vitest suite, so
