@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const test = require("node:test");
-const { Pool } = require("pg");
+const { attestedPool } = require("../../../test/disposable-database");
 const { createQuoteSigner } = require("../src/gate/quote-signer");
 const { PostgresGateStore } = require("../src/gate/store");
 
@@ -86,7 +86,7 @@ async function forceQuoteExpiry(pool, quoteId) {
 }
 
 async function withStore(run) {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
