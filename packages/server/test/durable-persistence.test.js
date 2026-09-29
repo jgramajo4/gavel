@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { Pool } = require("pg");
+const { attestedPool } = require("../../../test/disposable-database");
 
 const { PostgresGateStore } = require("../src/gate/store");
 const { MemoryGateStore } = require("../src/gate/store-memory");
@@ -184,7 +184,7 @@ const postgresSkip = !databaseUrl
 test("auth sessions and profile proof consumption survive repository restart", {
   skip: canRunPostgres ? false : postgresSkip,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const pool = attestedPool(databaseUrl, { max: 2 }, "gavel_gate");
   const migration = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const unique = Date.now().toString(16).padStart(64, "0").slice(-64);
   const challenge = nonce({ nonceHash: `0x${unique}`, payloadHash: H("8") });

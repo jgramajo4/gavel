@@ -286,7 +286,7 @@ test("HTTP quote and inbox routes reject cross-environment bearer tokens and ign
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { Pool } = require("pg");
+const { attestedPool } = require("../../../test/disposable-database");
 const { PostgresGateStore } = require("../src/gate/store");
 
 const databaseUrl = process.env.GAVEL_GATE_TEST_DATABASE_URL;
@@ -301,7 +301,7 @@ const postgresSkip = !databaseUrl
 test("PostgreSQL-backed staging sessions are rejected by a production auth service on a shared repository", {
   skip: canRunPostgres ? false : postgresSkip,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const pool = attestedPool(databaseUrl, { max: 4 }, "gavel_gate");
   const migration = fs.readFileSync(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const signer = Wallet.createRandom();
   try {

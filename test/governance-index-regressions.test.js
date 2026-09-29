@@ -327,6 +327,27 @@ test("a pre-enumeration DAO failure replaces a clean checkpoint with failed heal
   assert.deepEqual(health.errors.map((row) => row.daoId), ["ens"]);
 });
 
+test("Nouns proposal and candidate snapshots fail closed on divergent hashes or heights", async () => {
+  for (const [candidateHead, candidateHash, error] of [
+    [20, `0x${"bb".repeat(32)}`, /snapshot hash changed/],
+    [19, `0x${"aa".repeat(32)}`, /snapshot height changed/],
+  ]) {
+    const store = new MemoryGovernanceStore();
+    const source = {
+      id: "nouns-subgraph", fromBlock: 1, replayBlocks: 0, config: DAO_CONFIGS.nouns,
+      async head() { return 20; },
+      async fetchProposals() { return snapshotRows([], 20, `0x${"aa".repeat(32)}`); },
+      async fetchCandidates() { return snapshotRows([], candidateHead, candidateHash); },
+      async fetchRange() { return []; },
+    };
+    await assert.rejects(new GovernanceSyncWorker({ store, sources: { nouns: source } }).syncDao("nouns"), error);
+    const checkpoint = store.getCheckpoint("nouns", source.id);
+    assert.equal(checkpoint.nextBlock, 1);
+    assert.match(checkpoint.lastError, error);
+    assert.equal(store.rawRecords.length, 0);
+  }
+});
+
 test("Nouns proposal records reconcile independently and disappearing proposals are removed", async () => {
   const store = new MemoryGovernanceStore();
   const proposal = { daoId: "nouns", proposalId: "7", contentHash: "a".repeat(64), normalized: { id: "7", contentHash: "a".repeat(64), createdBlock: "100" }, actions: [] };

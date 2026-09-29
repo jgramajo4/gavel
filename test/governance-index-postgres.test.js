@@ -64,8 +64,45 @@ function roleUrl(role, password) {
   return url.toString();
 }
 
+// Destructive tests only run against a database and cluster both attested by
+// the disposable harness. Supplying a plausible URL alone must not arm them.
+const { attestedPool, disposableTarget } = require("./disposable-database");
 const ADMIN_URL = process.env.GAVEL_TEST_DATABASE_URL;
-const skip = ADMIN_URL ? false : "set GAVEL_TEST_DATABASE_URL to run PostgreSQL integration tests";
+if (ADMIN_URL && (process.env.GAVEL_TEST_DISPOSABLE_OPT_IN !== "I_UNDERSTAND_DISPOSABLE_DB" ||
+    !disposableTarget(ADMIN_URL, "gavel_test"))) {
+  throw new Error("refusing destructive PostgreSQL tests: disposable target proof missing");
+}
+const skip = ADMIN_URL ? false : "set GAVEL_TEST_DATABASE_URL and disposable cluster proof to run PostgreSQL integration tests";
+
+function guardedStore() {
+  return new PostgresGovernanceStore({ pool: attestedPool(ADMIN_URL, { max: 4 }) });
+}
+
+test("destructive PostgreSQL suite refuses production-like targets", () => {
+  const env = { ...process.env, GAVEL_TEST_DATABASE_URL: "postgresql://gavel:synthetic@postgres/gavel",
+    GAVEL_TEST_DISPOSABLE_OPT_IN: "I_UNDERSTAND_DISPOSABLE_DB" };
+  const result = spawnSync(process.execPath, [__filename], { env, encoding: "utf8", timeout: 10000 });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout + result.stderr, /refusing destructive PostgreSQL tests/);
+});
+
+test("a newly acquired connection rejects a changed cluster proof before DDL", { skip }, async () => {
+  const store = guardedStore();
+  const previous = process.env.GAVEL_TEST_CLUSTER_ID;
+  try {
+    await store.pool.query("SELECT 1");
+    process.env.GAVEL_TEST_CLUSTER_ID = "0";
+    const rejected = guardedStore();
+    try {
+      await assert.rejects(rejected.pool.query("DROP SCHEMA public CASCADE"), /cluster attestation mismatch/);
+    } finally { await rejected.close(); }
+    process.env.GAVEL_TEST_CLUSTER_ID = previous;
+    assert.equal((await store.pool.query("SELECT count(*)::int AS n FROM pg_namespace WHERE nspname='public'")).rows[0].n, 1);
+  } finally {
+    process.env.GAVEL_TEST_CLUSTER_ID = previous;
+    await store.close();
+  }
+});
 
 const ADDRESS = "0x0000000000000000000000000000000000000001";
 const OTHER = "0x0000000000000000000000000000000000000002";
@@ -97,7 +134,7 @@ function record(overrides = {}) {
 }
 
 async function freshStore() {
-  const store = new PostgresGovernanceStore({ connectionString: ADMIN_URL, maxConnections: 4 });
+  const store = guardedStore();
   await store.pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
   await store.migrate();
   await store.transaction(async (tx) => {

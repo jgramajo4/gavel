@@ -10,6 +10,15 @@ const workflow = fs.readFileSync(path.join(__dirname, "../../../.github/workflow
 test("CI makes PostgreSQL 16 Gate integration mandatory with a disposable database and zero skips", () => {
   assert.match(workflow, /image:\s*postgres:16(?:-alpine)?/);
   assert.match(workflow, /createdb[^\n]*gavel_gate_ci_disposable/);
+  assert.match(workflow, /pg_control_system\(\)/);
+  assert.match(workflow, /gavel-disposable-cluster\.attestation/);
+  assert.match(workflow, /GAVEL_TEST_DISPOSABLE_OPT_IN=I_UNDERSTAND_DISPOSABLE_DB/);
+  const attestation = workflow.indexOf("- name: Attest isolated Gate and governance test databases");
+  const gate = workflow.indexOf("- name: PostgreSQL 16 Gate integration (zero skips)");
+  assert.notEqual(attestation, -1, "attestation step must exist");
+  assert.notEqual(gate, -1, "Gate integration step must exist");
+  assert.ok(attestation < gate);
+  assert.match(workflow, /GAVEL_TEST_DATABASE_URL:\s*postgresql:\/\/postgres:[^\s]+@127\.0\.0\.1:5432\/gavel_test_ci_disposable/);
   assert.match(workflow, /GAVEL_GATE_TEST_DATABASE_URL:\s*postgres:\/\/postgres:[^\s]+@127\.0\.0\.1:5432\/gavel_gate_ci_disposable/);
   assert.match(workflow, /GAVEL_GATE_TEST_DATABASE_DISPOSABLE:\s*yes/);
   assert.match(workflow, /node --test --test-concurrency=1/);

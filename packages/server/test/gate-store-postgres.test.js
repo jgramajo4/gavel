@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const test = require("node:test");
-const { Pool } = require("pg");
+const { attestedPool } = require("../../../test/disposable-database");
 const { Wallet, keccak256, toUtf8Bytes } = require("ethers");
 const { createQuoteTypedData, verifyQuoteSignature } = require("@gavel/gate");
 const { createAuthService } = require("../src/gate/auth");
@@ -114,10 +114,30 @@ function operationProof(challenge, signature, message = challenge.message) {
   return { typedData: { primaryType: challenge.primaryType, domain: challenge.domain, message }, signature };
 }
 
+test("Gate pool rejects a changed cluster proof before schema mutation", {
+  skip: canRun ? false : skipReason,
+}, async () => {
+  const previous = process.env.GAVEL_TEST_CLUSTER_ID;
+  const valid = attestedPool(databaseUrl, { max: 2 }, "gavel_gate");
+  try {
+    const before = (await valid.query("SELECT count(*)::int AS n FROM pg_namespace WHERE nspname='gate'")).rows[0].n;
+    process.env.GAVEL_TEST_CLUSTER_ID = "0";
+    const rejected = attestedPool(databaseUrl, { max: 2 }, "gavel_gate");
+    try {
+      await assert.rejects(rejected.query("DROP SCHEMA gate CASCADE"), /cluster attestation mismatch/);
+    } finally { await rejected.end(); }
+    process.env.GAVEL_TEST_CLUSTER_ID = previous;
+    assert.equal((await valid.query("SELECT count(*)::int AS n FROM pg_namespace WHERE nspname='gate'")).rows[0].n, before);
+  } finally {
+    process.env.GAVEL_TEST_CLUSTER_ID = previous;
+    await valid.end();
+  }
+});
+
 test("least-privilege role atomically consumes WalletSession nonces and inserts bound sessions", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const signer = Wallet.createRandom();
   const other = Wallet.createRandom();
@@ -209,7 +229,7 @@ test("least-privilege role atomically consumes WalletSession nonces and inserts 
 test("least-privilege role enrolls atomically without direct nonce or profile UPDATE", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const signer = Wallet.createRandom();
   const other = Wallet.createRandom();
@@ -300,7 +320,7 @@ test("least-privilege role enrolls atomically without direct nonce or profile UP
 test("least-privilege quote issuance locks through a narrow function and serializes capacity", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -354,7 +374,7 @@ test("least-privilege quote issuance locks through a narrow function and seriali
 test("Gate migration backfills prior immutable proposal snapshots and restores immutability", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = attestedPool(databaseUrl, { max: 1 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -399,7 +419,7 @@ test("Gate migration backfills prior immutable proposal snapshots and restores i
 test("Gate migration upgrades legacy display, Nouns policy, and settlement checks idempotently", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = attestedPool(databaseUrl, { max: 1 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -505,7 +525,7 @@ test("Gate migration upgrades legacy display, Nouns policy, and settlement check
 test("real PostgreSQL closes deployment environments for active, inactive, legacy, and test issuance", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 2 });
+  const pool = attestedPool(databaseUrl, { max: 2 }, "gavel_gate");
   const store = new PostgresGateStore({ pool, baseCodeReader: async () => "0x6000" });
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   const TEST_SPLITTER = addr("9");
@@ -609,7 +629,7 @@ test("real PostgreSQL closes deployment environments for active, inactive, legac
 test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor release, and privacy", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const store = new PostgresGateStore({
     pool,
     baseCodeReader: async () => "0x6000",
@@ -880,7 +900,7 @@ test("Gate SQL and Postgres store enforce invariants, races, settlement, cursor 
 test("marked Gate migration rejects unique and foreign-key catalog drift instead of repairing it", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = attestedPool(databaseUrl, { max: 1 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -913,7 +933,7 @@ test("marked Gate migration rejects unique and foreign-key catalog drift instead
 test("owner-bound hash lookup and resume run against real SQL and refresh nothing", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const pool = attestedPool(databaseUrl, { max: 4 }, "gavel_gate");
   const store = new PostgresGateStore({ pool, baseCodeReader: async () => "0x" });
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
@@ -986,7 +1006,7 @@ test("owner-bound hash lookup and resume run against real SQL and refresh nothin
 test("candidate PRE_VOTE quote persists exact target identity in real PostgreSQL without vote-transaction material", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const pool = attestedPool(databaseUrl, { max: 4 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -1058,7 +1078,7 @@ test("candidate PRE_VOTE quote persists exact target identity in real PostgreSQL
 test("candidate HTTP issuance reads only the narrow public receipt function as gavel_gate", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 6 });
+  const pool = attestedPool(databaseUrl, { max: 6 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -1150,7 +1170,7 @@ test("candidate HTTP issuance reads only the narrow public receipt function as g
 test("runtime role scans, settles, reads public projections, and fails readiness when one required privilege is removed", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 6 });
+  const pool = attestedPool(databaseUrl, { max: 6 }, "gavel_gate");
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
     await pool.query("SELECT pg_advisory_lock(hashtext('gavel-gate-destructive-integration'))");
@@ -1254,7 +1274,7 @@ test("runtime role scans, settles, reads public projections, and fails readiness
 test("least-privilege PostgreSQL relay claims converge and survive migration rerun and restart", {
   skip: canRun ? false : skipReason,
 }, async () => {
-  const pool = new Pool({ connectionString: databaseUrl, max: 8 });
+  const pool = attestedPool(databaseUrl, { max: 8 }, "gavel_gate");
   const saturationPools = [];
   const migration = await fs.readFile(path.join(__dirname, "../migrations/001_gate.sql"), "utf8");
   try {
@@ -1344,7 +1364,7 @@ test("least-privilege PostgreSQL relay claims converge and survive migration rer
     assert.equal(secondEntered, true);
 
     function saturatedStore(max) {
-      const physicalPool = new Pool({ connectionString: databaseUrl, max });
+      const physicalPool = attestedPool(databaseUrl, { max }, "gavel_gate");
       saturationPools.push(physicalPool);
       return { physicalPool, store: new PostgresGateStore({
         pool: effectiveRolePool(physicalPool, "gavel_gate"),
