@@ -72,7 +72,8 @@ async function startRateLimitedIndex() {
 test("GAVEL_INDEX_API_URL overrides the default and serves an indexed history through the CLI", async (t) => {
   const { server, url } = await startStubIndex();
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-index-endpoint-"));
-  t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
   // The stub runs in this process, so the child must be spawned asynchronously:
   // a synchronous spawn would block the event loop that has to serve it.
@@ -180,7 +181,8 @@ test("index HTTP status classification keeps existing 4xx and 5xx policy", async
 test("Nouns reads the index by default and --endpoint is the subgraph opt-out", async (t) => {
   const { server, url } = await startStubIndex();
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-nouns-source-"));
-  t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const env = { ...process.env, GAVEL_INDEX_API_URL: url, GAVEL_DATA_DIR: path.join(temporary, "state") };
 
   // A Nouns history is hundreds of paginated subgraph queries per user; the
@@ -206,7 +208,8 @@ test("Nouns reads the index by default and --endpoint is the subgraph opt-out", 
 test("CLI history does not persist a partial artifact after a rate-limited index", async (t) => {
   const { server, url } = await startRateLimitedIndex();
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-index-429-"));
-  t.after(() => { server.close(); fs.rmSync(temporary, { recursive: true, force: true }); });
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const env = { ...process.env, GAVEL_INDEX_API_URL: url };
   delete env.GAVEL_DATA_DIR;
   await assert.rejects(
