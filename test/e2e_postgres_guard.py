@@ -4,6 +4,7 @@
 Runs only isolated test containers; never accepts a database URL from the host.
 """
 import os
+import json
 from pathlib import Path
 import re
 import secrets
@@ -26,6 +27,7 @@ def require(label, result):
 
 network = False
 started = False
+health_started = False
 try:
     network_args = ["docker", "network", "create", "--internal"]
     if os.getenv("GAVEL_TEST_SUBNET"):
@@ -113,7 +115,46 @@ try:
     if positive.returncode or not counts["pass"] or counts["skipped"][-1] != "0":
         print("FAILURE_NAMES", [line for line in positive.stdout.splitlines() if line.startswith("not ok ")], flush=True)
         raise RuntimeError("attested integration suite failed")
+    # The production Compose command is bare Node in direct-credential mode.
+    # Exercise that exact Docker health command, including checkpoint failure.
+    sql = ("INSERT INTO daos(id,chain_id,from_block) VALUES('ens',1,1) ON CONFLICT DO NOTHING; "
+           "INSERT INTO governance_sources(dao_id,id,kind,endpoint,from_block) "
+           "VALUES('ens','governor-logs','ens-governor-logs','https://example.invalid',1) ON CONFLICT DO NOTHING; "
+           "INSERT INTO sync_checkpoints(dao_id,source_id,next_block,finalized_head,last_error) "
+           "VALUES('ens','governor-logs',2,1,NULL) ON CONFLICT(dao_id,source_id) "
+           "DO UPDATE SET next_block=2,finalized_head=1,updated_at=now(),last_error=NULL;")
+    require("health fixture setup failed", run(["docker", "exec", name, "psql", "-U", "gavel", "-d", database,
+                                               "-v", "ON_ERROR_STOP=1", "-c", sql]))
+    health_name = name + "-health"
+    health_env = {**os.environ, "PGPASSWORD": password}
+    require("disposable health container unavailable", run([
+        "docker", "run", "--rm", "-d", "--name", health_name, "--network", name,
+        "--health-cmd", "node packages/governance-index/bin/gavel-indexer.js health",
+        "--health-interval", "2s", "--health-timeout", "5s", "--health-retries", "2",
+        "-e", "PGHOST=postgres", "-e", "PGPORT=5432", "-e", "PGUSER=gavel",
+        "-e", "PGPASSWORD", "-e", "PGDATABASE=" + database,
+        "-e", "INDEXER_ENABLED_DAOS=ens", "--entrypoint", "sh", image, "-c", "sleep 120"], health_env))
+    health_started = True
+    def health():
+        result = run(["docker", "inspect", health_name])
+        require("health status unavailable", result)
+        return json.loads(result.stdout)[0]["State"]["Health"]["Status"]
+    for _ in range(25):
+        if health() == "healthy": break
+        time.sleep(2)
+    else: raise RuntimeError("direct-credential Docker health did not become healthy")
+    print("DOCKER_HEALTH_WITH_CHECKPOINT", "healthy", flush=True)
+    require("health failure fixture failed", run(["docker", "exec", name, "psql", "-U", "gavel",
+        "-d", database, "-v", "ON_ERROR_STOP=1", "-c",
+        "UPDATE sync_checkpoints SET last_error='synthetic failure' WHERE dao_id='ens'"]))
+    for _ in range(25):
+        if health() == "unhealthy": break
+        time.sleep(2)
+    else: raise RuntimeError("Docker health ignored checkpoint failure")
+    print("DOCKER_HEALTH_WITH_FAILED_CHECKPOINT", "unhealthy", flush=True)
 finally:
+    if health_started:
+        require("disposable health cleanup failed", run(["docker", "rm", "-f", name + "-health"]))
     if started:
         require("disposable PostgreSQL cleanup failed", run(["docker", "rm", "-f", name]))
     if network:
