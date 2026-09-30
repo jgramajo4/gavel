@@ -272,7 +272,18 @@ function isBoundedWalletSignature(value) {
     && WALLET_SIGNATURE_HEX.test(value);
 }
 
+const WALLET_SIGNATURE_BOUND_MESSAGE =
+  `signature must be 0x-prefixed whole-byte hex of at most ${MAX_WALLET_SIGNATURE_BYTES} bytes`;
+
+// Every exported verifier applies the same ceiling itself, so a caller that
+// skips the HTTP boundary still cannot hand an unbounded payload to ECDSA
+// recovery or an ERC-1271 RPC. The message never echoes the input.
+function assertBoundedWalletSignature(signature) {
+  if (!isBoundedWalletSignature(signature)) throw new TypeError(WALLET_SIGNATURE_BOUND_MESSAGE);
+}
+
 function recoverTypedDataSigner(typed, signature) {
+  assertBoundedWalletSignature(signature);
   return verifyTypedData(typed.domain, typed.types, typed.message, signature);
 }
 
@@ -282,6 +293,7 @@ function verifyEoaTypedDataSignature(typed, signature) {
 
 async function verifyErc1271TypedDataSignature(typed, signature, verifier) {
   if (typeof verifier !== 'function') throw new TypeError('ERC-1271 verifier must be injected');
+  assertBoundedWalletSignature(signature);
   const result = await verifier({
     wallet: getAddress(typed.message.wallet),
     chainId: BigInt(typed.domain.chainId),
