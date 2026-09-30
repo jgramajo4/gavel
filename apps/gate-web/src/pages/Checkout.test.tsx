@@ -567,6 +567,74 @@ describe('Checkout Base sender requirement', () => {
     expect(walletSigned(wallet)).toBe(false);
   });
 
+  it('offers a payer sign-in when a ready Base sender is not the quote payer, and never signs as the wrong account', async () => {
+    const otherSender = { ...session, session: { ...session.session, wallet: OTHER } };
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    const wallet = tokenWallet({ eth_accounts: () => [OTHER], eth_requestAccounts: () => [OTHER] });
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session: otherSender,
+      walletAddress: OTHER,
+      provider: wallet,
+    });
+    await screen.findByTestId('total-amount');
+    const action = screen.getByRole('button', { name: /sign in as payer/i });
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+
+    // The wallet is still on the foreign sender: refused before any challenge.
+    await user.click(action);
+    expect(await screen.findByRole('alert')).toHaveTextContent(new RegExp(`switch your wallet to ${PAYER}`, 'i'));
+    expect(calls.some((call) => /auth\/(challenge|verify)/.test(call))).toBe(false);
+    expect(walletSigned(wallet)).toBe(false);
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+  });
+
+  it('refuses a payer sign-in when the wallet authorizes some other account', async () => {
+    const otherSender = { ...session, session: { ...session.session, wallet: OTHER } };
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    // Nothing pre-authorized, and the prompt hands back a third account.
+    const wallet = tokenWallet({ eth_accounts: () => [], eth_requestAccounts: () => [VOTER] });
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session: otherSender,
+      walletAddress: OTHER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /sign in as payer/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(new RegExp(`not the payer ${PAYER}`, 'i'));
+    expect(calls.some((call) => /auth\/(challenge|verify)/.test(call))).toBe(false);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('after switching the wallet to the payer, the correction action signs a base_sender session for the payer and unlocks Pay', async () => {
+    const otherSender = { ...session, session: { ...session.session, wallet: OTHER } };
+    const { api, calls } = stubApi([
+      statusRoute(quotedReceipt),
+      resumeRoute(),
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+      { method: 'POST', match: /\/auth\/verify$/, status: 200, body: session },
+    ]);
+    const requestChallenge = vi.spyOn(api, 'requestChallenge');
+    const wallet = tokenWallet({ eth_accounts: () => [PAYER, OTHER] });
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session: otherSender,
+      walletAddress: OTHER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /sign in as payer/i }));
+    expect(await screen.findByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
+
+    // The challenge is requested for the payer, as a base_sender, and nothing else.
+    expect(requestChallenge).toHaveBeenCalledTimes(1);
+    expect(requestChallenge.mock.calls[0][0]).toEqual({ proofType: 'WalletSession', wallet: PAYER, role: 'base_sender' });
+    const [sessionSign] = wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4');
+    expect((sessionSign.params as [string])[0]).toBe(PAYER);
+    // Only the session was signed; nothing was paid or recorded.
+    expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
+    expect(settlementTouched(calls)).toEqual([]);
+  });
+
   it('establishes the Base sender through its own base_sender sign-in, then pays as that sender', async () => {
     const { api, calls } = stubApi([
       statusRoute(quotedReceipt),
