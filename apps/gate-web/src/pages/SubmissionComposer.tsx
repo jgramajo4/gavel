@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { GateApiError, type GateApi } from '../api';
 import { useSession } from '../session';
 import { useWalletConnection } from '../wallet-connection';
-import { isSessionForRole, openWalletSession } from '../wallet-session';
+import { baseSenderState, openWalletSession } from '../wallet-session';
 import { MarkdownPitch } from '../components/MarkdownPitch';
 import { formatUsdc } from '../format';
 import {
@@ -75,25 +75,13 @@ export interface SubmissionComposerProps {
   onQuote?(receipt: SubmissionReceipt): void;
 }
 
-function sessionUnexpired(expiry: string): boolean {
-  try {
-    return BigInt(expiry) > BigInt(Math.floor(Date.now() / 1000));
-  } catch {
-    return false;
-  }
-}
-
 export function SubmissionComposer({ api, wallet, provider, onQuote }: SubmissionComposerProps) {
   const { session, setSession, clearSession } = useSession();
   const { address, connect, noteConnected } = useWalletConnection();
-  const senderSession = isSessionForRole(session, 'base_sender') ? session : null;
-  const expiredSender = Boolean(senderSession && !sessionUnexpired(senderSession.session.expiry));
-  const authenticated = Boolean(
-    senderSession &&
-      !expiredSender &&
-      address &&
-      address.toLowerCase() === senderSession.session.wallet.toLowerCase(),
-  );
+  const sender = baseSenderState(session, address);
+  const senderSession = sender.status === 'ready' ? sender.session : null;
+  const expiredSender = sender.status === 'expired';
+  const authenticated = sender.status === 'ready';
   const [profile, setProfile] = useState<PublicGateProfile | null>(null);
   const [proposalId, setProposalId] = useState('');
   const [position, setPosition] = useState('');
