@@ -7,7 +7,7 @@
 // require the owner threshold) rather than returning the magic value blindly.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { Wallet, recoverAddress } = require("ethers");
+const { AbiCoder, Wallet, getAddress, recoverAddress } = require("ethers");
 const { MAX_WALLET_SIGNATURE_BYTES } = require("@gavel/gate");
 
 const { createAuthService } = require("../src/gate/auth");
@@ -21,7 +21,69 @@ const NOW = 2_000_000_000;
 const SAFE = "0x5afe00000000000000000000000000000000cafe";
 const BLOB_WALLET = "0xb10b00000000000000000000000000000000b10b";
 const OWNERS = [Wallet.createRandom(), Wallet.createRandom()];
+// A 2-of-2 Safe whose second owner is itself a contract (a nested 2-of-2 Safe).
+const NESTED_SAFE = "0x5afe0000000000000000000000000000000000a1";
+const OUTER_SAFE = "0x5afe0000000000000000000000000000000000b2";
+const OUTER_EOA_OWNER = Wallet.createRandom();
 const hex = (bytes, byte = "ab") => `0x${byte.repeat(bytes)}`;
+
+// The Safe `checkNSignatures` layout, as far as Gate's input shape matters:
+// `threshold` 65-byte slots {r, s, v}, owners strictly ascending. v=0 is a
+// contract signature: r holds the owner address, s the byte offset of a
+// {uint256 length, bytes data} tail appended after the static slots, which is
+// handed to that owner's own validator. v=27/28 is plain ECDSA over the digest.
+function safeCheckSignatures(digest, signature, owners, threshold, contractValidators) {
+  const bytes = Buffer.from(signature.slice(2), "hex");
+  if (bytes.length < threshold * 65) return false;
+  let last = 0n;
+  for (let i = 0; i < threshold; i += 1) {
+    const slot = bytes.subarray(i * 65, i * 65 + 65);
+    const v = slot[64];
+    let owner;
+    if (v === 0) {
+      owner = getAddress(`0x${slot.subarray(12, 32).toString("hex")}`);
+      const offset = Number(BigInt(`0x${slot.subarray(32, 64).toString("hex")}`));
+      if (offset < threshold * 65 || offset + 32 > bytes.length) return false; // GS021 / GS022
+      const length = Number(BigInt(`0x${bytes.subarray(offset, offset + 32).toString("hex")}`));
+      if (offset + 32 + length > bytes.length) return false; // GS023
+      const validator = contractValidators[owner];
+      if (!validator || !validator(`0x${bytes.subarray(offset + 32, offset + 32 + length).toString("hex")}`)) return false;
+    } else if (v === 27 || v === 28) {
+      owner = recoverAddress(digest, `0x${slot.toString("hex")}`);
+    } else {
+      return false;
+    }
+    if (BigInt(owner) <= last || !owners.includes(owner)) return false; // GS026
+    last = BigInt(owner);
+  }
+  return true;
+}
+
+function concatenatedOwnersSigned(digest, signature) {
+  const body = signature.slice(2);
+  if (body.length !== 130 * OWNERS.length) return false;
+  const signers = new Set();
+  for (let i = 0; i < body.length; i += 130) signers.add(recoverAddress(digest, `0x${body.slice(i, i + 130)}`));
+  return OWNERS.every((owner) => signers.has(owner.address));
+}
+
+// Build the outer Safe's signature: owners sorted ascending, the EOA owner as a
+// plain ECDSA slot, the nested Safe as a v=0 slot pointing at an appended tail.
+async function outerSafeSignature(issued) {
+  const inner = await Promise.all(OWNERS.map((o) => o.signTypedData(issued.domain, issued.types, issued.message)));
+  const innerBytes = Buffer.from(inner.map((sig) => sig.slice(2)).join(""), "hex");
+  const eoaSlot = Buffer.from((await OUTER_EOA_OWNER.signTypedData(issued.domain, issued.types, issued.message)).slice(2), "hex");
+  const offset = 2 * 65;
+  const contractSlot = Buffer.from(AbiCoder.defaultAbiCoder()
+    .encode(["address", "uint256"], [NESTED_SAFE, offset]).slice(2) + "00", "hex");
+  const ordered = BigInt(OUTER_EOA_OWNER.address) < BigInt(NESTED_SAFE)
+    ? [eoaSlot, contractSlot] : [contractSlot, eoaSlot];
+  const tail = Buffer.concat([
+    Buffer.from(AbiCoder.defaultAbiCoder().encode(["uint256"], [innerBytes.length]).slice(2), "hex"),
+    innerBytes,
+  ]);
+  return `0x${Buffer.concat([...ordered, tail]).toString("hex")}`;
+}
 
 function harness() {
   const store = new MemoryGateStore({ clock: () => new Date(NOW * 1000) });
@@ -40,6 +102,14 @@ function harness() {
       }
       const ok = OWNERS.every((owner) => signers.has(owner.address));
       return { code: "0x6000", magicValue: ok ? "0x1626ba7e" : "0xffffffff" };
+    }
+    if (wallet === OUTER_SAFE) {
+      const owners = [OUTER_EOA_OWNER.address, NESTED_SAFE].map((a) => getAddress(a));
+      const ok = safeCheckSignatures(digest, signature, owners, 2, {
+        // The nested Safe validates its own concatenated owner signatures.
+        [getAddress(NESTED_SAFE)]: (inner) => concatenatedOwnersSigned(digest, inner),
+      });
+      return { code: "0x6002", magicValue: ok ? "0x1626ba7e" : "0xffffffff" };
     }
     if (wallet === BLOB_WALLET) {
       // A wallet whose own encoding happens to be exactly the maximum size.
@@ -252,5 +322,36 @@ test("wallet authority is unchanged: a well-formed signature by the wrong key is
     assert.equal((await post(baseUrl, "/v1/gate/auth/verify", sessionProof(safeIssued, one))).status, 401);
     assert.equal((await store.getNonceByHash(issued.nonceHash)).consumedAt, null);
     assert.equal((await store.getNonceByHash(safeIssued.nonceHash)).consumedAt, null);
+  });
+});
+
+test("a Safe with a contract owner (v=0 slot + appended dynamic signature) is accepted under the ceiling", async () => {
+  const { server, store, verifierCalls } = harness();
+  await withServer(server, async (baseUrl) => {
+    const issued = await sessionChallenge(baseUrl, OUTER_SAFE, "dao_profile");
+    const signature = await outerSafeSignature(issued);
+    const bytes = (signature.length - 2) / 2;
+    // 2 static slots (130) + length word (32) + nested 2-of-2 owner signatures (130).
+    assert.equal(bytes, 292);
+    assert.ok(bytes !== 65 && bytes < MAX_WALLET_SIGNATURE_BYTES);
+
+    const result = await post(baseUrl, "/v1/gate/auth/verify", sessionProof(issued, signature));
+    assert.equal(result.status, 200);
+    assert.equal(result.body.session.wallet, OUTER_SAFE);
+    assert.deepEqual(verifierCalls.at(-1), { wallet: OUTER_SAFE, chainId: "1", bytes: 292 });
+    assert.equal((await store.getNonceByHash(issued.nonceHash)).consumedAt, String(NOW));
+
+    // The fixture is load-bearing: a tampered dynamic tail is refused by the
+    // Safe-style validator, so acceptance above was not a rubber stamp.
+    const again = await sessionChallenge(baseUrl, OUTER_SAFE, "dao_profile");
+    const good = await outerSafeSignature(again);
+    // Flip one byte inside the nested owner's `r` (tail offset 130 + 32-byte
+    // length word + 5), never the `v` byte, so the change is always material.
+    const at = 2 + (130 + 32 + 5) * 2;
+    const flipped = (parseInt(good.slice(at, at + 2), 16) ^ 0xff).toString(16).padStart(2, "0");
+    const tampered = `${good.slice(0, at)}${flipped}${good.slice(at + 2)}`;
+    const refused = await post(baseUrl, "/v1/gate/auth/verify", sessionProof(again, tampered));
+    assert.equal(refused.status, 401);
+    assert.equal((await store.getNonceByHash(again.nonceHash)).consumedAt, null);
   });
 });

@@ -279,6 +279,42 @@ test('keeps ERC-1271 verification behind an injected, network-free boundary', as
   await assert.rejects(gate.verifyErc1271TypedDataSignature(typed, signature), /injected/);
 });
 
+test('every exported signature verifier enforces the wallet signature ceiling itself', async () => {
+  const signer = new Wallet(`0x${'12'.repeat(32)}`);
+  const typed = gate.createGateEnrollmentTypedData(enrollment({ wallet: signer.address }), config, NOW);
+  const eoa = await signer.signTypedData(typed.domain, typed.types, typed.message);
+  const max = gate.MAX_WALLET_SIGNATURE_BYTES;
+  const bound = new RegExp(`at most ${max} bytes`);
+  const calls = [];
+  const verifier = async (request) => { calls.push(request.signature.length); return '0x1626ba7e'; };
+
+  // Exactly at the ceiling is handed to the verifier intact.
+  const atLimit = `0x${'c3'.repeat(max)}`;
+  assert.equal(await gate.verifyErc1271TypedDataSignature(typed, atLimit, verifier), true);
+  assert.deepEqual(calls, [atLimit.length]);
+  // An ordinary ECDSA signature is still recovered.
+  assert.equal(gate.verifyEoaTypedDataSignature(typed, eoa), true);
+
+  const refused = [
+    `0x${'c3'.repeat(max + 1)}`, // one byte over
+    `${eoa}${'c3'.repeat(max)}`, // a real signature with an oversized tail
+    '0xabc', // odd length
+    `0x${'zz'.repeat(65)}`, // not hex
+    eoa.slice(2), // missing 0x
+    '',
+    null,
+    65,
+  ];
+  for (const signature of refused) {
+    assert.throws(() => gate.recoverTypedDataSigner(typed, signature), bound);
+    assert.throws(() => gate.verifyEoaTypedDataSignature(typed, signature), bound);
+    await assert.rejects(gate.verifyErc1271TypedDataSignature(typed, signature, verifier), bound);
+  }
+  assert.equal(calls.length, 1, 'no refused payload reached the ERC-1271 verifier');
+  // The error names the rule, never the payload.
+  assert.throws(() => gate.recoverTypedDataSigner(typed, `0x${'c3'.repeat(max + 1)}`), (error) => !/c3c3/.test(error.message));
+});
+
 test('uses only the configured authority required by each proof type and role', () => {
   assert.doesNotThrow(() => gate.createGateEnrollmentTypedData(enrollment(), {
     daoChainId: 1n,
