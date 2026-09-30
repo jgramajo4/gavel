@@ -49,6 +49,7 @@ interface GateConstants {
   GAVEL_FEE_AMOUNT: bigint;
   MIN_ATTENTION_AMOUNT: bigint;
   QUOTE_VERSION: number;
+  MAX_WALLET_SIGNATURE_BYTES: number;
 }
 
 interface GateMarkdown {
@@ -69,6 +70,8 @@ export const MAX_EVIDENCE_URLS = constants.MAX_EVIDENCE_URLS;
 export const GAVEL_FEE_AMOUNT = constants.GAVEL_FEE_AMOUNT;
 export const MIN_ATTENTION_AMOUNT = constants.MIN_ATTENTION_AMOUNT;
 export const QUOTE_VERSION = constants.QUOTE_VERSION;
+/** Server-enforced ceiling on wallet signature bytes; mirrored here for UX only. */
+export const MAX_WALLET_SIGNATURE_BYTES = constants.MAX_WALLET_SIGNATURE_BYTES;
 
 /**
  * Validates against the frozen CommonMark allowlist and returns the token

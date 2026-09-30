@@ -47,7 +47,7 @@ function enrollmentProof(overrides = {}) {
         issuedAt: "1789344000", expiry: "1789344600", version: "1", ...overrides,
       },
     },
-    signature: "0xsigned",
+    signature: `0x${"5a".repeat(65)}`,
   };
 }
 
@@ -59,7 +59,7 @@ function baseProof(overrides = {}) {
       message: { wallet: WALLET, dao: "nouns", purpose: "base_payout_control", nonce: BLOCK_HASH,
         issuedAt: "1789344000", expiry: "1789344600", version: "1", ...overrides },
     },
-    signature: "0xbase",
+    signature: `0x${"ba".repeat(65)}`,
   };
 }
 

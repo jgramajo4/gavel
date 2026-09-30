@@ -1,5 +1,5 @@
 import { Interface, Signature, getAddress, keccak256, toUtf8Bytes, AbiCoder } from 'ethers';
-import { deriveUsdcAuthorization, type UsdcAuthorization } from './gate-domain';
+import { MAX_WALLET_SIGNATURE_BYTES, deriveUsdcAuthorization, type UsdcAuthorization } from './gate-domain';
 import type { IssuedQuote } from './types';
 
 /**
@@ -338,7 +338,20 @@ export async function signTypedData(
       }),
     ],
   });
-  if (typeof signature !== 'string' || !SIGNATURE_BYTES.test(signature)) {
+  if (typeof signature !== 'string') {
+    throw new WalletError('BAD_SIGNATURE', 'The wallet returned an unusable signature.');
+  }
+  // Mirrors the server's ceiling so an oversized ERC-1271 payload fails here
+  // with a readable reason instead of a round trip. The server enforces the
+  // same limit independently; this check is UX, not the boundary. Length is
+  // checked before the regex, matching the server helper.
+  if (signature.length > 2 + MAX_WALLET_SIGNATURE_BYTES * 2) {
+    throw new WalletError(
+      'SIGNATURE_TOO_LARGE',
+      `The wallet returned a signature larger than ${MAX_WALLET_SIGNATURE_BYTES} bytes, which Gate does not accept.`,
+    );
+  }
+  if (!SIGNATURE_BYTES.test(signature)) {
     // Never echo the raw value back in the message; a malformed signature is
     // still signature material.
     throw new WalletError('BAD_SIGNATURE', 'The wallet returned an unusable signature.');

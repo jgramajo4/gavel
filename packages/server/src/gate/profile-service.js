@@ -1,3 +1,5 @@
+const { isBoundedWalletSignature } = require("@gavel/gate");
+const { INVALID_SIGNATURE_MESSAGE } = require("./auth");
 const { isRenderableEnsName } = require("./ens");
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -28,6 +30,11 @@ function address(value, name) {
 function exactMessage(proof, primaryType, fields) {
   if (!proof || proof.typedData?.primaryType !== primaryType || typeof proof.signature !== "string" || !proof.signature) {
     throw new ProfileRequestError(`${primaryType} proof is required`);
+  }
+  // Bounded before the profile transaction, its advisory lock, and any
+  // ERC-1271 RPC. auth.js enforces the same rule again for every caller.
+  if (!isBoundedWalletSignature(proof.signature)) {
+    throw new ProfileRequestError(INVALID_SIGNATURE_MESSAGE, 400, "INVALID_SIGNATURE");
   }
   const allowedProofFields = primaryType === "GateEnrollment"
     ? ["typedData", "signature", "publicDisplay", "publicTags"]

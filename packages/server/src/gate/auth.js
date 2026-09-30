@@ -7,12 +7,28 @@ const {
   BASE_PAYOUT_CONTROL_TYPES,
   GATE_ENROLLMENT_PURPOSE,
   GATE_ENROLLMENT_TYPES,
+  MAX_WALLET_SIGNATURE_BYTES,
   WALLET_SESSION_PURPOSE,
   WALLET_SESSION_ROLES,
   WALLET_SESSION_TYPES,
   hashTypedDataPayload,
+  isBoundedWalletSignature,
   validateGateEnrollment,
 } = require("@gavel/gate");
+
+const INVALID_SIGNATURE_MESSAGE =
+  `signature must be 0x-prefixed whole-byte hex of at most ${MAX_WALLET_SIGNATURE_BYTES} bytes`;
+
+/**
+ * The one server-side gate on wallet-provided signature bytes. It runs while
+ * the proof is parsed — before the nonce row is read, before ECDSA recovery,
+ * and before any ERC-1271 `eth_call` — so an oversized or malformed payload
+ * costs neither a database round trip nor RPC calldata.
+ */
+function assertWalletSignature(signature) {
+  if (!isBoundedWalletSignature(signature)) throw new AuthRequestError(INVALID_SIGNATURE_MESSAGE, "INVALID_SIGNATURE");
+  return signature;
+}
 
 const AUTH_TYPES = Object.freeze({
   GateEnrollment: GATE_ENROLLMENT_TYPES,
@@ -208,6 +224,7 @@ function createAuthService(options = {}) {
   function expectedWalletSession(proof) {
     exactKeys(proof, ["proofType", "typedData", "signature"], "WalletSession proof");
     if (typeof proof.signature !== "string") throw new AuthRequestError("signature is required");
+    assertWalletSignature(proof.signature);
     if (proof.proofType !== "WalletSession") throw new AuthRequestError("verify accepts WalletSession only");
     const typedData = proof.typedData;
     exactKeys(typedData, ["primaryType", "domain", "message"], "WalletSession typed data");
@@ -304,6 +321,7 @@ function createAuthService(options = {}) {
     if (!proof || typeof proof !== "object" || typeof proof.signature !== "string") {
       throw new AuthRequestError(`${proofType} proof is required`);
     }
+    assertWalletSignature(proof.signature);
     const typedData = proof.typedData;
     exactKeys(typedData, ["primaryType", "domain", "message"], `${proofType} typed data`);
     if (typedData.primaryType !== proofType) throw new AuthRequestError(`${proofType} typed data is required`);
@@ -432,4 +450,6 @@ function createAuthService(options = {}) {
   });
 }
 
-module.exports = { AUTH_TYPES, AuthRequestError, MemoryAuthRepository, createAuthService };
+module.exports = {
+  AUTH_TYPES, AuthRequestError, INVALID_SIGNATURE_MESSAGE, MemoryAuthRepository, assertWalletSignature, createAuthService,
+};

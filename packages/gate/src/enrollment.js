@@ -4,7 +4,7 @@ const {
   TypedDataEncoder,
   verifyTypedData,
 } = require('ethers');
-const { AVAILABILITY, MIN_ATTENTION_AMOUNT } = require('./constants');
+const { AVAILABILITY, MIN_ATTENTION_AMOUNT, MAX_WALLET_SIGNATURE_BYTES } = require('./constants');
 
 const GATE_TYPED_DATA_NAME = 'GavelGate';
 const GATE_TYPED_DATA_VERSION = '1';
@@ -257,6 +257,21 @@ function hashTypedDataDigest(typed) {
   return TypedDataEncoder.hash(typed.domain, typed.types, typed.message);
 }
 
+const WALLET_SIGNATURE_HEX = /^0x(?:[0-9a-fA-F]{2})*$/;
+
+/**
+ * Whether `value` is wallet signature bytes Gate will hand to a verifier:
+ * 0x-prefixed, whole-byte hex, at most MAX_WALLET_SIGNATURE_BYTES. Any length
+ * under the ceiling is allowed (ERC-1271 wallets choose their own encoding,
+ * including an empty `0x`); the length test runs before the regex so an
+ * oversized string is never scanned.
+ */
+function isBoundedWalletSignature(value) {
+  return typeof value === 'string'
+    && value.length <= 2 + MAX_WALLET_SIGNATURE_BYTES * 2
+    && WALLET_SIGNATURE_HEX.test(value);
+}
+
 function recoverTypedDataSigner(typed, signature) {
   return verifyTypedData(typed.domain, typed.types, typed.message, signature);
 }
@@ -305,4 +320,5 @@ module.exports = {
   recoverTypedDataSigner,
   verifyEoaTypedDataSignature,
   verifyErc1271TypedDataSignature,
+  isBoundedWalletSignature,
 };

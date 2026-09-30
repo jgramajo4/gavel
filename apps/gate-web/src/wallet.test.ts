@@ -14,6 +14,7 @@ import {
   WalletError,
 } from './wallet';
 import { stubWallet } from './test/harness';
+import { MAX_WALLET_SIGNATURE_BYTES } from './gate-domain';
 import { NOW_SECONDS, PAYER, QUOTE_EXPIRY_SECONDS, SPLITTER, TEST_CHAIN_ID, USDC, VOTER, quote } from './test/fixtures';
 
 const at = (seconds: number) => ({ now: () => seconds * 1000 });
@@ -207,6 +208,15 @@ describe('typed-data signature shape', () => {
   it('accepts an empty signature, which is what an approved SafeMessage returns', async () => {
     const wallet = stubWallet({ eth_signTypedData_v4: () => '0x' });
     await expect(signTypedData(wallet, VOTER, TYPED)).resolves.toBe('0x');
+  });
+
+  it('mirrors the server signature ceiling: exactly the limit passes, one byte over does not', async () => {
+    const atLimit = `0x${'c3'.repeat(MAX_WALLET_SIGNATURE_BYTES)}`;
+    await expect(signTypedData(stubWallet({ eth_signTypedData_v4: () => atLimit }), VOTER, TYPED)).resolves.toBe(atLimit);
+    const over = `0x${'c3'.repeat(MAX_WALLET_SIGNATURE_BYTES + 1)}`;
+    await expect(
+      signTypedData(stubWallet({ eth_signTypedData_v4: () => over }), VOTER, TYPED),
+    ).rejects.toMatchObject({ code: 'SIGNATURE_TOO_LARGE' });
   });
 
   it('still refuses something that is not signature bytes at all', async () => {

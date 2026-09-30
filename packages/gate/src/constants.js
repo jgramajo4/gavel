@@ -20,6 +20,13 @@ const QUOTE_LIFETIME_SECONDS = 600;
 const MAX_PITCH_CODE_POINTS = 4000;
 const MAX_DISCLOSURE_CODE_POINTS = 2000;
 const MAX_EVIDENCE_URLS = 5;
+// Upper bound on wallet-provided signature bytes for WalletSession,
+// GateEnrollment, and BasePayoutControl proofs. ERC-1271 wallets may return
+// any whole-byte payload, so this is a ceiling, not a shape: 8 KiB holds a
+// flat Safe threshold of 126 owner signatures (65 bytes each), nested Safe
+// contract signatures, and WebAuthn smart-wallet envelopes, while keeping a
+// proof far below the HTTP body cap and bounding ERC-1271 eth_call calldata.
+const MAX_WALLET_SIGNATURE_BYTES = 8192;
 
 module.exports = {
   AVAILABILITY,
@@ -35,4 +42,5 @@ module.exports = {
   MAX_PITCH_CODE_POINTS,
   MAX_DISCLOSURE_CODE_POINTS,
   MAX_EVIDENCE_URLS,
+  MAX_WALLET_SIGNATURE_BYTES,
 };
