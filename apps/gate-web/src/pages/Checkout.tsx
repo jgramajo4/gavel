@@ -207,6 +207,21 @@ export function Checkout({
         account,
       });
       noteConnected(signed);
+      // openWalletSession resolves the account again, so the wallet may have
+      // moved between the check above and the signature. Only a base_sender
+      // session for the payer itself may become the Checkout sender; anything
+      // else is dropped, never reinterpreted as the payer.
+      const signedWallet = verified?.session?.wallet;
+      if (
+        verified?.session?.role !== 'base_sender' ||
+        typeof signedWallet !== 'string' ||
+        !sameAddress(signedWallet, payer)
+      ) {
+        setError(
+          `The wallet signed in as ${typeof signedWallet === 'string' ? signedWallet : 'another account'}, not the payer ${payer}. That session was discarded. Switch your wallet to ${payer} and press "Sign in as payer" again. Nothing was paid.`,
+        );
+        return;
+      }
       setSession(verified);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Wallet sign-in failed. No session was created.');

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor } from '@testing-library/react';
+import { useSession } from '../session';
 import userEvent from '@testing-library/user-event';
 import { Checkout } from './Checkout';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
@@ -463,6 +464,14 @@ describe('Checkout pay-time quote authority', () => {
  */
 describe('Checkout Base sender requirement', () => {
   const OTHER = '0x5555555555555555555555555555555555555555';
+  const THIRD = '0x6666666666666666666666666666666666666666';
+
+  /** Reads the session Checkout actually stored, not what it requested. */
+  function ActiveSession() {
+    const { session: active } = useSession();
+    return <output data-testid="active-session">{active ? `${active.session.role}:${active.session.wallet}` : 'none'}</output>;
+  }
+  const activeSession = () => screen.getByTestId('active-session').textContent?.toLowerCase();
   const senderChallenge = {
     proofType: 'WalletSession',
     primaryType: 'WalletSession',
@@ -617,13 +626,18 @@ describe('Checkout Base sender requirement', () => {
     const requestChallenge = vi.spyOn(api, 'requestChallenge');
     const wallet = tokenWallet({ eth_accounts: () => [PAYER, OTHER] });
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
-      session: otherSender,
-      walletAddress: OTHER,
-      provider: wallet,
-    });
+    renderApp(
+      <>
+        <Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />
+        <ActiveSession />
+      </>,
+      { session: otherSender, walletAddress: OTHER, provider: wallet },
+    );
+    expect(activeSession()).toBe(`base_sender:${OTHER}`);
     await user.click(await screen.findByRole('button', { name: /sign in as payer/i }));
     expect(await screen.findByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
+    // The session Checkout stored is the payer's own base_sender session.
+    expect(activeSession()).toBe(`base_sender:${PAYER.toLowerCase()}`);
 
     // The challenge is requested for the payer, as a base_sender, and nothing else.
     expect(requestChallenge).toHaveBeenCalledTimes(1);
@@ -633,6 +647,62 @@ describe('Checkout Base sender requirement', () => {
     // Only the session was signed; nothing was paid or recorded.
     expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
     expect(settlementTouched(calls)).toEqual([]);
+  });
+
+  it('discards a session for a third account when the wallet moves during payer sign-in', async () => {
+    const otherSender = { ...session, session: { ...session.session, wallet: OTHER } };
+    const thirdSession = { ...session, token: 'c'.repeat(43), session: { ...session.session, wallet: THIRD } };
+    const { api, calls } = stubApi([
+      statusRoute(quotedReceipt),
+      resumeRoute(),
+      settlementRoute,
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: { ...senderChallenge, message: { wallet: THIRD, role: 'base_sender' } } },
+      // Auth verification returns a valid base_sender session, but for THIRD.
+      { method: 'POST', match: /\/auth\/verify$/, status: 200, body: thirdSession },
+    ]);
+    const requestChallenge = vi.spyOn(api, 'requestChallenge');
+    // 'first': Checkout's own check sees the payer. After that the wallet has
+    // dropped the payer, so openWalletSession's re-resolution falls through to
+    // a connect prompt, which hands back THIRD.
+    let phase: 'idle' | 'first' | 'moved' = 'idle';
+    const wallet = tokenWallet({
+      eth_accounts: () => {
+        if (phase === 'first') {
+          phase = 'moved';
+          return [PAYER];
+        }
+        return phase === 'moved' ? [] : [OTHER];
+      },
+      eth_requestAccounts: () => [THIRD],
+    });
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />
+        <ActiveSession />
+      </>,
+      { session: otherSender, walletAddress: OTHER, provider: wallet },
+    );
+    const action = await screen.findByRole('button', { name: /sign in as payer/i });
+    phase = 'first';
+    await user.click(action);
+
+    // The race really happened: the challenge went out for THIRD.
+    await waitFor(() => expect(requestChallenge).toHaveBeenCalledTimes(1));
+    expect(requestChallenge.mock.calls[0][0]).toEqual({ proofType: 'WalletSession', wallet: THIRD, role: 'base_sender' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(new RegExp(`signed in as ${THIRD}, not the payer ${PAYER}`, 'i'));
+    expect(screen.getByRole('alert')).toHaveTextContent(/session was discarded/i);
+    // THIRD's session was never stored as the Checkout sender.
+    expect(activeSession()).not.toContain(THIRD.toLowerCase());
+    expect(activeSession()).toBe(`base_sender:${OTHER}`);
+    // Pay stays unavailable; nothing was paid or recorded.
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
+    expect(settlementTouched(calls)).toEqual([]);
+    // Recoverable: the correction state still offers a sign-in.
+    expect(screen.getByTestId('base-sender-required')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeEnabled();
   });
 
   it('establishes the Base sender through its own base_sender sign-in, then pays as that sender', async () => {
