@@ -179,6 +179,57 @@ export function Checkout({
     }
   }, [api, wallet, address, noteConnected, setSession]);
 
+  // A ready Base sender that is not this quote's payer: the only correction
+  // is a base_sender session for the payer itself. Resolve the wallet account
+  // first and refuse to sign unless it IS the payer, so this can never mint a
+  // session for yet another account.
+  const signInAsPayer = useCallback(async () => {
+    if (!payer) return;
+    setError(null);
+    setBusy(true);
+    try {
+      let account: string;
+      try {
+        account = await resolveAccount(wallet, payer);
+      } catch {
+        setError(`Switch your wallet to ${payer}, then press "Sign in as payer" again. Nothing was signed.`);
+        return;
+      }
+      if (!sameAddress(account, payer)) {
+        noteConnected(account);
+        setError(`The wallet authorized ${account}, not the payer ${payer}. Switch to ${payer} and try again. Nothing was signed.`);
+        return;
+      }
+      const { account: signed, verified } = await openWalletSession({
+        api,
+        provider: wallet,
+        role: 'base_sender',
+        account,
+      });
+      noteConnected(signed);
+      // openWalletSession resolves the account again, so the wallet may have
+      // moved between the check above and the signature. Only a base_sender
+      // session for the payer itself may become the Checkout sender; anything
+      // else is dropped, never reinterpreted as the payer.
+      const signedWallet = verified?.session?.wallet;
+      if (
+        verified?.session?.role !== 'base_sender' ||
+        typeof signedWallet !== 'string' ||
+        !sameAddress(signedWallet, payer)
+      ) {
+        setError(
+          `The wallet signed in as ${typeof signedWallet === 'string' ? signedWallet : 'another account'}, not the payer ${payer}. That session was discarded. Switch your wallet to ${payer} and press "Sign in as payer" again. Nothing was paid.`,
+        );
+        return;
+      }
+      setSession(verified);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : 'Wallet sign-in failed. No session was created.');
+    } finally {
+      setBusy(false);
+    }
+  }, [api, wallet, payer, noteConnected, setSession]);
+
   const pollStatus = useCallback(async () => {
     if (!id || polling.current) return;
     polling.current = true;
@@ -276,7 +327,13 @@ export function Checkout({
           <button type="button" disabled={busy} onClick={() => void connect()}>
             Connect wallet
           </button>
-        ) : sender.status === 'ready' ? null : (
+        ) : sender.status === 'ready' ? (
+          payer ? (
+            <button type="button" disabled={busy} onClick={() => void signInAsPayer()}>
+              {busy ? 'Waiting for your wallet…' : 'Sign in as payer'}
+            </button>
+          ) : null
+        ) : (
           <button type="button" disabled={busy} onClick={() => void signIn()}>
             {busy ? 'Waiting for your wallet…' : 'Sign in with wallet'}
           </button>
