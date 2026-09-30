@@ -1,5 +1,6 @@
 const http = require("node:http");
 const { SubmissionPolicyError } = require("@gavel/gate");
+const { AuthRequestError, INVALID_SIGNATURE_MESSAGE } = require("./auth");
 const { ProfileRequestError } = require("./profile-service");
 const { IndexIdentityMismatchError, IndexUnavailableError } = require("./index-client");
 const { SettlementRequestError } = require("./settlement-service");
@@ -165,7 +166,13 @@ function createGateHttpServer({ authService, profileService, submissionService, 
       if (request.method === "POST" && path === "/v1/gate/auth/verify") {
         const body = await readJson(request, maxBodyBytes);
         try { return sendJson(response, 200, await authService.verifyProof(body)); }
-        catch {
+        catch (error) {
+          // A malformed or oversized signature is the one verify failure a
+          // client can correct, so it gets a fixed, content-free 400. Every
+          // other failure stays the coarse 401.
+          if (error instanceof AuthRequestError && error.code === "INVALID_SIGNATURE") {
+            throw new ProfileRequestError(INVALID_SIGNATURE_MESSAGE, 400, "INVALID_SIGNATURE");
+          }
           throw new ProfileRequestError("authentication proof is invalid", 401, "INVALID_AUTH_PROOF");
         }
       }
