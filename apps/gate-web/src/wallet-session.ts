@@ -73,3 +73,47 @@ export function isSessionForRole(
 ): session is VerifiedSession {
   return Boolean(session?.token) && session?.session?.role === role;
 }
+
+/**
+ * Whether the tab holds an explicit, live Base sender.
+ *
+ * The Base sender is the account that requests, owns, and pays a quote. It is
+ * established in exactly one way: a `base_sender` WalletSession the server
+ * issued, for the account the wallet is connected to right now. Nothing else
+ * stands in for it — not the target voter, not a `dao_profile` or `dao_inbox`
+ * session, not a connected address with no session, and not a session left
+ * over from an account the wallet has since moved away from or disconnected.
+ */
+export type BaseSenderState =
+  | { status: 'ready'; session: VerifiedSession; sender: string }
+  /** No connected wallet account. */
+  | { status: 'disconnected' }
+  /** Connected, but no `base_sender` session (none, or another role's). */
+  | { status: 'unsigned' }
+  /** A `base_sender` session whose server expiry has passed. */
+  | { status: 'expired' }
+  /** A `base_sender` session for a different account than the connected one. */
+  | { status: 'mismatch'; sender: string };
+
+function sameAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+export function baseSenderState(
+  session: VerifiedSession | null,
+  connected: string | null,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): BaseSenderState {
+  if (!isSessionForRole(session, 'base_sender')) return connected ? { status: 'unsigned' } : { status: 'disconnected' };
+  let unexpired = false;
+  try {
+    unexpired = BigInt(session.session.expiry) > BigInt(nowSeconds);
+  } catch {
+    unexpired = false;
+  }
+  if (!unexpired) return { status: 'expired' };
+  if (!connected) return { status: 'disconnected' };
+  const sender = session.session.wallet;
+  if (typeof sender !== 'string' || !sameAddress(sender, connected)) return { status: 'mismatch', sender };
+  return { status: 'ready', session, sender };
+}

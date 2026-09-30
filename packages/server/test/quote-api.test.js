@@ -459,3 +459,36 @@ test("repeated resume is idempotent and creates no second quote or reservation",
     });
   });
 });
+
+// Issue 7: the server half of the explicit-Base-sender invariant. The quote's
+// payer is the base_sender session wallet and nothing else: never the target
+// voter, never a body field, and a voter-role session cannot reach it.
+test("the Base sender comes only from a base_sender session, never from the body or the voter", async () => {
+  const gate = await harness();
+  await withServer(gate.server, async (baseUrl) => {
+    for (const field of ["payer", "base_sender", "baseSender", "sender", "wallet"]) {
+      const smuggled = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`,
+        post(body({ [field]: GAVEL_RECIPIENT })));
+      assert.equal(smuggled.status, 400, field);
+    }
+    assert.equal((await gate.store.counts()).submissions, 0);
+
+    const created = await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()));
+    assert.equal(created.status, 201);
+    assert.equal(created.body.quote.message.payer.toLowerCase(), PAYER.toLowerCase());
+    assert.equal(created.body.quote.message.voter.toLowerCase(), VOTER.toLowerCase());
+    assert.notEqual(created.body.quote.message.payer.toLowerCase(), created.body.quote.message.voter.toLowerCase());
+  });
+
+  for (const role of ["dao_inbox", "dao_profile"]) {
+    const voter = await harness({ role });
+    voter.state.sessionWallet = VOTER.toLowerCase();
+    await withServer(voter.server, async (baseUrl) => {
+      assert.equal((await requestJson(baseUrl, `/v1/gates/${VOTER}/submissions`, post(body()))).status, 401, role);
+      const resumed = await requestJson(baseUrl, "/v1/submissions/AAAAAAAAAAAAAAAAAAAAAA/resume",
+        { headers: { authorization: ["Bearer", TOKEN_VALUE].join(" ") } });
+      assert.equal(resumed.status, 401, role);
+      assert.equal((await voter.store.counts()).submissions, 0);
+    });
+  }
+});

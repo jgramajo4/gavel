@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GateApiError, freezeQuote, type GateApi } from '../api';
 import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
+import { baseSenderState, openWalletSession, type BaseSenderState } from '../wallet-session';
 import { SettlementState } from '../components/SettlementState';
 import { formatExpiryDateTime, formatUsdc, sumAtomic } from '../format';
-import { isQuotePayable, payQuote, type Eip1193Provider, type PaymentPhase } from '../wallet';
+import { isQuotePayable, payQuote, resolveAccount, type Eip1193Provider, type PaymentPhase } from '../wallet';
 import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../types';
 
 /**
@@ -28,6 +30,14 @@ import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../type
  * resume endpoint and pays THAT object, so a tampered tab cannot get a mutated
  * amount, splitter, or chain in front of the wallet. Resume issues nothing,
  * signs nothing, and extends nothing.
+ *
+ * Every settlement step — resume, sign, broadcast, record — runs only for an
+ * explicit Base sender: a live `base_sender` WalletSession for the account the
+ * wallet is connected to right now, which must also be the quote's payer. The
+ * target voter, an enrollment or inbox session, a bare connected address, or a
+ * session left behind by a switched or disconnected wallet never stands in for
+ * it; each of those renders a correction state and touches neither the API nor
+ * the wallet. The server enforces the same role and ownership independently.
  */
 
 const TERMINAL: PublicReceiptState[] = ['accepted', 'expired', 'rejected_by_policy', 'malformed'];
@@ -37,6 +47,29 @@ function isUserRejection(error: unknown): boolean {
   if (code === 4001 || code === 'ACTION_REJECTED') return true;
   const message = error instanceof Error ? error.message : '';
   return /user (rejected|denied)|rejected the request|cancell?ed/i.test(message);
+}
+
+function sameAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/** Why settlement cannot proceed yet, in one correctable sentence. */
+function senderProblem(state: BaseSenderState, payer: string | null): string | null {
+  const who = payer ? `the Base sender wallet ${payer}` : 'the Base sender wallet that requested this quote';
+  switch (state.status) {
+    case 'disconnected':
+      return `Checkout needs ${who}. Connect it to continue.`;
+    case 'unsigned':
+      return `Sign in with ${who} to continue. A voter, enrollment, or inbox session cannot pay a quote.`;
+    case 'expired':
+      return `Your Base sender session expired. Sign in with ${who} again to continue.`;
+    case 'mismatch':
+      return `The connected wallet is not the Base sender you signed in with (${state.sender}). Switch back to it, or sign in again.`;
+    case 'ready':
+      return payer && !sameAddress(payer, state.sender)
+        ? `This quote was issued to ${payer}, not the signed-in Base sender ${state.sender}. Switch your wallet to ${payer} and sign in again.`
+        : null;
+  }
 }
 
 function Row({ label, value, testId }: { label: string; value: string; testId?: string }) {
@@ -68,7 +101,8 @@ export function Checkout({
   pollIntervalMs = 4000,
   now = Date.now,
 }: CheckoutProps) {
-  const { session } = useSession();
+  const { session, setSession, clearSession } = useSession();
+  const { address, connect, noteConnected } = useWalletConnection();
   const [quote, setQuote] = useState<IssuedQuote | null>(receipt?.quote ? freezeQuote(receipt.quote) : null);
   const [id, setId] = useState<string | null>(receipt?.publicId ?? publicId ?? null);
   const [state, setState] = useState<PublicReceiptState>(receipt?.state ?? 'payment_required');
@@ -76,18 +110,34 @@ export function Checkout({
   const [txHash, setTxHash] = useState<string | undefined>(undefined);
   const [acceptedAt, setAcceptedAt] = useState<string | undefined>(receipt?.acceptedAt);
   const [error, setError] = useState<string | null>(null);
+  const [notRecoverable, setNotRecoverable] = useState(false);
   const [busy, setBusy] = useState(false);
   const polling = useRef(false);
+
+  const sender = baseSenderState(session, address, Math.floor(now() / 1000));
+  const payer = quote?.message.payer ?? null;
+  const problem = senderProblem(sender, payer);
+  // Only an explicit, live Base sender that owns this quote may resume or pay.
+  const senderSession = sender.status === 'ready' && problem === null ? sender.session : null;
+  const senderToken = senderSession?.token ?? null;
 
   // Recovery path: a reload, or a duplicate, lands here with only a public ID.
   // Resume returns the ORIGINAL quote; it issues nothing and refreshes nothing.
   useEffect(() => {
-    if (quote || !publicId || !session) return;
+    if (quote || !publicId || !senderToken) return;
     let cancelled = false;
     api
-      .resumeSubmission(session.token, `/v1/submissions/${publicId}/resume`)
+      .resumeSubmission(senderToken, `/v1/submissions/${publicId}/resume`)
       .then((resumed) => {
-        if (cancelled || !resumed) return;
+        if (cancelled) return;
+        if (!resumed) {
+          // Owner-bound resume answers 404 for a quote this Base sender did
+          // not request (or that does not exist). Say so instead of spinning.
+          setNotRecoverable(true);
+          return;
+        }
+        setNotRecoverable(false);
+        setError(null);
         setId(resumed.publicId);
         setState(resumed.state);
         if (resumed.acceptedAt) setAcceptedAt(resumed.acceptedAt);
@@ -95,12 +145,39 @@ export function Checkout({
         onResume?.(resumed);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof GateApiError ? cause.message : 'This quote could not be recovered.');
+        if (cancelled) return;
+        if (cause instanceof GateApiError && cause.status === 401) {
+          clearSession();
+          setError('Your Base sender session is no longer valid. Sign in with wallet again to continue.');
+          return;
+        }
+        setError(cause instanceof GateApiError ? cause.message : 'This quote could not be recovered.');
       });
     return () => {
       cancelled = true;
     };
-  }, [api, session, publicId, quote, onResume]);
+  }, [api, senderToken, publicId, quote, onResume, clearSession]);
+
+  const signIn = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      // The intended and only way to establish a Base sender: sign this
+      // role's own challenge with the connected wallet.
+      const { account, verified } = await openWalletSession({
+        api,
+        provider: wallet,
+        role: 'base_sender',
+        account: address,
+      });
+      noteConnected(account);
+      setSession(verified);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : 'Wallet sign-in failed. No session was created.');
+    } finally {
+      setBusy(false);
+    }
+  }, [api, wallet, address, noteConnected, setSession]);
 
   const pollStatus = useCallback(async () => {
     if (!id || polling.current) return;
@@ -126,13 +203,18 @@ export function Checkout({
   }, [api, id, pollIntervalMs]);
 
   const pay = useCallback(async () => {
-    if (!quote || !id || !session) return;
+    if (!quote || !id) return;
+    if (!senderSession) {
+      setError(problem ?? 'Sign in with the Base sender wallet before paying. Nothing was signed or sent.');
+      return;
+    }
+    const baseSender = senderSession.session.wallet;
     setError(null);
     setBusy(true);
     try {
       // 1. Re-authorize. The rendered quote is a display cache; the persisted,
       //    owner-bound quote is the only thing that may reach the wallet.
-      const authoritative = await api.resumeSubmission(session.token, `/v1/submissions/${id}/resume`);
+      const authoritative = await api.resumeSubmission(senderSession.token, `/v1/submissions/${id}/resume`);
       if (!authoritative) {
         setPhase('failed');
         setError('This quote could not be confirmed with the server. Nothing was signed or sent.');
@@ -147,18 +229,35 @@ export function Checkout({
       }
       const payable = freezeQuote(authoritative.quote);
       setQuote(payable);
+      // The persisted quote names the account that must sign. It must be the
+      // explicit Base sender, and the wallet must still be on that account —
+      // never whichever account it has drifted to since sign-in.
+      if (!sameAddress(payable.message.payer, baseSender)) {
+        setPhase('failed');
+        setError('This quote was issued to a different Base sender. Nothing was signed or sent.');
+        return;
+      }
+      const live = await resolveAccount(wallet, baseSender);
+      if (!sameAddress(live, baseSender)) {
+        setPhase('failed');
+        setError('The wallet is no longer on the Base sender account. Nothing was signed or sent.');
+        return;
+      }
 
       // 2. Pay the server's object. payQuote re-checks version and expiry
       //    before it touches the wallet.
       const result = await payQuote(wallet, payable, setPhase, { now });
       setTxHash(result.txHash);
       // 3. 202: the hash is recorded as a hint. Not payment, not acceptance.
-      const hint = await api.recordSettlementHint(session.token, id, result.txHash, result.chainId);
+      const hint = await api.recordSettlementHint(senderSession.token, id, result.txHash, result.chainId);
       setState(hint.state);
       void pollStatus();
     } catch (cause: unknown) {
       setPhase(isUserRejection(cause) ? 'rejected' : 'failed');
-      if (cause instanceof GateApiError) {
+      if (cause instanceof GateApiError && cause.status === 401) {
+        clearSession();
+        setError('Your Base sender session is no longer valid. Sign in with wallet again to continue.');
+      } else if (cause instanceof GateApiError) {
         if (cause.state === 'expired') setState('expired');
         setError(cause.message);
       } else if (!isUserRejection(cause)) {
@@ -167,17 +266,43 @@ export function Checkout({
     } finally {
       setBusy(false);
     }
-  }, [api, wallet, quote, id, session, pollStatus, now]);
+  }, [api, wallet, quote, id, senderSession, problem, pollStatus, now, clearSession]);
+
+  const senderControl =
+    problem === null ? null : (
+      <section className="notice" aria-label="Base sender required" data-testid="base-sender-required">
+        <p>{problem}</p>
+        {sender.status === 'disconnected' ? (
+          <button type="button" disabled={busy} onClick={() => void connect()}>
+            Connect wallet
+          </button>
+        ) : sender.status === 'ready' ? null : (
+          <button type="button" disabled={busy} onClick={() => void signIn()}>
+            {busy ? 'Waiting for your wallet…' : 'Sign in with wallet'}
+          </button>
+        )}
+      </section>
+    );
 
   if (!quote) {
     return (
       <div className="page page-checkout">
         <h1>Checkout</h1>
-        {error ? (
+        {senderControl}
+        {notRecoverable && !senderControl ? (
+          <section className="notice" aria-label="Base sender required" data-testid="base-sender-required">
+            <p role="alert">
+              {`No quote with this ID belongs to the signed-in Base sender ${senderSession?.session.wallet ?? ''}. Switch your wallet to the account that requested it, then sign in again.`}
+            </p>
+            <button type="button" disabled={busy} onClick={() => void signIn()}>
+              {busy ? 'Waiting for your wallet…' : 'Sign in with wallet'}
+            </button>
+          </section>
+        ) : error ? (
           <p role="alert" className="notice notice-error">
             {error}
           </p>
-        ) : (
+        ) : senderControl ? null : (
           <p className="notice">Loading your quote…</p>
         )}
       </div>
@@ -217,7 +342,8 @@ export function Checkout({
         </p>
       </section>
 
-      {payable ? (
+      {payable ? senderControl : null}
+      {payable && senderSession ? (
         <button type="button" onClick={pay} disabled={busy}>
           Authorize and pay {formatUsdc(total)}
         </button>

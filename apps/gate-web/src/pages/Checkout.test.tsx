@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Checkout } from './Checkout';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
@@ -10,7 +10,9 @@ import {
   TEST_CHAIN_ID,
   USDC,
   VOTER,
+  inboxSession,
   nowMs,
+  profileSession,
   quote,
   quotedReceipt,
 } from '../test/fixtures';
@@ -64,6 +66,7 @@ function tokenWallet(overrides: Record<string, (params?: unknown) => unknown> = 
       if (call.data === iface.encodeFunctionData('version')) return iface.encodeFunctionResult('version', [version]);
       return iface.encodeFunctionResult('DOMAIN_SEPARATOR', [separator]);
     },
+    eth_accounts: () => [PAYER],
     eth_signTypedData_v4: () => AUTH_SIGNATURE,
     eth_sendTransaction: () => TX_HASH,
     ...overrides,
@@ -89,7 +92,7 @@ const settlementRoute = {
 describe('Checkout', () => {
   it('shows the immutable quote summary with a separate $0.25 Gavel fee', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt)]);
-    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
 
     expect(await screen.findByTestId('total-amount')).toHaveTextContent('5.25 USDC');
     expect(screen.getByTestId('attention-amount')).toHaveTextContent('5.00 USDC');
@@ -102,7 +105,7 @@ describe('Checkout', () => {
 
   it('shows the full settlement context the server bound this quote to', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt)]);
-    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
 
     expect(screen.getByTestId('chain-id')).toHaveTextContent(String(TEST_CHAIN_ID));
@@ -122,7 +125,7 @@ describe('Checkout', () => {
     const { api } = stubApi([statusRoute(quotedReceipt)]);
     renderApp(
       <Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={{ ...quotedReceipt, quote: otherChain }} />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     expect(await screen.findByTestId('chain-id')).toHaveTextContent('11155111');
   });
@@ -131,7 +134,7 @@ describe('Checkout', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     expect(container.textContent).not.toMatch(/approve|allowance|spending cap|unlock token/i);
 
@@ -154,7 +157,7 @@ describe('Checkout', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
@@ -180,7 +183,7 @@ describe('Checkout', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    const { container } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
 
     // Nothing in checkout may edit a quote field.
@@ -205,7 +208,7 @@ describe('Checkout', () => {
     const onResume = vi.fn();
     renderApp(
       <Checkout now={nowMs} api={api} wallet={tokenWallet()} publicId={quotedReceipt.publicId} onResume={onResume} />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
 
@@ -225,7 +228,7 @@ describe('Checkout', () => {
   it('does not show accepted after a 202 settlement receipt', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
@@ -241,7 +244,7 @@ describe('Checkout', () => {
       resumeRoute(),
     ]);
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} pollIntervalMs={5} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} pollIntervalMs={5} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/accepted/i), { timeout: 3000 });
@@ -255,7 +258,7 @@ describe('Checkout', () => {
       },
     });
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
@@ -277,7 +280,7 @@ describe('Checkout', () => {
       },
     ]);
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
@@ -288,7 +291,7 @@ describe('Checkout', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
 
     expect(screen.getByRole('region', { name: /quote summary/i })).toBeInTheDocument();
@@ -306,7 +309,7 @@ describe('Checkout quote payability', () => {
   it('offers no pay control once the quote has expired', async () => {
     const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
     const wallet = tokenWallet();
-    renderApp(<Checkout now={expiredNow} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={expiredNow} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
 
     expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
@@ -323,7 +326,7 @@ describe('Checkout quote payability', () => {
         wallet={tokenWallet()}
         receipt={quotedReceipt}
       />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
     expect(screen.getByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
@@ -336,7 +339,7 @@ describe('Checkout quote payability', () => {
     const { api } = stubApi([statusRoute(accepted), resumeRoute()]);
     renderApp(
       <Checkout now={expiredNow} api={api} wallet={tokenWallet()} receipt={{ ...accepted, quote }} />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
     expect(screen.getByRole('status')).toHaveTextContent(/accepted/i);
@@ -348,7 +351,7 @@ describe('Checkout quote payability', () => {
     const unsupported = { ...quote, message: { ...quote.message, quoteVersion: '2' } };
     renderApp(
       <Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={{ ...quotedReceipt, quote: unsupported }} />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
     expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
@@ -362,7 +365,7 @@ describe('Checkout pay-time quote authority', () => {
     const user = userEvent.setup();
     renderApp(
       <Checkout now={nowMs} api={api} wallet={wallet} receipt={{ ...quotedReceipt, quote: localQuote }} />,
-      { session },
+      { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
@@ -425,7 +428,7 @@ describe('Checkout pay-time quote authority', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute(null, 404)]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
@@ -439,12 +442,246 @@ describe('Checkout pay-time quote authority', () => {
     const { api } = stubApi([statusRoute(quotedReceipt), resumeRoute(expired)]);
     const wallet = tokenWallet();
     const user = userEvent.setup();
-    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
     expect(wallet.calls.some((call) => call.method === 'eth_signTypedData_v4')).toBe(false);
     expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
+  });
+});
+
+/**
+ * Issue 7: Checkout requires an explicit Base sender.
+ *
+ * The Base sender is established only by a `base_sender` WalletSession for the
+ * account the wallet is on right now, and it must be the quote's payer. These
+ * tests assert that nothing else — the target voter, another role's session, a
+ * bare connection, or a session stranded by a wallet switch — can resume, sign,
+ * broadcast, or record a settlement.
+ */
+describe('Checkout Base sender requirement', () => {
+  const OTHER = '0x5555555555555555555555555555555555555555';
+  const senderChallenge = {
+    proofType: 'WalletSession',
+    primaryType: 'WalletSession',
+    domain: { name: 'GavelGate', version: '1', chainId: TEST_CHAIN_ID, verifyingContract: SPLITTER },
+    types: { WalletSession: [{ name: 'wallet', type: 'address' }] },
+    message: { wallet: PAYER, role: 'base_sender' },
+    nonceHash: `0x${'aa'.repeat(32)}`,
+    payloadHash: `0x${'bb'.repeat(32)}`,
+  };
+
+  function listenable(handlers: Record<string, (params?: unknown) => unknown> = {}) {
+    const wallet = tokenWallet(handlers);
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    return Object.assign(wallet, {
+      on(event: string, listener: (...args: unknown[]) => void) {
+        const set = listeners.get(event) ?? new Set();
+        set.add(listener);
+        listeners.set(event, set);
+      },
+      removeListener(event: string, listener: (...args: unknown[]) => void) {
+        listeners.get(event)?.delete(listener);
+      },
+      emit(event: string, ...args: unknown[]) {
+        for (const listener of listeners.get(event) ?? []) listener(...args);
+      },
+    });
+  }
+
+  const settlementTouched = (calls: string[]) =>
+    calls.filter((call) => /\/(resume|settlement|relay)$/.test(call));
+  const walletSigned = (wallet: { calls: { method: string }[] }) =>
+    wallet.calls.some((call) => call.method === 'eth_signTypedData_v4' || call.method === 'eth_sendTransaction');
+
+  it('does not proceed without a Base sender: a connected payer must sign in first', async () => {
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
+    const wallet = tokenWallet();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await screen.findByTestId('total-amount');
+    expect(screen.getByTestId('base-sender-required')).toHaveTextContent(/sign in/i);
+    expect(screen.getByTestId('base-sender-required')).toHaveTextContent(PAYER);
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /sign in with wallet/i })).toBeInTheDocument();
+    expect(settlementTouched(calls)).toEqual([]);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('asks to connect when no wallet is connected, even with a base_sender session in memory', async () => {
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session });
+    await screen.findByTestId('total-amount');
+    expect(screen.getByRole('button', { name: /connect wallet/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(settlementTouched(calls)).toEqual([]);
+  });
+
+  it('never falls back to the target voter: a voter dao_inbox or dao_profile session cannot pay', async () => {
+    for (const voterSession of [inboxSession, profileSession]) {
+      const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+      const wallet = tokenWallet({ eth_accounts: () => [VOTER] });
+      const { unmount } = renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+        session: voterSession,
+        walletAddress: VOTER,
+        provider: wallet,
+      });
+      await screen.findByTestId('total-amount');
+      // The voter stays the payout destination; it never becomes the sender.
+      expect(screen.getByTestId('voter-payout')).toHaveTextContent(VOTER);
+      expect(screen.getByTestId('base-sender-required')).toHaveTextContent(/voter, enrollment, or inbox session cannot pay/i);
+      expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+      expect(settlementTouched(calls)).toEqual([]);
+      expect(walletSigned(wallet)).toBe(false);
+      unmount();
+    }
+  });
+
+  it('does not recover a quote by public ID with a voter session token', async () => {
+    const { api, calls } = stubApi([resumeRoute()]);
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} publicId={quotedReceipt.publicId} />, {
+      session: inboxSession,
+      walletAddress: VOTER,
+    });
+    expect(await screen.findByTestId('base-sender-required')).toBeInTheDocument();
+    expect(calls.filter((call) => call.endsWith('/resume'))).toEqual([]);
+  });
+
+  it('never falls back to another payer: a Base sender that did not request this quote is refused', async () => {
+    const otherSender = { ...session, session: { ...session.session, wallet: OTHER } };
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    const wallet = tokenWallet({ eth_accounts: () => [OTHER] });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session: otherSender,
+      walletAddress: OTHER,
+      provider: wallet,
+    });
+    await screen.findByTestId('total-amount');
+    expect(screen.getByTestId('base-sender-required')).toHaveTextContent(new RegExp(`issued to ${PAYER}`, 'i'));
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(settlementTouched(calls)).toEqual([]);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('establishes the Base sender through its own base_sender sign-in, then pays as that sender', async () => {
+    const { api, calls } = stubApi([
+      statusRoute(quotedReceipt),
+      settlementRoute,
+      resumeRoute(),
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+      { method: 'POST', match: /\/auth\/verify$/, status: 200, body: session },
+    ]);
+    const wallet = tokenWallet();
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /sign in with wallet/i }));
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(true));
+
+    const [sessionSign, paymentSign] = wallet.calls.filter((call) => call.method === 'eth_signTypedData_v4');
+    expect(JSON.stringify(sessionSign.params)).toContain('base_sender');
+    expect((paymentSign.params as [string])[0]).toBe(PAYER);
+    const [[tx]] = wallet.calls
+      .filter((call) => call.method === 'eth_sendTransaction')
+      .map((call) => call.params as [{ from: string }]);
+    expect(tx.from).toBe(PAYER);
+    expect(calls.some((call) => call.endsWith('/settlement'))).toBe(true);
+  });
+
+  it('drops pay authority when the wallet switches accounts, and resumes only when it switches back', async () => {
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    const wallet = listenable();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session,
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    expect(await screen.findByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
+
+    act(() => wallet.emit('accountsChanged', [VOTER]));
+    expect(await screen.findByTestId('base-sender-required')).toHaveTextContent(/not the Base sender/i);
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+
+    act(() => wallet.emit('accountsChanged', []));
+    expect(await screen.findByRole('button', { name: /connect wallet/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+
+    act(() => wallet.emit('accountsChanged', [PAYER]));
+    expect(await screen.findByRole('button', { name: /authorize and pay/i })).toBeInTheDocument();
+    expect(settlementTouched(calls)).toEqual([]);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('refuses to sign when the wallet silently moved off the Base sender before Pay', async () => {
+    // No accountsChanged event: the page still believes PAYER is connected,
+    // but the wallet now only authorizes another account.
+    const { api } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
+    const wallet = tokenWallet({ eth_accounts: () => [VOTER] });
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session,
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer on the account/i);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('clears a Base sender session the server no longer accepts and returns to sign-in', async () => {
+    const { api } = stubApi([
+      statusRoute(quotedReceipt),
+      resumeRoute({ error: { code: 'UNAUTHORIZED', message: 'authentication required' } }, 401),
+    ]);
+    const wallet = tokenWallet();
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session,
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer valid/i);
+    expect(screen.getByRole('button', { name: /sign in with wallet/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('does not hang when a reload resumes a quote this Base sender does not own', async () => {
+    const OTHER_SENDER = { ...session, session: { ...session.session, wallet: OTHER } };
+    const { api, calls } = stubApi([
+      { method: 'GET', match: /\/resume$/, status: 404, body: { error: { code: 'NOT_FOUND', message: 'Not found' } } },
+    ]);
+    const wallet = tokenWallet({ eth_accounts: () => [OTHER] });
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} publicId={quotedReceipt.publicId} />, {
+      session: OTHER_SENDER,
+      walletAddress: OTHER,
+      provider: wallet,
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no quote with this id belongs/i);
+    expect(screen.getByRole('button', { name: /sign in with wallet/i })).toBeInTheDocument();
+    expect(screen.queryByText(/loading your quote/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(calls.filter((call) => call.endsWith('/resume'))).toHaveLength(1);
+    expect(walletSigned(wallet)).toBe(false);
+  });
+
+  it('treats an expired base_sender session as absent', async () => {
+    const expired = { ...session, session: { ...session.session, expiry: '1' } };
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), resumeRoute()]);
+    renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, {
+      session: expired,
+      walletAddress: PAYER,
+    });
+    expect(await screen.findByTestId('base-sender-required')).toHaveTextContent(/expired/i);
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(settlementTouched(calls)).toEqual([]);
   });
 });
