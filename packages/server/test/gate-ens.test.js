@@ -178,18 +178,19 @@ test("a verified name overrides a wallet's self-declared name", async () => {
   assert.equal((await service.getPublicProfile(WALLET)).label, "gavel.eth");
 });
 
-test("with no resolver configured a stored display name is exposed only as a generic label", async () => {
-  assert.equal((await profileServiceWith({ ensResolver: null, display: { ens: "stored.eth" } })
-    .getPublicProfile(WALLET)).label, "stored.eth");
-  assert.ok(!Object.hasOwn(
-    await profileServiceWith({ ensResolver: null }).getPublicProfile(WALLET), "label"));
+test("an unverified stored name cannot become a public label when resolution is absent", async () => {
+  const service = profileServiceWith({ ensResolver: null, display: { ens: "spoofed.eth" } });
+  for (const profile of [await service.getPublicProfile(WALLET), ...(await service.listPublicProfiles({}))]) {
+    assert.equal(profile.wallet, WALLET.toLowerCase());
+    assert.equal(profile.label, null);
+  }
 });
 
 test("legacy malformed or bidi display names are never published as labels", async () => {
   for (const ens of ["delegate\u202e.gramajo.eth", "nоuns.eth", "UPPER.eth", "not-ens"]) {
     const service = profileServiceWith({ ensResolver: null, display: { ens } });
-    assert.equal(Object.hasOwn(await service.getPublicProfile(WALLET), "label"), false);
-    assert.equal(Object.hasOwn((await service.listPublicProfiles({}))[0], "label"), false);
+    assert.equal((await service.getPublicProfile(WALLET)).label, null);
+    assert.equal((await service.listPublicProfiles({}))[0].label, null);
   }
 });
 
@@ -201,7 +202,7 @@ test("an unreachable ENS endpoint never fails a Gate read", async () => {
 
   const profile = await service.getPublicProfile(WALLET);
   assert.equal(profile.wallet, WALLET.toLowerCase());
-  assert.equal(profile.label, "stored.eth", "an unavailable lookup leaves the stored value alone");
+  assert.equal(profile.label, null, "an unavailable lookup cannot promote stored unverified ENS");
 });
 
 function exactLabelService(profiles, resolve) {
@@ -272,6 +273,94 @@ test("a verified voter wins when an attacker self-reports the same verified name
   assert.deepEqual(matches.map(({ wallet, label }) => ({ wallet, label })), [{
     wallet: WALLET.toLowerCase(), label: "delegate.gramajo.eth",
   }]);
+});
+
+test("a cached name cannot select a voter after its reverse record changes or lookup fails", async () => {
+  for (const changed of [null, "new-owner.eth", "error"]) {
+    let current = "owner.eth";
+    let calls = 0;
+    const resolver = createEnsNameResolver({ provider: stubProvider(async () => {
+      calls++;
+      if (current === "error") throw new Error("rpc down");
+      return current;
+    }) });
+    const profile = { id: "owner", wallet: WALLET, availability: "accepting_now", updatedAt: "2026-01-01T00:00:00Z" };
+    const service = exactLabelService([profile], (wallet, options) => resolver.resolve(wallet, options));
+    assert.equal((await service.findPublicProfilesByLabel({ label: "owner.eth" }))[0].wallet, WALLET.toLowerCase());
+    current = changed;
+    assert.deepEqual(await service.findPublicProfilesByLabel({ label: "owner.eth" }), []);
+    assert.equal(calls, 2, "each explicit lookup must read the current reverse record");
+  }
+});
+
+test("expired lookup never starts row reads after a delayed directory page", async () => {
+  let release;
+  let reads = 0;
+  const repository = {
+    withProfileTransaction() { throw new Error("unused"); },
+    listProfiles: () => new Promise((resolve) => { release = resolve; }),
+    getPolicy: async () => { reads++; return { dao: "nouns", enabled: true }; },
+    isProfileAccepting: async () => { reads++; return true; },
+  };
+  const service = createProfileService({ repository,
+    authService: { verifyProfileProofs() {}, consumeProfileProofs() {} },
+    indexClient: { getVotingPower: async () => { reads++; return { amount: "1" }; } },
+    baseChainId: "8453",
+    ensResolver: { resolve: async () => { reads++; return { status: "named", name: "owner.eth" }; } },
+  });
+  await assert.rejects(service.findPublicProfilesByLabel({ label: "owner.eth" }),
+    (error) => error.statusCode === 503 && error.code === "SERVICE_UNAVAILABLE");
+  release([{ id: "delayed", wallet: WALLET, availability: "accepting_now" }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 0, "a timed-out directory page must not start per-wallet reads");
+});
+
+test("explicit label lookup has a total deadline across slow wallets", async () => {
+  const profiles = Array.from({ length: 6 }, (_, i) => ({
+    id: `slow-${i}`, wallet: `0x${String(i + 1).padStart(40, "0")}`,
+    availability: "accepting_now", updatedAt: "2026-01-01T00:00:00Z",
+  }));
+  let calls = 0;
+  const service = exactLabelService(profiles, async () => {
+    calls++;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    return { status: "unnamed", name: null };
+  });
+  await assert.rejects(service.findPublicProfilesByLabel({ label: "owner.eth" }),
+    (error) => error.code === "SERVICE_UNAVAILABLE" && error.statusCode === 503);
+  assert.ok(calls < profiles.length, "a slow scan must not read the entire directory");
+});
+
+test("a newly assigned ENS name is selectable despite a cached miss", async () => {
+  let current = null;
+  let calls = 0;
+  const resolver = createEnsNameResolver({ provider: stubProvider(async () => { calls++; return current; }) });
+  const profile = { id: "owner", wallet: WALLET, availability: "accepting_now", updatedAt: "2026-01-01T00:00:00Z" };
+  const service = exactLabelService([profile], (wallet, options) => resolver.resolve(wallet, options));
+  assert.deepEqual(await service.findPublicProfilesByLabel({ label: "owner.eth" }), []);
+  current = "owner.eth";
+  const matches = await service.findPublicProfilesByLabel({ label: "owner.eth" });
+  assert.deepEqual(matches.map(({ wallet }) => wallet), [WALLET.toLowerCase()]);
+  assert.equal(calls, 2);
+});
+
+test("an explicit target does not join an older in-flight ENS lookup", async () => {
+  let release;
+  let calls = 0;
+  let current = "old.eth";
+  const resolver = createEnsNameResolver({ provider: stubProvider(async () => {
+    calls++;
+    if (calls === 1) return new Promise((resolve) => { release = resolve; });
+    return current;
+  }) });
+  const oldLookup = resolver.resolve(WALLET);
+  while (!release) await new Promise((resolve) => setImmediate(resolve));
+  current = "new.eth";
+  const fresh = resolver.resolve(WALLET, { fresh: true });
+  assert.deepEqual(await fresh, { status: "named", name: "new.eth" });
+  assert.equal(calls, 2, "fresh verification must start its own provider read");
+  release("old.eth");
+  await oldLookup;
 });
 
 test("malformed or bidi labels cannot be exact identity lookup keys", async () => {

@@ -546,7 +546,7 @@ test("profile update verifies and consumes enrollment inside the shared profile 
   assert.equal(events[2][1], true);
   assert.equal(events[4][1], true);
   assert.deepEqual(result, {
-    wallet: WALLET, label: "noun.eth", availability: "accepting_now", acceptingSubmissions: true,
+    wallet: WALLET, label: null, availability: "accepting_now", acceptingSubmissions: true,
     message: "Reviewing public goods",
     policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: ["public-goods"] }],
@@ -689,7 +689,7 @@ test("profile update returns a safe committed projection when post-commit index 
   const result = await service.updateProfile({ session: { wallet: WALLET, role: "dao_profile" }, gateEnrollmentProof: enrollmentProof({ availability: "paused" }) });
   assert.equal(committed, true);
   assert.deepEqual(result, {
-    wallet: WALLET, label: "noun.eth", availability: "paused", acceptingSubmissions: false,
+    wallet: WALLET, label: null, availability: "paused", acceptingSubmissions: false,
     message: "Not currently accepting new submissions",
     policies: [{ dao: "nouns", supportedStages: ["PRE_VOTE", "VOTING"], acceptedStages: ["VOTING"],
       attentionAmount: "1000000", gavelFeeAmount: "250000", tags: [] }],
@@ -1026,6 +1026,7 @@ test("public serializer cannot leak nested private objects through display field
 
   assert.deepEqual(result, {
     wallet: WALLET,
+    label: null,
     availability: "accepting_now",
     acceptingSubmissions: true,
     policies: [{

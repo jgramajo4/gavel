@@ -13,6 +13,7 @@ const BASE_FIELDS = Object.freeze(["wallet", "dao", "purpose", "nonce", "issuedA
 const DIRECTORY_LIMIT = 50;
 const DIRECTORY_CANDIDATE_LIMIT = 500;
 const LABEL_MATCH_LIMIT = 2;
+const LABEL_LOOKUP_TIMEOUT_MS = 5_000;
 
 class ProfileRequestError extends Error {
   constructor(message, statusCode = 400, code = "INVALID_PROFILE") {
@@ -90,22 +91,10 @@ function publicPolicy(policy) {
     tags: Array.isArray(policy.tags) ? policy.tags.filter((tag) => typeof tag === "string") : [],
   };
 }
-/**
- * The generic `label` this projection publishes for a wallet.
- *
- * A verified reverse resolution wins whenever one could be performed, including
- * a verified miss: `unnamed` publishes `null` rather than letting a wallet's
- * own self-declared `publicDisplay.ens` stand in as an identity it never
- * proved. The stored display value survives only where no resolution happened
- * at all — no resolver configured, or the RPC was unreachable — and only when
- * it satisfies the same safe/renderable format enforced for new writes. This
- * keeps legacy malformed or bidi-controlled values out of public labels.
- */
-function displayLabel(profile, resolvedEns) {
-  if (resolvedEns?.status === "named") return { label: resolvedEns.name };
-  if (resolvedEns?.status === "unnamed") return { label: null };
-  if (profile.display?.ens === null) return { label: null };
-  return isRenderableEnsName(profile.display?.ens) ? { label: profile.display.ens } : {};
+/** Only the server's verified reverse result may become a public label. */
+function displayLabel(resolvedEns) {
+  return { label: resolvedEns?.status === "named" && isRenderableEnsName(resolvedEns.name)
+    ? resolvedEns.name : null };
 }
 
 function publicProfile(profile, policy, power, resolvedEns) {
@@ -115,7 +104,7 @@ function publicProfile(profile, policy, power, resolvedEns) {
     && profile.acceptingSubmissions === true;
   const result = {
     wallet: address(profile.wallet, "profile wallet"),
-    ...displayLabel(profile, resolvedEns),
+    ...displayLabel(resolvedEns),
     availability: profile.availability,
     acceptingSubmissions: accepting,
     ...(typeof profile.display?.message === "string" || profile.display?.message === null ? { message: profile.display.message } : {}),
@@ -147,9 +136,9 @@ function createProfileService({ repository, authService, indexClient, baseChainI
    * resolver caches, which is what keeps a 50-row directory page to at most 50
    * lookups per TTL rather than one per request.
    */
-  async function resolveEns(wallet) {
+  async function resolveEns(wallet, options) {
     if (!ensResolver) return null;
-    try { return await ensResolver.resolve(wallet); }
+    try { return await ensResolver.resolve(wallet, options); }
     catch { return null; }
   }
 
@@ -241,43 +230,66 @@ function createProfileService({ repository, authService, indexClient, baseChainI
       if (stage !== undefined && !["PRE_VOTE", "VOTING"].includes(stage)) {
         throw new ProfileRequestError("stage is invalid");
       }
-      const matches = [];
-      let after;
-      while (matches.length < LABEL_MATCH_LIMIT) {
-        const profiles = await repository.listProfiles({
-          dao: "nouns", availability: "accepting_now", limit: DIRECTORY_LIMIT, after,
-        });
-        if (!Array.isArray(profiles)) throw new TypeError("repository.listProfiles must return an array");
-        if (profiles.length > DIRECTORY_LIMIT) throw new TypeError("repository.listProfiles exceeded its requested limit");
-        for (const profile of profiles) {
-          const [policy, power, acceptingSubmissions, resolvedEns] = await Promise.all([
-            repository.getPolicy(profile.id, "nouns"),
-            indexClient.getVotingPower(profile.wallet),
-            typeof repository.isProfileAccepting === "function"
-              ? repository.isProfileAccepting(profile.id, "nouns").catch(() => false)
-              : false,
-            resolveEns(profile.wallet),
-          ]);
-          assertDecimal(power.amount, "governance power");
-          const acceptsStage = policy?.dao === "nouns" && policy.enabled === true
-            && (stage === undefined
-              ? (policy.acceptPreVote === true || policy.acceptVoting === true)
-              : (stage === "PRE_VOTE" ? policy.acceptPreVote === true : policy.acceptVoting === true));
-          if (!acceptsStage || acceptingSubmissions !== true) continue;
-          // Display metadata is never identity. Only an authoritative, safely
-          // renderable resolver result can select the canonical wallet.
-          if (resolvedEns?.status === "named" && isRenderableEnsName(resolvedEns.name)
-              && resolvedEns.name === expected) {
-            const result = publicProfile({ ...profile, acceptingSubmissions: true }, policy, power, resolvedEns);
-            matches.push(result);
-            if (matches.length === LABEL_MATCH_LIMIT) break;
+      // Fail closed after a fixed total window; never return partial matches.
+      // A pending read may settle later, but the expired scan starts no new reads.
+      let timer;
+      let expired = false;
+      const scan = async () => {
+        const matches = [];
+        let after;
+        while (!expired && matches.length < LABEL_MATCH_LIMIT) {
+          const profiles = await repository.listProfiles({
+            dao: "nouns", availability: "accepting_now", limit: DIRECTORY_LIMIT, after,
+          });
+          if (expired) break;
+          if (!Array.isArray(profiles)) throw new TypeError("repository.listProfiles must return an array");
+          if (profiles.length > DIRECTORY_LIMIT) throw new TypeError("repository.listProfiles exceeded its requested limit");
+          for (const profile of profiles) {
+            const [policy, power, acceptingSubmissions] = await Promise.all([
+              repository.getPolicy(profile.id, "nouns"),
+              indexClient.getVotingPower(profile.wallet),
+              typeof repository.isProfileAccepting === "function"
+                ? repository.isProfileAccepting(profile.id, "nouns").catch(() => false)
+                : false,
+            ]);
+            if (expired) break;
+            assertDecimal(power.amount, "governance power");
+            const acceptsStage = policy?.dao === "nouns" && policy.enabled === true
+              && (stage === undefined
+                ? (policy.acceptPreVote === true || policy.acceptVoting === true)
+                : (stage === "PRE_VOTE" ? policy.acceptPreVote === true : policy.acceptVoting === true));
+            if (!acceptsStage || acceptingSubmissions !== true) continue;
+            // Explicit ENS input is resolved freshly for every eligible wallet.
+            // A cached miss must not hide a newly assigned name, and a cached hit
+            // must not select a wallet whose record changed.
+            const current = await resolveEns(profile.wallet, { fresh: true });
+            if (expired) break;
+            if (current?.status === "named" && isRenderableEnsName(current.name)
+                && current.name === expected) {
+              const result = publicProfile({ ...profile, acceptingSubmissions: true }, policy, power, current);
+              matches.push(result);
+              if (matches.length === LABEL_MATCH_LIMIT) break;
+            }
           }
+          if (profiles.length < DIRECTORY_LIMIT || matches.length === LABEL_MATCH_LIMIT) break;
+          const last = profiles.at(-1);
+          after = { updatedAt: last.updatedAt, id: last.id };
         }
-        if (profiles.length < DIRECTORY_LIMIT || matches.length === LABEL_MATCH_LIMIT) break;
-        const last = profiles.at(-1);
-        after = { updatedAt: last.updatedAt, id: last.id };
+        return matches;
+      };
+      try {
+        return await Promise.race([
+          scan(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              expired = true;
+              reject(new ProfileRequestError("label lookup unavailable", 503, "SERVICE_UNAVAILABLE"));
+            }, LABEL_LOOKUP_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
       }
-      return matches;
     },
 
     async getPublicProfile(wallet) {

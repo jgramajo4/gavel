@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { VoterInbox } from './VoterInbox';
-import { renderApp, stubApi, stubEnsResolver, stubWallet } from '../test/harness';
+import { renderApp, stubApi, stubWallet } from '../test/harness';
 import {
   VOTER,
   candidateInboxItem,
@@ -332,13 +332,9 @@ describe('VoterInbox detail', () => {
   });
 });
 
-/**
- * Identity display. The wallet the voter signed in with is shown by name when
- * one resolves, and as a shortened address otherwise — never as 42 characters
- * of hex, and never as the thing the server checks.
- */
+/** Inbox identity comes from the authenticated wallet, never a local ENS lookup. */
 describe('VoterInbox identity', () => {
-  it('shows the signed-in wallet shortened when there is no ENS name', async () => {
+  it('shows the signed-in wallet shortened', async () => {
     const { api } = stubApi([{ method: 'GET', match: LIST, status: 200, body: listBody }]);
     const { container } = renderApp(<VoterInbox api={api} wallet={stubWallet()} />, {
       session: inboxSession,
@@ -347,18 +343,7 @@ describe('VoterInbox identity', () => {
     expect(container.textContent).not.toContain(VOTER);
   });
 
-  it('shows a resolved ENS name with the shortened address beneath it', async () => {
-    const { api } = stubApi([{ method: 'GET', match: LIST, status: 200, body: listBody }]);
-    const { container } = renderApp(<VoterInbox api={api} wallet={stubWallet()} />, {
-      session: inboxSession,
-      ens: stubEnsResolver({ [VOTER]: 'voter.eth' }),
-    });
-    expect(await screen.findByText('voter.eth')).toBeInTheDocument();
-    expect(screen.getByText('0x4444…4444')).toBeInTheDocument();
-    expect(container.textContent).not.toContain(VOTER);
-  });
-
-  it('never lets a resolved name stand in for the wallet the server authorized', async () => {
+  it('keeps the authenticated wallet in every signed payload and request', async () => {
     const { api, calls } = stubApi([
       { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: sessionChallenge },
       { method: 'POST', match: /\/auth\/verify$/, status: 200, body: inboxSession },
@@ -366,14 +351,11 @@ describe('VoterInbox identity', () => {
     ]);
     const wallet = signedWallet();
     const user = userEvent.setup();
-    renderApp(<VoterInbox api={api} wallet={wallet} />, {
-      ens: stubEnsResolver({ [VOTER]: 'voter.eth' }),
-    });
+    renderApp(<VoterInbox api={api} wallet={wallet} />);
     await user.click(screen.getByRole('button', { name: /connect governance wallet/i }));
-    await screen.findByText('voter.eth');
-    // Every request body and every signed payload still carries the address.
+    await screen.findByText('0x4444…4444');
     const signed = wallet.calls.find((call) => call.method === 'eth_signTypedData_v4');
-    expect(JSON.stringify(signed?.params)).not.toContain('voter.eth');
-    expect(calls.join(' ')).not.toContain('voter.eth');
+    expect(JSON.stringify(signed?.params)).toContain(VOTER);
+    expect(calls.join(' ')).not.toContain('.eth');
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { GateDirectory } from './GateDirectory';
-import { renderApp, stubApi, stubEnsResolver } from '../test/harness';
+import { renderApp, stubApi } from '../test/harness';
 import {
   PRIVATE_FIXTURE_FIELDS,
   acceptingProfile,
@@ -95,15 +95,12 @@ describe('GateDirectory', () => {
     expect(card.textContent).not.toContain(zeroPowerProfile.wallet);
   });
 
-  it('resolves a name in the browser only when the projection has none', async () => {
-    const resolver = stubEnsResolver({ [zeroPowerProfile.wallet]: 'quiet.eth' });
+  it('does not invent a label when Gate publishes a verified miss', async () => {
     const { api } = stubApi(listRoute([acceptingProfile, zeroPowerProfile]));
-    renderApp(<GateDirectory api={api} />, { ens: resolver });
-    expect(await screen.findByText('quiet.eth')).toBeInTheDocument();
-    // `acceptingProfile` already carries a server-indexed name, so the browser
-    // never looks it up: the server's value always wins.
-    expect(screen.getByText('voter.eth')).toBeInTheDocument();
-    expect(resolver.lookups).toEqual([zeroPowerProfile.wallet]);
+    renderApp(<GateDirectory api={api} />);
+    await screen.findByText('voter.eth');
+    expect(screen.getByText('0x5555…5555')).toHaveClass('wallet-identity-primary');
+    expect(screen.queryByText('quiet.eth')).toBeNull();
   });
 
   it('shows the price as the card headline fact', async () => {

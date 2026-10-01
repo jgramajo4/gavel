@@ -1,4 +1,4 @@
-import { useEnsName } from '../ens';
+import { isRenderableEnsName } from '../ens';
 import { shortenAddress } from '../format';
 
 /**
@@ -14,7 +14,8 @@ import { shortenAddress } from '../format';
  * is noise a reader cannot verify by eye anyway.
  *
  * The name is display only. Callers keep passing the canonical `address` to
- * every route, request, and signature — see `ens.tsx`.
+ * every route, request, and signature. Names come only from the server's
+ * verified Gate projection; an absent label stays absent.
  */
 export function WalletIdentity({
   address,
@@ -23,12 +24,12 @@ export function WalletIdentity({
   tone = 'card',
 }: {
   address: string;
-  /** The server's indexed name, when the projection carries one. */
+  /** Server-verified display label, never an authorization identity. */
   ens?: string | null;
   className?: string;
   tone?: 'card' | 'header';
 }) {
-  const name = useEnsName(address, ens);
+  const name = isRenderableEnsName(ens) ? ens : null;
   const short = shortenAddress(address);
   return (
     <span className={`wallet-identity wallet-identity-${tone} ${className}`.trim()}>

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useEnsName } from '../ens';
 import { shortenAddress } from '../format';
 import { useSession } from '../session';
 import { useWalletConnection } from '../wallet-connection';
@@ -8,9 +7,9 @@ import { useWalletConnection } from '../wallet-connection';
  * The global wallet control in the application header.
  *
  * Disconnected → `Connect wallet`.
- * Connected    → `voter.eth`, or `0x650C…50e1` when there is no ENS name.
- *                Never the full address: the header has no room for one and a
- *                reader gains nothing from it.
+ * Connected    → shortened wallet address. The server's verified Gate label is
+ *                rendered only on Gate profiles, never independently resolved
+ *                in the header.
  *
  * Connecting here establishes wallet *identity* and nothing else. The panel
  * says so out loud, and names which role-scoped session — if any — the tab
@@ -25,7 +24,6 @@ import { useWalletConnection } from '../wallet-connection';
 export function WalletControl() {
   const { address, connecting, error, connect, disconnect } = useWalletConnection();
   const { session, clearSession } = useSession();
-  const name = useEnsName(address);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -92,15 +90,14 @@ export function WalletControl() {
         type="button"
         className="wallet-control-trigger wallet-control-connected"
         aria-expanded={open}
-        aria-label={`Connected wallet ${name ?? shortenAddress(address)}`}
+        aria-label={`Connected wallet ${shortenAddress(address)}`}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="wallet-control-dot" aria-hidden="true" />
-        <span className="wallet-control-label">{name ?? shortenAddress(address)}</span>
+        <span className="wallet-control-label">{shortenAddress(address)}</span>
       </button>
       {open ? (
         <div className="wallet-control-panel">
-          {name ? <p className="wallet-control-name">{name}</p> : null}
           <p className="wallet-control-address">{shortenAddress(address)}</p>
           <p className="wallet-control-note">
             {session

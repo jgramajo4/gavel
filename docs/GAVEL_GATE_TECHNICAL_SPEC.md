@@ -642,7 +642,7 @@ On success, verification, exact nonce-row comparison, WalletSession nonce consum
 ```json
 {
   "wallet": "0x1111111111111111111111111111111111111111",
-  "ens": null,
+  "label": null,
   "availability": "accepting_now",
   "acceptingSubmissions": true,
   "message": null,
@@ -667,6 +667,7 @@ For any unavailable reason, including private capacity exhaustion:
 ```json
 {
   "wallet": "0x1111111111111111111111111111111111111111",
+  "label": null,
   "availability": "accepting_now",
   "acceptingSubmissions": false,
   "message": "Not currently accepting new submissions"

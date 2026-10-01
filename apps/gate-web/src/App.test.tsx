@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from './App';
-import { renderApp, stubApi, stubEnsResolver, stubWallet, type RenderAppOptions } from './test/harness';
+import { renderApp, stubApi, stubWallet, type RenderAppOptions } from './test/harness';
 import { acceptingProfile, VOTER, profileSession } from './test/fixtures';
 
 const routes = [
@@ -99,18 +99,11 @@ describe('global wallet control', () => {
     expect(header.textContent).not.toContain(CONNECTED);
   });
 
-  it('shows the ENS name when one resolves, and still not the whole address', async () => {
-    renderRoute('/', { walletAddress: CONNECTED, ens: stubEnsResolver({ [CONNECTED]: 'voter.eth' }) });
-    const header = screen.getByRole('banner');
-    expect(await within(header).findByText('voter.eth')).toBeInTheDocument();
-    expect(header.textContent).not.toContain(CONNECTED);
-  });
-
-  it('falls back to the shortened address when ENS resolves to nothing', async () => {
-    renderRoute('/', { walletAddress: CONNECTED, ens: stubEnsResolver({}) });
+  it('shows the canonical wallet rather than independently resolving its name', async () => {
+    renderRoute('/', { walletAddress: CONNECTED });
     const header = screen.getByRole('banner');
     expect(await within(header).findByText(SHORT_CONNECTED)).toBeInTheDocument();
-    expect(within(header).queryByText(/\.eth$/)).toBeNull();
+    expect(header.textContent).not.toContain(CONNECTED);
   });
 
   it('connects on request through the injected wallet', async () => {

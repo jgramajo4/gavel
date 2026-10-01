@@ -5,15 +5,11 @@
  *
  * Why this lives on the server at all:
  *
- *  - The public projection's `ens` field was previously a pass-through of the
- *    enrolling wallet's own `publicDisplay.ens`. No client in this repository
- *    ever sends that field, so every production profile served no name, and the
- *    browser fallback in `apps/gate-web/src/ens.tsx` only runs when the
- *    operator publishes `VITE_ENS_RPC_URL` into the bundle. With neither in
- *    place a Gate renders as a bare shortened address for every viewer.
- *  - Resolving once here gives every client the same name — the directory, a
- *    Bankr advocate reading `/v1/gates`, and the CLI — without asking any of
- *    them to hold a mainnet RPC endpoint.
+ * A verified, server-produced public `label` lets the directory, Bankr, and
+ * the CLI display the same name beside the canonical wallet. If lookup cannot
+ * run or verify a name, the public label is null. Stored `publicDisplay.ens`
+ * is self-declared legacy metadata and must never be promoted to a verified
+ * label by a failed lookup. The browser performs no independent resolution.
  *
  * What this is NOT: identity. Nothing resolved here is used for authorization,
  * a route, a request body, quote material, or any other security decision. A
@@ -121,9 +117,19 @@ function createEnsNameResolver({
   }
 
   return Object.freeze({
-    async resolve(wallet) {
+    async resolve(wallet, { fresh = false } = {}) {
       if (typeof wallet !== "string" || !ADDRESS.test(wallet)) return UNAVAILABLE;
       const key = wallet.toLowerCase();
+
+      // An explicit name target needs a new provider read, not a cached value
+      // or another request's in-flight read. Never write this fresh result into
+      // the display cache: an older request may finish later and overwrite it.
+      if (fresh) {
+        try {
+          const name = await withTimeout(() => provider.lookupAddress(key), timeoutMs);
+          return isRenderableEnsName(name) ? named(name) : UNNAMED;
+        } catch { return UNAVAILABLE; }
+      }
 
       const cached = settled.get(key);
       if (cached && cached.expiresAt > Number(now())) return cached.value;
