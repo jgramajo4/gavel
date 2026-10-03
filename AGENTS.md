@@ -11,9 +11,10 @@ Gavel is an npm-workspaces monorepo: governance CLI/TUI, Gate paid-attention ser
 
 ## Checkouts
 
-- `/home/pi/workspace/gavel` is a long-lived, dirty, non-`main` checkout. Never implement, review, stash, reset, or check out branches there.
-- New work: `git -C /home/pi/workspace/gavel fetch origin && git -C /home/pi/workspace/gavel worktree add -b <branch> /home/pi/workspace/gavel-<slug> origin/main`, then `npm ci` in the new worktree.
-- Reviews: reuse a clean worktree at the exact PR head, or create a detached one.
+- `/home/pi/workspace/gavel` is a long-lived, dirty, non-`main` checkout. Do not use it as an implementation or review checkout: do not edit, commit, run tests for changes, stash, reset, check out, or branch development work in its working tree.
+- It may be used only as a Git administrative entrypoint for read-only, fetch, and worktree operations, such as `git -C /home/pi/workspace/gavel fetch origin` and `git -C /home/pi/workspace/gavel worktree add ...`.
+- All new implementation or review work happens in a fresh worktree based on Forgejo `origin/main`: `git -C /home/pi/workspace/gavel worktree add -b <branch> /home/pi/workspace/gavel-<slug> origin/main`, then `npm ci` inside the new worktree.
+- Reviews: reuse a clean worktree at the exact PR head, or create a detached one from the fetched PR ref.
 
 ## Map
 
@@ -23,6 +24,9 @@ Gavel is an npm-workspaces monorepo: governance CLI/TUI, Gate paid-attention ser
 | `packages/gate` | Pure Gate domain: quote/EIP-712, enrollment, submission policy, settlement log decoding |
 | `packages/governance-index` | Indexer worker, read-only index API, `IndexApiClient`, its migrations |
 | `packages/cli`, `packages/tui`, `packages/core` | Voter CLI, Ink TUI, voter/profile/prediction/execution core |
+| `packages/daos` | DAO adapter registry: catalog ids → live governance adapters |
+| `packages/nouns-adapter`, `packages/ens-adapter`, `packages/railgun-adapter` | Per-DAO governance adapters (Nouns, ENS, Railgun) |
+| `packages/proposal-identity` | Canonical proposal identity and content-binding invariants shared by the index and Gate |
 | `apps/gate-web` | Gate React app (Vitest) |
 | `contracts/gate` | Foundry `GavelGateSplitter` |
 | `integrations/bankr`, `integrations/hermes` | Shipped agent skills; Bankr payer client |
