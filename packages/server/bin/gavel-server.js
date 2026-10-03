@@ -308,6 +308,13 @@ function contractVerifier(client) {
   };
 }
 
+function workerErrorHandler(observability, operatorAlert) {
+  return (error, { worker } = {}) => {
+    try { observability.workerFailure({ worker, error }); } catch {}
+    operatorAlert({ source: "gate_worker", code: "WORKER_FAILED" });
+  };
+}
+
 async function composeProduction(env) {
   const config = serverConfigFromEnv(env);
   const observability = createGateObservability();
@@ -359,7 +366,7 @@ async function composeProduction(env) {
     lifecycleReader: async ({ proposalId, targetId }) => targetId
       ? await indexClient.getTargetLifecycle(targetId)
       : (await indexClient.getProposalSnapshot(proposalId)).eligibility,
-    onError: () => operatorAlert({ source: "gate_worker", code: "WORKER_FAILED" }),
+    onError: workerErrorHandler(observability, operatorAlert),
     notifierLogger: { error(message) {
       const match = /^source=email_notifier code=([A-Z0-9_]{1,64})$/.exec(String(message));
       try { observability.alert({ source: "email_notifier", code: match?.[1] || "PROVIDER_ERROR" }); }
@@ -463,4 +470,5 @@ module.exports = {
   isolationEnforcementFromEnv,
   serverConfigFromEnv,
   startGateServer,
+  workerErrorHandler,
 };
