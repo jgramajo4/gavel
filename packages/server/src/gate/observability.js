@@ -79,6 +79,8 @@ const SAFE_ERROR_MESSAGES = new Set([
   "block receipt count RPC result is incomplete", "block receipts RPC result is incomplete",
   "block receipts RPC result is not canonical", "block receipt transaction set RPC result is incomplete",
   "settlement receipt RPC result is incomplete", "invalid scan range", "lifecycle read timed out",
+  "canonical block parent ancestry is inconsistent", "canonical boundary changed during scan",
+  "settlement monitor receipt RPC result is incomplete",
 ]);
 function safeErrorToken(value, allowed) {
   return typeof value === "string" && allowed.has(value) ? value : undefined;
@@ -86,7 +88,7 @@ function safeErrorToken(value, allowed) {
 function safeErrorMessage(value) {
   if (typeof value !== "string") return "[redacted]";
   if (SAFE_ERROR_MESSAGES.has(value) || /^receipt read timed out after (?:[1-9][0-9]{0,5})ms$/.test(value)
-      || /^Base RPC (?:getChainId|getBlockNumber|getBlockHeader|getBlockTransactionCount|getBlockReceipts|getTransactionReceipt) timed out$/.test(value)) return value;
+      || /^Base RPC (?:getChainId|getBlockNumber|getBlockHeader|getBlockTransactionCount|getBlockReceipts|getTransactionReceipt|getTransaction) timed out$/.test(value)) return value;
   return "[redacted]";
 }
 

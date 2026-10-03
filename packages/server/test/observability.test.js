@@ -73,6 +73,41 @@ test("worker diagnostics redact unsafe provider messages and omit unsafe cause c
   assert.doesNotMatch(lines.join(""), /node\.example|secret\.example|password|hunter2|sensitive-value|private signing payload|Bearer/);
 });
 
+test("worker diagnostics preserve only the four reviewed first-party Gate errors", () => {
+  const messages = [
+    "Base RPC getTransaction timed out",
+    "canonical block parent ancestry is inconsistent",
+    "canonical boundary changed during scan",
+    "settlement monitor receipt RPC result is incomplete",
+  ];
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  for (const message of messages) {
+    telemetry.workerFailure({ worker: "scan", error: new Error(message) });
+    telemetry.workerFailure({ worker: "scan", error: new Error(`${message} https://user:pass@rpc.example/key`) });
+  }
+  const events = parsed(lines);
+  assert.deepEqual(events.map(({ errorMessage }) => errorMessage),
+    messages.flatMap((message) => [message, "[redacted]"]));
+  assert.doesNotMatch(lines.join(""), /rpc\.example|user:pass/);
+});
+
+test("worker diagnostics keep existing timeout text and redact arbitrary upstream errors", () => {
+  const messages = [
+    ["Base RPC getBlockReceipts timed out", "Base RPC getBlockReceipts timed out"],
+    ["Base RPC getTransaction timed out extra", "[redacted]"],
+    ["Base RPC getTransaction timed out https://rpc.example/secret", "[redacted]"],
+    ["ethers call exception action=call", "[redacted]"],
+    ["PostgreSQL failed at user secret", "[redacted]"],
+    ["fetch failed at https://user:pass@rpc.example", "[redacted]"],
+  ];
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  for (const [message] of messages) telemetry.workerFailure({ worker: "scan", error: new Error(message) });
+  assert.deepEqual(parsed(lines).map(({ errorMessage }) => errorMessage), messages.map(([, expected]) => expected));
+  assert.doesNotMatch(lines.join(""), /rpc\.example|user:pass|PostgreSQL|ethers call exception|fetch failed/);
+});
+
 test("production worker error callback keeps WORKER_FAILED when diagnostics cannot write", () => {
   const { workerErrorHandler } = require("../bin/gavel-server");
   const lines = [];
