@@ -66,6 +66,42 @@ function labelsFor(definition, labels) {
   return result;
 }
 
+// Provider exceptions can embed opaque credentials even without URL or secret-looking syntax.
+// Only known static diagnostics leave this boundary; never serialize an arbitrary exception.
+const SAFE_WORKERS = new Set(["expire", "scan", "reconcile", "monitor", "notification"]);
+const SAFE_ERROR_NAMES = new Set(["Error", "TypeError", "RangeError", "TimeoutError", "ScanError"]);
+const SAFE_ERROR_CODES = new Set(["ETIMEDOUT", "TIMEOUT", "NETWORK_ERROR", "SERVER_ERROR", "UNKNOWN_ERROR",
+  "BAD_DATA", "CALL_EXCEPTION", "SCAN_FAILED", "23505", "57014", "ECONNRESET", "ECONNREFUSED"]);
+const SAFE_ERROR_MESSAGES = new Set([
+  "scanner range failed", "settlement scanner deployment is not configured",
+  "durable scanner overlap does not match adapter overlap", "canonical block unavailable",
+  "canonical block transaction set is incomplete", "block transaction count RPC result is incomplete",
+  "block receipt count RPC result is incomplete", "block receipts RPC result is incomplete",
+  "block receipts RPC result is not canonical", "block receipt transaction set RPC result is incomplete",
+  "settlement receipt RPC result is incomplete", "invalid scan range", "lifecycle read timed out",
+]);
+function safeErrorToken(value, allowed) {
+  return typeof value === "string" && allowed.has(value) ? value : undefined;
+}
+function safeErrorMessage(value) {
+  if (typeof value !== "string") return "[redacted]";
+  if (SAFE_ERROR_MESSAGES.has(value) || /^receipt read timed out after (?:[1-9][0-9]{0,5})ms$/.test(value)
+      || /^Base RPC (?:getChainId|getBlockNumber|getBlockHeader|getBlockTransactionCount|getBlockReceipts|getTransactionReceipt) timed out$/.test(value)) return value;
+  return "[redacted]";
+}
+
+function errorFields(error, prefix) {
+  if (!(error instanceof Error)) return {};
+  const name = safeErrorToken(error.name, SAFE_ERROR_NAMES);
+  const code = safeErrorToken(error.code, SAFE_ERROR_CODES);
+  const message = safeErrorMessage(error.message);
+  return {
+    ...(name ? { [`${prefix}Name`]: name } : {}),
+    ...(code ? { [`${prefix}Code`]: code } : {}),
+    [`${prefix}Message`]: message,
+  };
+}
+
 function createGateObservability({ write = (line) => process.stderr.write(line), clock = () => new Date() } = {}) {
   if (typeof write !== "function") throw new TypeError("observability write sink is required");
   if (typeof clock !== "function") throw new TypeError("observability clock is required");
@@ -94,6 +130,15 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
   }
 
   const api = {
+    workerFailure({ worker, error } = {}) {
+      try {
+        const cause = error instanceof Error && error.cause instanceof Error ? errorFields(error.cause, "cause") : {};
+        emit({ level: "error", type: "worker_failure", worker: SAFE_WORKERS.has(worker) ? worker : "unknown",
+          ...errorFields(error, "error"),
+          ...(cause.causeMessage && cause.causeMessage !== "[redacted]" ? cause : {}),
+        });
+      } catch {} // Diagnostics must never change worker failure or alert behavior.
+    },
     counter(name, value = 1, labels) { metric("counter", COUNTERS, name, value, labels); },
     gauge(name, value, labels) { metric("gauge", GAUGES, name, value, labels); },
     alert({ source, code } = {}) {

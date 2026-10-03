@@ -387,10 +387,14 @@ async function createGateServerRuntime(options = {}) {
       operatorAlert: options.operatorAlert,
       monitorConfirmations: config.monitorConfirmations,
     });
-    const observedJob = (name, job) => async () => {
-      const result = await job();
-      try { observability?.observeWorkerResult(name, result); } catch {}
-      return result;
+    const observedJob = (name, job) => {
+      const run = async () => {
+        const result = await job();
+        try { observability?.observeWorkerResult(name, result); } catch {}
+        return result;
+      };
+      run.workerName = name;
+      return run;
     };
     jobs.push(observedJob("expire", () => options.store.markExpired()),
       observedJob("scan", settlementService.scanOnce),
@@ -491,7 +495,7 @@ async function createGateServerRuntime(options = {}) {
   function start() {
     if (timers.length || !config) return;
     for (const job of jobs) {
-      const timer = scheduler.setInterval(() => invoke(job).catch(onError), config.pollIntervalMs);
+      const timer = scheduler.setInterval(() => invoke(job).catch((error) => onError(error, { worker: job.workerName })), config.pollIntervalMs);
       if (typeof timer?.unref === "function") timer.unref();
       timers.push(timer);
     }

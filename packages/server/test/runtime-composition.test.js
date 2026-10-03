@@ -723,6 +723,33 @@ test("stop waits for every active worker when one worker rejects", async () => {
   await run;
 });
 
+test("scheduled scanner failure keeps its original rejection and identifies the failing worker", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const error = Object.assign(new Error("scanner timed out"), { code: "TIMEOUT" });
+  const scheduled = [];
+  const failures = [];
+  const input = services();
+  let scans = 0;
+  const runtime = await createGateServerRuntime({ ...input, env: productionEnv(),
+    scheduler: { setInterval(callback) { scheduled.push(callback); return scheduled.length; }, clearInterval() {} },
+    onError(reason, context) { failures.push([reason, context]); },
+    factories: {
+      createBaseSettlementAdapter() { return {}; },
+      createSettlementService() { return {
+        async scanOnce() { scans++; throw error; },
+        async reconcileSubmitted() {}, async monitorOnce() {},
+      }; },
+      createGateHttpServer() { return {}; },
+    },
+  });
+  runtime.start();
+  await scheduled[1]();
+  assert.deepEqual(failures, [[error, { worker: "scan" }]]);
+  assert.equal(scans, 1);
+  await assert.rejects(runtime.runOnce(), (reason) => reason === error);
+  assert.equal(scans, 2);
+});
+
 test("canonical runtime observes actual worker return values without changing them", async () => {
   const { createGateServerRuntime } = loadRuntime();
   const input = services();

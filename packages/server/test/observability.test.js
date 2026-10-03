@@ -29,6 +29,63 @@ test("observability emits only allowlisted structured counters, gauges, and aler
   ]);
 });
 
+test("worker failure diagnostics preserve safe error and cause fields alongside WORKER_FAILED", () => {
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); },
+    clock: () => new Date("2026-09-17T12:00:00Z") });
+  const cause = Object.assign(new Error("receipt read timed out after 10000ms"), { name: "TimeoutError", code: "ETIMEDOUT" });
+  const error = Object.assign(new Error("scanner range failed"), { name: "ScanError", code: "SCAN_FAILED", cause });
+  telemetry.workerFailure({ worker: "scan", error });
+  telemetry.recordOperatorAlert({ source: "gate_worker", code: "WORKER_FAILED" });
+  assert.deepEqual(parsed(lines), [
+    { timestamp: "2026-09-17T12:00:00.000Z", level: "error", type: "worker_failure",
+      worker: "scan", errorName: "ScanError", errorCode: "SCAN_FAILED", errorMessage: "scanner range failed",
+      causeName: "TimeoutError", causeCode: "ETIMEDOUT", causeMessage: "receipt read timed out after 10000ms" },
+    { timestamp: "2026-09-17T12:00:00.000Z", level: "error", type: "alert", source: "gate_worker", code: "WORKER_FAILED" },
+  ]);
+});
+
+test("worker diagnostics redact unsafe provider messages and omit unsafe cause chains", () => {
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  const error = Object.assign(new Error("RPC failed at https://user:password@node.example/rpc?key=secret"), {
+    code: "NETWORK_ERROR", cause: Object.assign(new Error("Authorization: Bearer sensitive-value"), { code: "SECRET_CODE" }),
+    request: { body: "private signing payload" },
+  });
+  telemetry.workerFailure({ worker: "scan", error });
+  telemetry.workerFailure({ worker: "scan", error: { name: "ProviderError", code: "https://secret.example", message: "password=hunter2", cause: error } });
+  telemetry.workerFailure({ worker: "scan", error: new Error("provider rejected request abcdefghijklmnopqrstuvwxyz123456") });
+  telemetry.workerFailure({ worker: "scan", error: Object.assign(new Error("opaque credential abc123"), {
+    name: "sk_live_opaque123", code: "sk_live_opaque123",
+    cause: Object.assign(new Error("sk_live_opaque123"), { name: "sk_live_opaque123", code: "sk_live_opaque123" }),
+  }) });
+  const events = parsed(lines);
+  assert.equal(events.length, 4);
+  assert.equal(events[2].errorMessage, "[redacted]");
+  assert.deepEqual(Object.keys(events[3]).sort(), ["errorMessage", "level", "timestamp", "type", "worker"]);
+  assert.equal(events[3].errorMessage, "[redacted]");
+  assert.equal(events[0].errorCode, "NETWORK_ERROR");
+  assert.equal(events[0].errorMessage, "[redacted]");
+  assert.equal(events[0].cause, undefined);
+  assert.equal(events[0].causeName, undefined);
+  assert.equal(events[1].errorCode, undefined);
+  assert.equal(events[1].causeName, undefined);
+  assert.doesNotMatch(lines.join(""), /node\.example|secret\.example|password|hunter2|sensitive-value|private signing payload|Bearer/);
+});
+
+test("production worker error callback keeps WORKER_FAILED when diagnostics cannot write", () => {
+  const { workerErrorHandler } = require("../bin/gavel-server");
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) {
+    if (JSON.parse(line).type === "worker_failure") throw new Error("sink unavailable");
+    lines.push(line);
+  } });
+  workerErrorHandler(telemetry, (alert) => telemetry.recordOperatorAlert(alert))(
+    new Error("provider URL https://user:pass@node.example/rpc"), { worker: "scan" });
+  assert.deepEqual(parsed(lines).map(({ level, type, source, code }) => ({ level, type, source, code })),
+    [{ level: "error", type: "alert", source: "gate_worker", code: "WORKER_FAILED" }]);
+});
+
 test("observability rejects unknown names and labels without writing sensitive values", () => {
   const secret = "0x" + "ab".repeat(32);
   const lines = [];
