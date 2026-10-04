@@ -7,7 +7,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const REPOSITORY_URL = "https://github.com/jgramajo4/gavel.git";
-const RUNTIME_REF = "6a4a7dfc066a767609d4806b807b85bb397b82cb";
+const RUNTIME_REF = "4d6aae85fa419a8f1a6fbddda40ffe4a3a18c54c";
 const MINIMUM_NODE_MAJOR = 20;
 
 function commandName(name) {
