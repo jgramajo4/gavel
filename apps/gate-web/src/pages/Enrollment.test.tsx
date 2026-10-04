@@ -16,6 +16,27 @@ const challenge = {
   payloadHash: `0x${'bb'.repeat(32)}`,
 };
 
+const walletSessionChallenge = {
+  proofType: 'WalletSession',
+  primaryType: 'WalletSession',
+  domain: { name: 'GavelGate', version: '1', chainId: 1, verifyingContract: VOTER },
+  types: { WalletSession: [{ name: 'wallet', type: 'address' }, { name: 'role', type: 'string' }] },
+  message: { wallet: VOTER, role: 'dao_profile' },
+  nonceHash: `0x${'ee'.repeat(32)}`,
+  payloadHash: `0x${'ff'.repeat(32)}`,
+};
+
+function challengeForRequest(body: { proofType?: string; wallet?: string; role?: string } | null) {
+  if (body?.proofType === 'WalletSession') {
+    return {
+      ...walletSessionChallenge,
+      domain: { ...walletSessionChallenge.domain, verifyingContract: body.wallet ?? VOTER },
+      message: { wallet: body.wallet ?? VOTER, role: body.role ?? 'dao_profile' },
+    };
+  }
+  return body?.proofType === 'BasePayoutControl' ? payoutChallenge : challenge;
+}
+
 const walletSession = {
   token: 'c'.repeat(43),
   session: {
@@ -57,7 +78,7 @@ function recordingApi(existingProfile: unknown, record: Recorded) {
     const reply = (status: number, value: unknown) =>
       ({ status, ok: status >= 200 && status < 300, json: async () => value }) as Response;
     if (url.endsWith('/auth/challenge')) {
-      return reply(200, body?.proofType === 'BasePayoutControl' ? payoutChallenge : challenge);
+      return reply(200, challengeForRequest(body));
     }
     if (url.endsWith('/auth/verify')) return reply(200, walletSession);
     if (/\/v1\/gates\/0x/.test(url)) {
@@ -128,7 +149,7 @@ describe('Enrollment', () => {
 
   it('runs challenge, wallet proof, then typed-data enrollment', async () => {
     const { api, calls } = stubApi([
-      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: challenge },
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: (request: { body: unknown }) => challengeForRequest(request.body as { proofType?: string; wallet?: string; role?: string }) },
       { method: 'POST', match: /\/auth\/verify$/, status: 200, body: walletSession },
       { method: 'PUT', match: /\/me\/profile$/, status: 200, body: acceptingProfile },
     ]);
@@ -185,9 +206,10 @@ describe('Enrollment', () => {
     const impl = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       calls.push(url);
-      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      const requestBody = init?.body ? JSON.parse(String(init.body)) : null;
+      if (requestBody) bodies.push(requestBody);
       if (url.endsWith('/auth/challenge')) {
-        return { status: 200, ok: true, json: async () => challenge } as Response;
+        return { status: 200, ok: true, json: async () => challengeForRequest(requestBody) } as Response;
       }
       if (url.endsWith('/auth/verify')) {
         return { status: 200, ok: true, json: async () => walletSession } as Response;
@@ -233,10 +255,11 @@ describe('Enrollment', () => {
   it('signs the stages the voter actually chose', async () => {
     const bodies: unknown[] = [];
     const impl = (async (input: unknown, init?: RequestInit) => {
-      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      const requestBody = init?.body ? JSON.parse(String(init.body)) : null;
+      if (requestBody) bodies.push(requestBody);
       const url = String(input);
       if (url.endsWith('/auth/challenge')) {
-        return { status: 200, ok: true, json: async () => challenge } as Response;
+        return { status: 200, ok: true, json: async () => challengeForRequest(requestBody) } as Response;
       }
       if (url.endsWith('/auth/verify')) {
         return { status: 200, ok: true, json: async () => walletSession } as Response;
@@ -369,7 +392,7 @@ describe('Enrollment', () => {
 
   it('reports the resulting opt-in state the server confirmed', async () => {
     const { api } = stubApi([
-      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: challenge },
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: (request: { body: unknown }) => challengeForRequest(request.body as { proofType?: string; wallet?: string; role?: string }) },
       { method: 'POST', match: /\/auth\/verify$/, status: 200, body: walletSession },
       { method: 'PUT', match: /\/me\/profile$/, status: 200, body: acceptingProfile },
     ]);

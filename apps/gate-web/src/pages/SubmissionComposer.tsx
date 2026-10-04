@@ -144,6 +144,16 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
         account: address,
       });
       noteConnected(account);
+      // openWalletSession already refuses a non-base_sender session. The
+      // composer additionally refuses one the server issued to any wallet but
+      // the account that just signed: payer must equal the connected wallet.
+      const signedWallet = verified.session.wallet;
+      if (typeof signedWallet !== 'string' || signedWallet.toLowerCase() !== account.toLowerCase()) {
+        setError(
+          'The returned advocate session is for a different wallet than the one that signed. It was discarded; nothing was submitted.',
+        );
+        return;
+      }
       setSession(verified);
     } catch (cause: unknown) {
       setError(
@@ -162,7 +172,11 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
       setError(null);
       setNotice(null);
       if (!authenticated || !senderSession) {
-        setError('Connect your wallet and sign in before requesting a quote.');
+        setError(
+          sender.status === 'disconnected'
+            ? 'Connect your wallet before requesting a quote.'
+            : 'Sign in with the connected wallet to request a quote.',
+        );
         return;
       }
       const problem = validateDraft({ proposalId, position, pitch, disclosures, evidenceUrls });
@@ -202,7 +216,7 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
         setBusy(false);
       }
     },
-    [api, authenticated, senderSession, wallet, request, proposalId, position, pitch, disclosures, evidenceUrls, onQuote, clearSession],
+    [api, authenticated, senderSession, sender.status, wallet, request, proposalId, position, pitch, disclosures, evidenceUrls, onQuote, clearSession],
   );
 
   return (
@@ -278,14 +292,28 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
           </p>
         ) : null}
 
+        {/* Disconnected → Connect wallet. Connected without a live base_sender
+            session for THIS account (none, another role's, expired, or one
+            issued to a different wallet) → Sign in to request quote, which
+            signs a base_sender WalletSession for the connected wallet. Only a
+            base_sender session whose wallet is the connected wallet enables
+            Request quote. The route's target voter is never the signer. */}
         {authenticated ? (
           <button type="submit" disabled={busy}>
             Request quote
           </button>
         ) : address ? (
-          <button type="button" disabled={busy} onClick={() => void authenticate()}>
-            {busy ? 'Waiting for your wallet…' : 'Sign in with wallet'}
-          </button>
+          <>
+            {sender.status === 'mismatch' ? (
+              <p className="composer-note">
+                The signed-in advocate session belongs to a different wallet. Sign in again with the
+                connected wallet to request a quote.
+              </p>
+            ) : null}
+            <button type="button" disabled={busy} onClick={() => void authenticate()}>
+              {busy ? 'Waiting for your wallet…' : 'Sign in to request quote'}
+            </button>
+          </>
         ) : (
           <button type="button" disabled={busy} onClick={() => void connect()}>
             {busy ? 'Connecting…' : 'Connect wallet'}
