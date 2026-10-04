@@ -108,6 +108,54 @@ test("worker diagnostics keep existing timeout text and redact arbitrary upstrea
   assert.doesNotMatch(lines.join(""), /rpc\.example|user:pass|PostgreSQL|ethers call exception|fetch failed/);
 });
 
+test("worker diagnostics emit only validated scanner RPC context", () => {
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  const error = new Error("Base RPC getBlockReceipts timed out");
+  error.scannerContext = { rpcMethod: "getBlockReceipts", blockNumber: 47_555_503,
+    scanFromBlock: 47_555_502n, scanToBlock: 47_560_501n, phase: "receipts" };
+  telemetry.workerFailure({ worker: "scan", error });
+  assert.deepEqual(parsed(lines).map(({ timestamp, ...event }) => event), [{
+    level: "error", type: "worker_failure", worker: "scan", errorName: "Error",
+    errorMessage: "Base RPC getBlockReceipts timed out", rpcMethod: "getBlockReceipts",
+    blockNumber: 47_555_503, scanFromBlock: 47_555_502, scanToBlock: 47_560_501, phase: "receipts",
+  }]);
+});
+
+test("worker diagnostics omit untrusted scanner metadata and redact provider errors", () => {
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  const badContexts = [
+    { rpcMethod: "getBlockReceipts https://user:pass@rpc.example", blockNumber: 1001, scanFromBlock: 1000, scanToBlock: 1002, phase: "receipts" },
+    { rpcMethod: "getBlockReceipts", blockNumber: "1001", scanFromBlock: 1000, scanToBlock: 1002, phase: "receipts" },
+    { rpcMethod: "getBlockReceipts", blockNumber: 1001, scanFromBlock: 1000, scanToBlock: 1002, phase: "receipts plus token" },
+    { rpcMethod: "getBlockReceipts", blockNumber: 1003, scanFromBlock: 1000, scanToBlock: 1002, phase: "receipts" },
+    { rpcMethod: "getBlockReceipts", blockNumber: 1001, scanFromBlock: -1, scanToBlock: 1002, phase: "receipts" },
+  ];
+  for (const scannerContext of badContexts) {
+    const error = new Error("provider failure https://user:pass@rpc.example/secret");
+    error.scannerContext = scannerContext;
+    telemetry.workerFailure({ worker: "scan", error });
+  }
+  for (const event of parsed(lines)) {
+    assert.deepEqual(Object.keys(event).sort(), ["errorMessage", "errorName", "level", "timestamp", "type", "worker"]);
+    assert.equal(event.errorMessage, "[redacted]");
+  }
+  assert.doesNotMatch(lines.join(""), /rpc\.example|user:pass|token/);
+});
+
+test("a throwing scanner context getter cannot suppress the worker failure event", () => {
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(line); } });
+  const error = new Error("Base RPC getBlockReceipts timed out");
+  Object.defineProperty(error, "scannerContext", { get() { throw new Error("provider secret"); } });
+  telemetry.workerFailure({ worker: "scan", error });
+  assert.deepEqual(parsed(lines).map(({ timestamp, ...event }) => event), [{
+    level: "error", type: "worker_failure", worker: "scan", errorName: "Error",
+    errorMessage: "Base RPC getBlockReceipts timed out",
+  }]);
+});
+
 test("production worker error callback keeps WORKER_FAILED when diagnostics cannot write", () => {
   const { workerErrorHandler } = require("../bin/gavel-server");
   const lines = [];

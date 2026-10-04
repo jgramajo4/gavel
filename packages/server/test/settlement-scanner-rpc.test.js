@@ -142,6 +142,48 @@ test("7. a block whose receipts are incomplete aborts rather than becoming no-ma
   await assert.rejects(h.scan(), /receipt count RPC result is incomplete/i);
 });
 
+test("receipt timeout retains its static message and the exact block and scan window", async () => {
+  const h = harness({ from: 1_000n, through: 1_002n, options: { rpcTimeoutMs: 200, scanConcurrency: 2 },
+    overrides: { async getBlockReceipts(number) {
+      if (Number(number) === 1_001) return new Promise(() => {});
+      return createCountingClient(h.chain).client.getBlockReceipts(number);
+    } } });
+  await assert.rejects(h.scan(), (error) => {
+    assert.equal(error.message, "Base RPC getBlockReceipts timed out");
+    assert.deepEqual(error.scannerContext, {
+      rpcMethod: "getBlockReceipts", blockNumber: 1_001,
+      scanFromBlock: 1_000n, scanToBlock: 1_002n, phase: "receipts",
+    });
+    return true;
+  });
+});
+
+test("a provider rejection retains its identity without mutable scanner context", async () => {
+  const upstream = new Error("https://user:pass@rpc.example/secret");
+  const h = harness({ from: 1_000n, through: 1_001n, options: { scanConcurrency: 2 },
+    overrides: { async getBlockReceipts(number) {
+      if (Number(number) === 1_001) throw upstream;
+      return createCountingClient(h.chain).client.getBlockReceipts(number);
+    } } });
+  await assert.rejects(h.scan(), (error) => {
+    assert.equal(error, upstream);
+    assert.equal(error.scannerContext, undefined);
+    return true;
+  });
+});
+
+test("concurrent scans sharing a provider Error cannot overwrite another failure's context", async () => {
+  const shared = new Error("upstream unavailable");
+  const h = harness({ from: 1_000n, through: 1_001n,
+    overrides: { async getBlockHeader() { throw shared; } } });
+  const results = await Promise.allSettled([
+    h.adapter.scanRange({ fromBlock: 1_000n, throughBlock: 1_000n }),
+    h.adapter.scanRange({ fromBlock: 1_001n, throughBlock: 1_001n }),
+  ]);
+  assert.deepEqual(results.map(({ reason }) => reason), [shared, shared]);
+  assert.equal(shared.scannerContext, undefined);
+});
+
 // ---------------------------------------------------------------------------
 // Canonical coverage, ancestry, reorg, checkpoint.
 // ---------------------------------------------------------------------------
