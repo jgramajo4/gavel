@@ -5,6 +5,7 @@ const { constants: fsConstants } = require("node:fs");
 const path = require("node:path");
 const { parseArgs } = require("node:util");
 const { Wallet, getAddress } = require("ethers");
+const { randomBytes } = require("node:crypto");
 
 const {
   DEFAULT_ENDPOINT,
@@ -18,6 +19,8 @@ const {
 const { DAO_CONFIGS, IndexApiClient } = require("../../governance-index");
 const { createDaoAdapter: createWiredDaoAdapter } = require("@gavel/daos");
 const {
+  createLocalCredential,
+  resolveCredential,
   ExecutionMode,
   ExecutionEngine,
   FileExecutionRecordStore,
@@ -1260,7 +1263,7 @@ async function executionPrepareCommand(argv) {
   );
 }
 
-async function resolveLocalProposalIdentity(reference, expectedScope) {
+async function resolveLocalProposalIdentity(reference, expectedScope, { unlock = true } = {}) {
   const match = /^local:([A-Za-z0-9._-]+)$/.exec(String(reference || ""));
   if (!match) {
     throw new Error("This CLI currently resolves Safe proposal identities only from local:<label> encrypted keystores");
@@ -1275,7 +1278,10 @@ async function resolveLocalProposalIdentity(reference, expectedScope) {
     !Array.isArray(document.capabilities) ||
     !document.capabilities.includes("proposeSafeTransaction") ||
     !document.keystore ||
-    !document.passphraseEnv
+    (!document.passphraseEnv && !document.credentialRef) ||
+    (document.passphraseEnv !== undefined && document.credentialRef !== undefined) ||
+    (document.credentialRef !== undefined && document.credentialRef !== reference) ||
+    (document.passphraseEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(document.passphraseEnv))
   ) {
     throw new Error(`The local identity ${reference} is not a valid Gavel Safe proposal identity`);
   }
@@ -1289,23 +1295,34 @@ async function resolveLocalProposalIdentity(reference, expectedScope) {
     throw new Error(`The local identity ${reference} is scoped to a different chain`);
   }
 
-  const passphrase = process.env[document.passphraseEnv];
-  if (!passphrase) throw new Error(`Set ${document.passphraseEnv} to unlock ${reference}`);
-  const encryptedJson = JSON.stringify(document.keystore);
-  const unlocked = await Wallet.fromEncryptedJson(encryptedJson, passphrase);
-  if (getAddress(unlocked.address) !== getAddress(document.address)) {
-    throw new Error(`The encrypted key for ${reference} does not match its stored address`);
+  const passphrase = () => resolveCredential({
+    dataDir: DATA_DIR,
+    credentialRef: document.credentialRef,
+    label,
+    passphraseEnv: document.passphraseEnv,
+  });
+  if (unlock) {
+    try {
+      const unlocked = await Wallet.fromEncryptedJson(JSON.stringify(document.keystore), await passphrase());
+      if (getAddress(unlocked.address) !== getAddress(document.address)) {
+        throw new Error("Address mismatch");
+      }
+    } catch {
+      throw new Error(`Unable to unlock local proposal identity ${reference}`);
+    }
   }
 
   const signer = new KeystoreSigningIdentity({
     keystore: document.keystore,
     address: document.address,
-    passphrase: async () => {
-      const current = process.env[document.passphraseEnv];
-      if (!current) throw new Error(`Set ${document.passphraseEnv} to unlock ${reference}`);
-      return current;
+    passphrase,
+    decrypt: async (keystore, secret) => {
+      try {
+        return await Wallet.fromEncryptedJson(JSON.stringify(keystore), secret);
+      } catch {
+        throw new Error(`Unable to unlock local proposal identity ${reference}`);
+      }
     },
-    decrypt: (keystore, secret) => Wallet.fromEncryptedJson(JSON.stringify(keystore), secret),
   });
   return createProposalIdentity({ safeAddress, chainId, label, signer });
 }
@@ -1518,7 +1535,7 @@ async function safeDelegateCommand(action, argv) {
   const safeAddress = getAddress(values.safe);
   const chainId = Number(values["chain-id"]);
   if (!Number.isSafeInteger(chainId) || chainId <= 0) throw new Error("--chain-id must be a positive integer");
-  const proposalIdentity = await resolveLocalProposalIdentity(values.identity, { safeAddress, chainId });
+  const proposalIdentity = await resolveLocalProposalIdentity(values.identity, { safeAddress, chainId }, { unlock: action !== "status" });
   const provider = createSafeProposalProvider({
     safeAddress,
     chainId,
@@ -1584,9 +1601,10 @@ async function safeDelegateCommand(action, argv) {
  *   create proposal identity -> show address -> authorize as a Safe delegate
  *   -> verify delegation -> bind identity to the user's Safe
  *
- * The key is generated here and written only in encrypted form, mode 0600,
- * under GAVEL_DATA_DIR. It is a proposal identity: it never becomes a Safe
- * owner, holds no funds, and holds no governance delegation.
+ * The signing key is written only in encrypted form, mode 0600, under
+ * GAVEL_DATA_DIR. By default a random passphrase is stored separately in an
+ * owner-only local credential file; explicit --passphrase-env uses the given
+ * environment variable instead. Neither secret is printed.
  */
 async function identityCreateCommand(argv) {
   const { values, positionals } = parseArgs({
@@ -1618,30 +1636,55 @@ async function identityCreateCommand(argv) {
   const label = values.label || "safe-proposer-main";
   if (!/^[A-Za-z0-9._-]+$/.test(label)) throw new Error("identity label must be alphanumeric with . _ or -");
 
-  const passphraseVariable = values["passphrase-env"] || "GAVEL_IDENTITY_PASSPHRASE";
-  const passphrase = process.env[passphraseVariable];
+  if (label === "." || label === "..") throw new Error("Invalid identity label");
+  const passphraseVariable = values["passphrase-env"];
+  if (passphraseVariable && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(passphraseVariable)) {
+    throw new Error("--passphrase-env must name an environment variable");
+  }
+  const passphrase = passphraseVariable ? process.env[passphraseVariable] : randomBytes(32).toString("hex");
   if (!passphrase || passphrase.length < 12) {
-    throw new Error(
-      `Set ${passphraseVariable} to a passphrase of at least 12 characters. ` +
-        "It encrypts the keystore and is never written to disk.",
-    );
+    throw new Error(`Set ${passphraseVariable} to a passphrase of at least 12 characters`);
   }
 
   const wallet = Wallet.createRandom();
   const keystore = await wallet.encrypt(passphrase);
   const destination = defaultPrivatePath("identities", `${label}.json`);
-  const absolutePath = await writePrivateJson(destination, {
-    version: 1,
-    kind: "GAVEL_PROPOSAL_IDENTITY",
-    role: "proposal",
-    label,
-    address: wallet.address,
-    scope: { safeAddress, chainId },
-    capabilities: ["proposeSafeTransaction"],
-    passphraseEnv: passphraseVariable,
-    createdAt: new Date().toISOString(),
-    keystore: JSON.parse(keystore),
-  }, { secureDirectory: true });
+  const credentialRef = passphraseVariable ? undefined : `local:${label}`;
+  const credential = credentialRef ? await createLocalCredential({ dataDir: DATA_DIR, label, secret: passphrase }) : null;
+  let absolutePath;
+  let identityCreated = false;
+  try {
+    const directory = path.dirname(destination);
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const directoryStat = await fs.lstat(directory);
+    if (!directoryStat.isDirectory() || directoryStat.uid !== process.getuid() || (directoryStat.mode & 0o077)) {
+      throw new Error("Identity directory must be owner-only");
+    }
+    const handle = await fs.open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    identityCreated = true;
+    try {
+      await handle.writeFile(`${JSON.stringify({
+        version: 1,
+        kind: "GAVEL_PROPOSAL_IDENTITY",
+        role: "proposal",
+        label,
+        address: wallet.address,
+        scope: { safeAddress, chainId },
+        capabilities: ["proposeSafeTransaction"],
+        ...(passphraseVariable ? { passphraseEnv: passphraseVariable } : { credentialRef }),
+        createdAt: new Date().toISOString(),
+        keystore: JSON.parse(keystore),
+      }, null, 2)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    absolutePath = destination;
+  } catch {
+    if (identityCreated) await fs.unlink(destination).catch(() => {});
+    if (credential) await fs.unlink(credential).catch(() => {});
+    throw new Error("Could not create protected identity (label may already exist)");
+  }
 
   process.stdout.write(
     `${JSON.stringify(
@@ -1652,6 +1695,8 @@ async function identityCreateCommand(argv) {
         scope: { safeAddress, chainId },
         capabilities: ["proposeSafeTransaction"],
         output: absolutePath,
+        credentialSource: passphraseVariable ? "environment" : "local",
+        ...(passphraseVariable ? { passphraseEnv: passphraseVariable } : { credentialRef }),
         nextSteps: [
           `Add ${wallet.address} as a delegate (not an owner) of Safe ${safeAddress} on chain ${chainId}.`,
           "Verify the delegation, then reference it from an execution profile as " +

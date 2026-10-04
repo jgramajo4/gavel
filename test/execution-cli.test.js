@@ -388,7 +388,7 @@ test("execution submit validates the profile before doing any governance work", 
 
 test("identity create makes an encrypted, scope-bound Safe proposal identity", () => {
   const created = run(
-    ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003", "--label", "safe-proposer-main"],
+    ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003", "--label", "safe-proposer-main", "--passphrase-env", "GAVEL_IDENTITY_PASSPHRASE"],
     { GAVEL_IDENTITY_PASSPHRASE: "a-long-enough-passphrase" },
   );
   assert.equal(created.status, 0, created.stderr);
@@ -420,19 +420,43 @@ test("identity create makes an encrypted, scope-bound Safe proposal identity", (
 
   // Two identities are two different keys.
   const second = run(
-    ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003", "--label", "other"],
+    ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003", "--label", "other", "--passphrase-env", "GAVEL_IDENTITY_PASSPHRASE"],
     { GAVEL_IDENTITY_PASSPHRASE: "a-long-enough-passphrase" },
   );
   assert.notEqual(JSON.parse(second.stdout).address, summary.address);
 });
 
-test("identity create refuses a weak or missing passphrase and unsupported roles", () => {
-  const args = ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003"];
+test("identity create generates a protected portable credential by default", () => {
+  const args = ["identity", "create", "--type", "safe-proposer", "--safe", EXECUTION_SAFE];
+  const created = run(args, { GAVEL_IDENTITY_PASSPHRASE: "" });
+  assert.equal(created.status, 0, created.stderr);
+  const summary = JSON.parse(created.stdout);
+  const identity = JSON.parse(fs.readFileSync(summary.output, "utf8"));
+  const credentialPath = path.join(created.dataDir, "credentials", "safe-proposer-main.secret");
+  const secret = fs.readFileSync(credentialPath, "utf8").trim();
+  assert.equal(identity.credentialRef, "local:safe-proposer-main");
+  assert.match(secret, /^[0-9a-f]{64,}$/i);
+  assert.equal(fs.statSync(credentialPath).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(credentialPath)).mode & 0o777, 0o700);
+  assert.doesNotMatch(created.stdout + created.stderr + JSON.stringify(identity), new RegExp(secret));
+  const withInheritedSecret = run(["safe", "delegate", "setup", "--safe", EXECUTION_SAFE], { GAVEL_IDENTITY_PASSPHRASE: "unrelated-legacy-secret" }, created.dataDir);
+  assert.doesNotMatch(withInheritedSecret.stderr, /Unable to unlock local proposal identity/);
+  const duplicate = run(args, { GAVEL_IDENTITY_PASSPHRASE: "" }, created.dataDir);
+  assert.notEqual(duplicate.status, 0);
+  assert.equal(fs.readFileSync(credentialPath, "utf8").trim(), secret);
+  assert.equal(JSON.parse(fs.readFileSync(summary.output, "utf8")).address, identity.address);
+  fs.unlinkSync(credentialPath);
+  const missing = run(["safe", "delegate", "setup", "--safe", EXECUTION_SAFE], { GAVEL_IDENTITY_PASSPHRASE: undefined }, created.dataDir);
+  assert.notEqual(missing.status, 0);
+  assert.doesNotMatch(missing.stdout + missing.stderr, new RegExp(secret));
+});
+
+test("identity create refuses a weak explicit env passphrase and unsupported roles", () => {
+  const args = ["identity", "create", "--type", "safe-proposer", "--safe", "0x0000000000000000000000000000000000000003", "--passphrase-env", "GAVEL_IDENTITY_PASSPHRASE"];
 
   const missing = run(args, { GAVEL_IDENTITY_PASSPHRASE: "" });
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /at least 12 characters/);
-  assert.match(missing.stderr, /never written to disk/);
 
   const weak = run(args, { GAVEL_IDENTITY_PASSPHRASE: "short" });
   assert.notEqual(weak.status, 0);
@@ -473,13 +497,12 @@ test("identity create refuses a weak or missing passphrase and unsupported roles
   assert.match(wrongExecution.stderr, /subcommands prepare and submit/);
 });
 
-test("execution submit resolves the encrypted local identity, submits through the engine, and deduplicates durably", async () => {
+test("execution submit resolves a portable local identity, submits through the engine, and deduplicates durably", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-safe-cli-"));
-  const passphrase = "a-long-enough-passphrase";
   const created = run([
     "identity", "create", "--type", "safe-proposer", "--safe", EXECUTION_SAFE,
     "--label", "safe-proposer-main",
-  ], { GAVEL_IDENTITY_PASSPHRASE: passphrase }, dataDir);
+  ], { GAVEL_IDENTITY_PASSPHRASE: undefined }, dataDir);
   assert.equal(created.status, 0, created.stderr);
   const proposer = JSON.parse(created.stdout).address;
   const profilePath = path.join(dataDir, "safe-profile.json");
@@ -506,7 +529,7 @@ test("execution submit resolves the encrypted local identity, submits through th
     "--acknowledge-security-review", "--acknowledge-prediction-review", "--rpc", rpc,
   ];
   const env = {
-    GAVEL_IDENTITY_PASSPHRASE: passphrase,
+    GAVEL_IDENTITY_PASSPHRASE: undefined,
     GAVEL_TEST_PROPOSER: proposer,
     GAVEL_TEST_SAFE_ADDRESS: EXECUTION_SAFE,
     GAVEL_TEST_PROPOSAL_LOG: proposalLog,
@@ -540,7 +563,7 @@ test("execution submit reports an ambiguous POST as a reconcilable unknown outco
   const passphrase = "a-long-enough-passphrase";
   const created = run([
     "identity", "create", "--type", "safe-proposer", "--safe", EXECUTION_SAFE,
-    "--label", "safe-proposer-main",
+    "--label", "safe-proposer-main", "--passphrase-env", "GAVEL_IDENTITY_PASSPHRASE",
   ], { GAVEL_IDENTITY_PASSPHRASE: passphrase }, dataDir);
   assert.equal(created.status, 0, created.stderr);
   const proposer = JSON.parse(created.stdout).address;
@@ -593,7 +616,7 @@ test("safe delegate status reports the four closed status values and setup only 
   const passphrase = "a-long-enough-passphrase";
   const created = run([
     "identity", "create", "--type", "safe-proposer", "--safe", VOTER,
-    "--label", "safe-proposer-main",
+    "--label", "safe-proposer-main", "--passphrase-env", "GAVEL_IDENTITY_PASSPHRASE",
   ], { GAVEL_IDENTITY_PASSPHRASE: passphrase }, dataDir);
   assert.equal(created.status, 0, created.stderr);
   const proposer = JSON.parse(created.stdout).address;
@@ -607,7 +630,7 @@ test("safe delegate status reports the four closed status values and setup only 
   for (const status of ["authorized", "not-authorized", "owner-conflict", "service-unavailable"]) {
     const result = run([
       "safe", "delegate", "status", "--safe", VOTER, "--rpc", "http://127.0.0.1:8545",
-    ], { ...baseEnv, GAVEL_TEST_SAFE_STATUS: status }, dataDir);
+    ], { ...baseEnv, GAVEL_IDENTITY_PASSPHRASE: "", GAVEL_TEST_SAFE_STATUS: status }, dataDir);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), status);
   }

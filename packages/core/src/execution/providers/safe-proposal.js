@@ -193,6 +193,7 @@ class SafeProposalProvider {
           getAddress(entry.delegate) !== proposer ||
           !ownerSet.has(getAddress(entry.delegator))
         ) return false;
+        if (entry.expiryDate === null || entry.expiryDate === "") return true;
         const expiry = Date.parse(entry.expiryDate);
         return Number.isFinite(expiry) && expiry > now;
       });

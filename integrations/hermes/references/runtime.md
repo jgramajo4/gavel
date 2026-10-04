@@ -3,7 +3,12 @@
 The bundled `scripts/gavel.js` runner performs first-use installation. It fetches
 the pinned Gavel commit into a versioned directory, verifies the repository
 origin and exact commit, installs locked production dependencies without package
-scripts, and reuses that immutable runtime on later calls.
+scripts, and reuses that immutable runtime on later calls. The shipped
+`RUNTIME_REF` intentionally remains on the last published commit during feature
+work: after the reviewed change is merged and published, update the runner pin
+to that published commit and verify a fresh bootstrap. Until that follow-up,
+installing this skill still executes the older pinned CLI, not newly merged CLI
+features. Do not point the pin at an unpublished branch or follow `main`.
 
 By default it uses:
 

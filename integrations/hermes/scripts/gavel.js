@@ -33,7 +33,7 @@ function run(command, args, options = {}) {
 
 function resolveConfig(env = process.env) {
   const hermesHome = path.resolve(
-    env.HERMES_HOME?.trim() || path.join(os.homedir(), ".hermes"),
+    env.HERMES_HOME?.trim() || path.join(env.HOME?.trim() || os.homedir(), ".hermes"),
   );
   const runtimeRoot = path.resolve(
     env.GAVEL_RUNTIME_DIR?.trim() || path.join(hermesHome, "runtimes", "gavel"),
@@ -184,6 +184,13 @@ function ensureRuntime(env = process.env, options = {}) {
   return { ...config, cli, installed, runtimeRef: sourceConfig.ref };
 }
 
+function runCanonicalCli(runtime, args, env = process.env) {
+  return spawnSync(process.execPath, [runtime.cli, ...args], {
+    stdio: "inherit",
+    env: { ...env, GAVEL_DATA_DIR: runtime.dataDir },
+  });
+}
+
 function main() {
   try {
     const runtime = ensureRuntime();
@@ -198,17 +205,7 @@ function main() {
       return;
     }
 
-    const previousDataDir = process.env.GAVEL_DATA_DIR;
-    process.env.GAVEL_DATA_DIR = runtime.dataDir;
-    let result;
-    try {
-      result = spawnSync(process.execPath, [runtime.cli, ...process.argv.slice(2)], {
-        stdio: "inherit",
-      });
-    } finally {
-      if (previousDataDir === undefined) delete process.env.GAVEL_DATA_DIR;
-      else process.env.GAVEL_DATA_DIR = previousDataDir;
-    }
+    const result = runCanonicalCli(runtime, process.argv.slice(2));
     if (result.error) throw result.error;
     process.exitCode = result.status === null ? 1 : result.status;
   } catch (error) {
@@ -228,5 +225,6 @@ module.exports = {
   normalizedOrigin,
   npmInstallArgs,
   resolveConfig,
+  runCanonicalCli,
   validateRuntime,
 };

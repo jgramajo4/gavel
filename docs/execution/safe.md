@@ -36,10 +36,11 @@ computing base. The sealed intent proves that Gavel validation ran and that the
 intent was not mutated; it does not make arbitrary third-party adapter code
 trustworthy.
 
-## 1. Configure private storage and passphrase handling
+## 1. Configure private storage
 
-`GAVEL_DATA_DIR` holds encrypted identities, delegate bindings, intent audit
-artifacts, and execution records. Keep it on private storage and back it up:
+`GAVEL_DATA_DIR` holds encrypted identities, their portable local unlock
+credentials, delegate bindings, intent audit artifacts, and execution records.
+Choose a persistent, private directory once for the installation:
 
 ```bash
 export GAVEL_DATA_DIR="$HOME/.local/share/gavel"
@@ -47,24 +48,37 @@ mkdir -p "$GAVEL_DATA_DIR"
 chmod 700 "$GAVEL_DATA_DIR"
 ```
 
-Do not put a passphrase in a command argument, profile, committed `.env`, or
-shell history. For an interactive shell, read it without echo and export it only
-for the command lifetime:
+For an agent, configure `GAVEL_DATA_DIR` in its runner **once**, not in each vote
+command. The bundled Hermes `integrations/hermes/scripts/gavel.js` runner sets it
+to its own private data directory by default. A direct CLI without this variable
+uses a working-directory-relative `data/private`; do not rely on that default
+for an unattended installation whose working directory might change.
 
-```bash
-IFS= read -r -s GAVEL_IDENTITY_PASSPHRASE
-export GAVEL_IDENTITY_PASSPHRASE
-printf '\n'
-# run the identity/delegate/submission command
-unset GAVEL_IDENTITY_PASSPHRASE
-```
+The default Safe proposer setup generates a random unlock credential at
+`$GAVEL_DATA_DIR/credentials/<label>.secret` (mode `0600`, owner-only `0700`
+parent) and an encrypted keystore at
+`$GAVEL_DATA_DIR/identities/<label>.json` (mode `0600`). There is no password
+prompt, shell export, profile `.env`, third-party product, or passphrase CLI
+argument. Keep this directory out of source control. Back up **both** files
+and restore them with the same owner and permissions; losing either means
+creating and reauthorizing a new delegate. Treat a backup as containing a
+usable signing key: because ciphertext and unlock credential are on the same
+filesystem, encryption does **not** protect against someone who can read both.
+Restrict filesystem access, protect backups, and never put the credential on a
+shared volume.
 
-An environment variable is still visible to the process and may be visible to
-other processes with the same operating-system privileges. For unattended use,
-inject it from the host secret manager immediately before launch. The core
-`SigningIdentity` seam also supports OS secret stores and remote KMS/HSM
-signers, although this CLI currently resolves `local:<label>` encrypted
-keystores.
+Credential resolution follows the identity document, not whatever secrets
+happen to be exported in a shell: a local-reference identity reads only its
+corresponding protected file; an env-managed identity reads only its named
+process variable; otherwise it fails closed. An explicitly supplied **empty**
+variable fails. Legacy identity documents without a local credential reference
+continue to require their recorded environment variable.
+`--passphrase-env <VARIABLE>` remains available for deliberately env-managed
+new identities. Never put the value in argv, a profile, a committed `.env`, or
+shell history. The core signer interface admits future secret stores and remote
+signers, but this CLI implements only environment compatibility and the local
+credential file today. Human/direct-signing wallets are separate and do not
+silently inherit machine-unlocked proposer credentials.
 
 ## 2. Create the proposal identity
 
@@ -76,24 +90,34 @@ gavel identity create \
   --label safe-proposer-main
 ```
 
-The command generates the key locally, encrypts it with
-`GAVEL_IDENTITY_PASSPHRASE` (minimum 12 characters), and writes mode-`0600` JSON
-to:
+The command generates the dedicated proposal key locally and encrypts it with
+a random 32-byte credential stored separately under
+`$GAVEL_DATA_DIR/credentials/safe-proposer-main.secret`. It writes mode-`0600`
+identity JSON to:
 
 ```text
 $GAVEL_DATA_DIR/identities/safe-proposer-main.json
 ```
 
 The document stores the encrypted keystore, public address, Safe/chain scope,
-and passphrase environment-variable name. It never stores the passphrase or a
-plaintext private key. Record the printed public address; that address is the
-proposal identity.
+`credentialRef: "local:safe-proposer-main"`. It does not record an unrelated
+environment override. It never stores the passphrase or plaintext key. Record
+the printed public address; that address is the proposal identity. **Never add
+it as a Safe owner, fund it, or reuse it as a human/autonomous wallet.**
 
-A different passphrase variable can be named without exposing its value:
+For an existing env-managed deployment, keep the old identity document and its
+recorded variable; no migration is required. For a newly created env-managed
+identity, opt in explicitly by naming the variable:
 
 ```bash
-gavel identity create ... --passphrase-env GAVEL_SAFE_PROPOSER_PASSPHRASE
+gavel identity create ... --passphrase-env GAVEL_IDENTITY_PASSPHRASE
 ```
+
+Supply its secret through your existing host mechanism. Merely naming a
+variable does not write its value. The CLI's canonical compatibility name is
+`GAVEL_IDENTITY_PASSPHRASE`; the older secrets catalog's
+`GAVEL_SAFE_PASSPHRASE` is an optional inventory name, **not** a second implicit
+fallback. Name it explicitly with `--passphrase-env` if you intend to use it.
 
 ## 3. Authorize it as a delegate, never an owner
 
@@ -110,7 +134,11 @@ gavel safe delegate status \
 
 The result is exactly one of `authorized`, `not-authorized`, `owner-conflict`,
 or `service-unavailable`. Owner membership is read from the Safe contract through
-Protocol Kit, not inferred from Transaction Service metadata.
+Protocol Kit, not inferred from Transaction Service metadata. `status` checks
+delegation **without unlocking** the proposer: `authorized` does not prove the
+local credential is present. The `setup` command below unlocks the identity
+before checking delegation; run it as the non-interactive credential readiness
+check during installation.
 
 Ask an **existing Safe owner** to authorize the printed proposal address with
 the official `@safe-global/api-kit` owner-side flow. In an owner-controlled app,
@@ -219,6 +247,16 @@ gavel execution submit prediction.json proposal.json \
 On success the CLI prints the `safeTxHash`, Safe nonce, status, and execution
 record id. **Stop there.** Human owners inspect the queue entry in Safe, decide
 whether to confirm it, and execute it through Safe if they choose.
+
+For Hermes, run each shown `gavel ...` command as
+`node <installed-gavel-skill>/scripts/gavel.js ...` instead of calling a
+versioned `runtimes/gavel/<sha>/packages/cli/bin/gavel.js` path. The runner
+supplies the pinned runtime and `GAVEL_DATA_DIR` to its child; it does not copy
+a credential into argv or require a secret in its parent environment. The
+runner's pinned `RUNTIME_REF` must be updated **after** the reviewed Forgejo
+commit is published; until then it still invokes its older CLI. For a direct
+non-Hermes installation, install the reviewed Gavel version and persist
+`GAVEL_DATA_DIR` in the service/agent configuration once.
 
 ## Proposal construction and readback
 

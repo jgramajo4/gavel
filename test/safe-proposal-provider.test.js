@@ -199,6 +199,15 @@ function validated() {
   });
 }
 
+test("authorization accepts an owner-authorized non-expiring delegate but rejects expired or malformed expiry", async () => {
+  const entry = (expiryDate) => ({ safe: SAFE, delegate: wallet.address, delegator: OWNER, expiryDate });
+  const withExpiry = (expiryDate) => provider({ delegates: { count: 1, next: null, previous: null, results: [entry(expiryDate)] } }).provider.authorization();
+  assert.equal((await withExpiry(null)).status, SafeProposalAuthorization.AUTHORIZED);
+  assert.equal((await withExpiry("")).status, SafeProposalAuthorization.AUTHORIZED);
+  assert.equal((await withExpiry("2020-01-01T00:00:00Z")).status, SafeProposalAuthorization.NOT_AUTHORIZED);
+  assert.equal((await withExpiry("not-a-date")).status, SafeProposalAuthorization.NOT_AUTHORIZED);
+});
+
 test("authorization distinguishes an authorized delegate from denial, owner conflict, and service failure", async () => {
   assert.equal((await provider().provider.authorization()).status, SafeProposalAuthorization.AUTHORIZED);
   assert.equal(
