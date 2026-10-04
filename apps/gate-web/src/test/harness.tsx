@@ -14,13 +14,30 @@ export interface StubRoute {
   body?: unknown;
 }
 
+/** One request as it reached the wire: method, URL, headers, parsed JSON body. */
+export interface StubRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
 /** A fetch stub that fails loudly on any request no test declared. */
-export function stubFetch(routes: StubRoute[]): typeof fetch & { calls: string[] } {
+export function stubFetch(
+  routes: StubRoute[],
+): typeof fetch & { calls: string[]; requests: StubRequest[] } {
   const calls: string[] = [];
+  const requests: StubRequest[] = [];
   const impl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method ?? 'GET').toUpperCase();
     calls.push(`${method} ${url}`);
+    requests.push({
+      method,
+      url,
+      headers: { ...((init?.headers as Record<string, string> | undefined) ?? {}) },
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+    });
     const route = routes.find(
       (candidate) => (candidate.method ?? 'GET').toUpperCase() === method && candidate.match.test(url),
     );
@@ -30,14 +47,15 @@ export function stubFetch(routes: StubRoute[]): typeof fetch & { calls: string[]
       ok: route.status >= 200 && route.status < 300,
       json: async () => route.body ?? null,
     } as Response;
-  }) as typeof fetch & { calls: string[] };
+  }) as typeof fetch & { calls: string[]; requests: StubRequest[] };
   impl.calls = calls;
+  impl.requests = requests;
   return impl;
 }
 
-export function stubApi(routes: StubRoute[]): { api: GateApi; calls: string[] } {
+export function stubApi(routes: StubRoute[]): { api: GateApi; calls: string[]; requests: StubRequest[] } {
   const fetchImpl = stubFetch(routes);
-  return { api: createGateApi('', fetchImpl), calls: fetchImpl.calls };
+  return { api: createGateApi('', fetchImpl), calls: fetchImpl.calls, requests: fetchImpl.requests };
 }
 
 export interface StubWallet extends Eip1193Provider {
