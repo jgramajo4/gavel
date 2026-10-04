@@ -750,6 +750,57 @@ test("scheduled scanner failure keeps its original rejection and identifies the 
   assert.equal(scans, 2);
 });
 
+test("scheduled scan reports the timed-out receipt block and range without checkpointing", async () => {
+  const { createGateServerRuntime } = loadRuntime();
+  const { createGateObservability } = require("../src/gate/observability");
+  const { workerErrorHandler } = require("../bin/gavel-server");
+  const { createSyntheticChain, createCountingClient } = require("./support/base-rpc-mock");
+  const chain = createSyntheticChain({ fromBlock: 999n, head: 1_003n, splitter: SPLITTER });
+  let receiptRequests = 0;
+  const counting = createCountingClient(chain, { overrides: {
+    async getBlockReceipts(number) {
+      if (Number(number) === 1_001) { receiptRequests++; return new Promise(() => {}); }
+      return createCountingClient(chain).client.getBlockReceipts(number);
+    },
+  } });
+  const input = services();
+  input.baseClient = { ...input.baseClient, ...counting.client };
+  let checkpoints = 0;
+  input.store.getScannerState = async () => ({ deploymentId: "deployment-1", deploymentBlock: "1000",
+    nextRangeFrom: "1001", overlap: 64, generation: "53512" });
+  input.store.recordScannerRange = async () => { checkpoints++; };
+  for (const method of ["recordSettlementHint", "findSettlementQuote", "listUnsettledSettlementObservations",
+    "claimSettlementLifecycle", "recordSettlementLifecycle", "settle", "listPendingSettlementHints",
+    "resolveSettlementHint", "claimSettlementMonitors", "advanceSettlementMonitor"]) {
+    input.store[method] = async () => { throw new Error(`${method} must not run before the failed scan`); };
+  }
+  const lines = [];
+  const telemetry = createGateObservability({ write(line) { lines.push(JSON.parse(line)); } });
+  const timers = [];
+  const runtime = await createGateServerRuntime({ ...input, observability: telemetry,
+    env: productionEnv({ GAVEL_GATE_BASE_RPC_TIMEOUT_MS: "200", GAVEL_GATE_SETTLEMENT_SCAN_CONCURRENCY: "2" }),
+    scheduler: { setInterval(callback) { timers.push(callback); return timers.length; }, clearInterval() {} },
+    onError: workerErrorHandler(telemetry, (alert) => telemetry.recordOperatorAlert(alert)),
+    factories: { createGateHttpServer() { return {}; } },
+  });
+  runtime.start();
+  assert.equal(timers.length, 4);
+  await timers[1]();
+  const failure = lines.find((line) => line.type === "worker_failure");
+  assert.deepEqual((( { worker, errorName, errorMessage, rpcMethod, blockNumber, scanFromBlock, scanToBlock, phase }) =>
+    ({ worker, errorName, errorMessage, rpcMethod, blockNumber, scanFromBlock, scanToBlock, phase }))(failure), {
+    worker: "scan", errorName: "Error", errorMessage: "Base RPC getBlockReceipts timed out",
+    rpcMethod: "getBlockReceipts", blockNumber: 1_001, scanFromBlock: 1_000, scanToBlock: 1_003,
+    phase: "receipts",
+  });
+  assert.deepEqual(lines.filter((line) => line.type === "alert").map(({ source, code }) => ({ source, code })),
+    [{ source: "gate_worker", code: "WORKER_FAILED" }]);
+  assert.equal(checkpoints, 0);
+  assert.equal(receiptRequests, 1); // timed-out call is not retried
+  assert.equal(counting.calls("eth_getLogs"), 0);
+  await runtime.stop();
+});
+
 test("canonical runtime observes actual worker return values without changing them", async () => {
   const { createGateServerRuntime } = loadRuntime();
   const input = services();

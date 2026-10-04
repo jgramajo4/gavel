@@ -165,19 +165,32 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   // because reconcileSubmitted and monitorOnce run on their own timers against this same adapter
   // and would otherwise have their calls attributed to an in-flight scan.
   const meters = new AsyncLocalStorage();
+  const scanContext = new AsyncLocalStorage();
   function measure(name) {
     const meter = meters.getStore();
     if (meter) meter[name] = (meter[name] || 0) + 1;
   }
 
-  async function rpcCall(name, operation) {
+  async function rpcCall(name, operation, blockNumber, phase) {
     measure(name);
     let timer;
+    let timeoutError;
     try {
       return await Promise.race([
         Promise.resolve().then(operation),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Base RPC ${name} timed out`)), rpcLimit); }),
+        new Promise((_, reject) => { timer = setTimeout(() => {
+          timeoutError = new Error(`Base RPC ${name} timed out`);
+          reject(timeoutError);
+        }, rpcLimit); }),
       ]);
+    } catch (error) {
+      const range = scanContext.getStore();
+      if (range && error === timeoutError) {
+        // Only Gate-created timeout errors are unique to this call. Provider errors may be
+        // reused by concurrent scans; never mutate them or change their rejection identity.
+        try { error.scannerContext = { rpcMethod: name, blockNumber, ...range, phase }; } catch {}
+      }
+      throw error;
     } finally { clearTimeout(timer); }
   }
 
@@ -200,8 +213,8 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
    * changed during scan" check would silently stop detecting anything. A raw send bypasses the
    * cache while still going through the batching queue.
    */
-  async function canonicalBlock(number, includeTransactions = false) {
-    const header = await rpcCall("getBlockHeader", () => client.getBlockHeader(Number(number)));
+  async function canonicalBlock(number, includeTransactions = false, phase = "headers") {
+    const header = await rpcCall("getBlockHeader", () => client.getBlockHeader(Number(number)), Number(number), phase);
     // A missing, mismatched or unparseable block number is all one condition, reported with the
     // same message the sequential scanner used, rather than leaking a validator TypeError.
     let reported;
@@ -247,11 +260,12 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
   async function canonicalMatchingLogs(block) {
     if (!block?.transactionSet) throw new Error("canonical block transaction set is incomplete");
     const transactionCount = Number(await rpcCall("getBlockTransactionCount",
-      () => client.getBlockTransactionCount(Number(block.blockNumber))));
+      () => client.getBlockTransactionCount(Number(block.blockNumber)), Number(block.blockNumber), "receipts"));
     if (!Number.isSafeInteger(transactionCount) || transactionCount < 0) {
       throw new Error("block transaction count RPC result is incomplete");
     }
-    const receipts = await rpcCall("getBlockReceipts", () => client.getBlockReceipts(Number(block.blockNumber)));
+    const receipts = await rpcCall("getBlockReceipts", () => client.getBlockReceipts(Number(block.blockNumber)),
+      Number(block.blockNumber), "receipts");
     if (transactionCount !== block.transactionSet.count || !Array.isArray(receipts)
         || receipts.length !== transactionCount) {
       throw new Error("block receipt count RPC result is incomplete");
@@ -336,7 +350,8 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     // Optional client capability: a transport that can report real HTTP payload counts. The
     // scanner never depends on it, and its absence simply omits the two transport fields.
     const before = typeof client.transportStats === "function" ? client.transportStats() : undefined;
-    const result = await meters.run(stats, () => runScan(window, stats));
+    const result = await scanContext.run({ scanFromBlock: window.fromBlock, scanToBlock: window.throughBlock },
+      () => meters.run(stats, () => runScan(window, stats)));
     if (!before) return result;
     const after = client.transportStats();
     const delta = (field) => {
@@ -391,7 +406,7 @@ function createBaseSettlementAdapter({ client, chainId, splitter, confirmationDe
     const boundaries = [canonicalBlocks[0]];
     if (canonicalBlocks.length > 1) boundaries.push(canonicalBlocks.at(-1));
     for (const original of boundaries) {
-      const current = await canonicalBlock(original.blockNumber);
+      const current = await canonicalBlock(original.blockNumber, false, "boundaries");
       if (current.blockHash !== original.blockHash) throw new Error("canonical boundary changed during scan");
     }
 

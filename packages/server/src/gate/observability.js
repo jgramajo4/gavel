@@ -104,6 +104,27 @@ function errorFields(error, prefix) {
   };
 }
 
+const SAFE_SCANNER_METHODS = new Set(["getChainId", "getBlockNumber", "getBlockHeader",
+  "getBlockTransactionCount", "getBlockReceipts", "getTransactionReceipt", "getTransaction"]);
+const SAFE_SCANNER_PHASES = new Set(["headers", "receipts", "boundaries"]);
+function safeBlockNumber(value) {
+  if (typeof value === "bigint") return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined;
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function scannerFields(error, worker) {
+  if (worker !== "scan" || !(error instanceof Error)) return {};
+  try {
+    const context = error.scannerContext;
+    if (!context || !SAFE_SCANNER_METHODS.has(context.rpcMethod) || !SAFE_SCANNER_PHASES.has(context.phase)) return {};
+    const blockNumber = safeBlockNumber(context.blockNumber);
+    const scanFromBlock = safeBlockNumber(context.scanFromBlock);
+    const scanToBlock = safeBlockNumber(context.scanToBlock);
+    if (blockNumber === undefined || scanFromBlock === undefined || scanToBlock === undefined
+        || scanFromBlock > blockNumber || blockNumber > scanToBlock) return {};
+    return { rpcMethod: context.rpcMethod, blockNumber, scanFromBlock, scanToBlock, phase: context.phase };
+  } catch { return {}; }
+}
+
 function createGateObservability({ write = (line) => process.stderr.write(line), clock = () => new Date() } = {}) {
   if (typeof write !== "function") throw new TypeError("observability write sink is required");
   if (typeof clock !== "function") throw new TypeError("observability clock is required");
@@ -137,6 +158,7 @@ function createGateObservability({ write = (line) => process.stderr.write(line),
         const cause = error instanceof Error && error.cause instanceof Error ? errorFields(error.cause, "cause") : {};
         emit({ level: "error", type: "worker_failure", worker: SAFE_WORKERS.has(worker) ? worker : "unknown",
           ...errorFields(error, "error"),
+          ...scannerFields(error, worker),
           ...(cause.causeMessage && cause.causeMessage !== "[redacted]" ? cause : {}),
         });
       } catch {} // Diagnostics must never change worker failure or alert behavior.
