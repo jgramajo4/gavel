@@ -11,7 +11,7 @@ export interface StubRoute {
   method?: string;
   match: RegExp;
   status: number;
-  body?: unknown;
+  body?: unknown | ((request: StubRequest) => unknown);
 }
 
 /** One request as it reached the wire: method, URL, headers, parsed JSON body. */
@@ -42,10 +42,12 @@ export function stubFetch(
       (candidate) => (candidate.method ?? 'GET').toUpperCase() === method && candidate.match.test(url),
     );
     if (!route) throw new Error(`unstubbed request: ${method} ${url}`);
+    const request = requests[requests.length - 1];
+    const responseBody = typeof route.body === 'function' ? route.body(request) : route.body;
     return {
       status: route.status,
       ok: route.status >= 200 && route.status < 300,
-      json: async () => route.body ?? null,
+      json: async () => responseBody ?? null,
     } as Response;
   }) as typeof fetch & { calls: string[]; requests: StubRequest[] };
   impl.calls = calls;

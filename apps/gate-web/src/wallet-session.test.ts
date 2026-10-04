@@ -23,6 +23,38 @@ describe('isSessionForRole', () => {
 });
 
 describe('openWalletSession', () => {
+  it('refuses to sign a WalletSession challenge for a different wallet', async () => {
+    const wrongWalletChallenge = { ...challenge, message: { ...challenge.message, wallet: VOTER } };
+    const { api } = stubApi([
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: wrongWalletChallenge },
+    ]);
+    const provider = stubWallet({
+      eth_accounts: () => [PAYER],
+      eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+    });
+
+    await expect(
+      openWalletSession({ api, provider, role: 'base_sender', account: PAYER }),
+    ).rejects.toMatchObject({ code: 'WALLET_SESSION_CHALLENGE_MISMATCH' });
+    expect(provider.calls.map((call) => call.method)).toEqual(['eth_accounts']);
+  });
+
+  it('refuses to sign a WalletSession challenge for a different role', async () => {
+    const wrongRoleChallenge = { ...challenge, message: { ...challenge.message, role: 'dao_inbox' } };
+    const { api } = stubApi([
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: wrongRoleChallenge },
+    ]);
+    const provider = stubWallet({
+      eth_accounts: () => [PAYER],
+      eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
+    });
+
+    await expect(
+      openWalletSession({ api, provider, role: 'base_sender', account: PAYER }),
+    ).rejects.toMatchObject({ code: 'WALLET_SESSION_CHALLENGE_MISMATCH' });
+    expect(provider.calls.map((call) => call.method)).toEqual(['eth_accounts']);
+  });
+
   it('requests a base_sender challenge for the connected advocate, not the target voter', async () => {
     const { api, calls } = stubApi([
       { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: challenge },

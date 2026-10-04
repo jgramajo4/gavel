@@ -9,6 +9,15 @@ export class WalletSessionRoleError extends Error {
   }
 }
 
+export class WalletSessionChallengeError extends Error {
+  readonly code = 'WALLET_SESSION_CHALLENGE_MISMATCH';
+
+  constructor() {
+    super('The wallet session challenge does not match the requested wallet and role. Nothing was signed.');
+    this.name = 'WalletSessionChallengeError';
+  }
+}
+
 /**
  * The one WalletSession exchange in this app.
  *
@@ -40,6 +49,15 @@ export async function openWalletSession({
 }): Promise<{ account: string; verified: VerifiedSession }> {
   const account = await resolveAccount(provider, connected);
   const challenge = await api.requestChallenge({ proofType: 'WalletSession', wallet: account, role });
+  const challengeWallet = challenge?.message?.wallet;
+  const challengeRole = challenge?.message?.role;
+  if (
+    typeof challengeWallet !== 'string' ||
+    challengeWallet.toLowerCase() !== account.toLowerCase() ||
+    challengeRole !== role
+  ) {
+    throw new WalletSessionChallengeError();
+  }
   const signature = await signTypedData(provider, account, {
     domain: challenge.domain,
     types: challenge.types,

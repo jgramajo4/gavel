@@ -199,15 +199,18 @@ describe('SubmissionComposer', () => {
   });
 });
 
-const senderChallenge = {
-  proofType: 'WalletSession',
-  primaryType: 'WalletSession',
-  domain: { name: 'GavelGate', version: '1', chainId: 84532, verifyingContract: PAYER },
-  types: { WalletSession: [{ name: 'wallet', type: 'address' }] },
-  message: { wallet: PAYER, role: 'base_sender' },
-  nonceHash: `0x${'aa'.repeat(32)}`,
-  payloadHash: `0x${'bb'.repeat(32)}`,
-};
+function senderChallengeForRequest(request: { body: unknown }) {
+  const input = request.body as { wallet: string; role: string };
+  return {
+    proofType: 'WalletSession',
+    primaryType: 'WalletSession',
+    domain: { name: 'GavelGate', version: '1', chainId: 84532, verifyingContract: input.wallet },
+    types: { WalletSession: [{ name: 'wallet', type: 'address' }, { name: 'role', type: 'string' }] },
+    message: { wallet: input.wallet, role: input.role },
+    nonceHash: `0x${'aa'.repeat(32)}`,
+    payloadHash: `0x${'bb'.repeat(32)}`,
+  };
+}
 
 function advocateWallet(handlers: Record<string, (params?: unknown) => unknown> = {}) {
   return stubWallet({
@@ -216,6 +219,18 @@ function advocateWallet(handlers: Record<string, (params?: unknown) => unknown> 
     eth_signTypedData_v4: () => `0x${'44'.repeat(65)}`,
     ...handlers,
   });
+}
+
+function expectWalletSessionSignedBy(provider: Eip1193Provider, account: string) {
+  const call = (provider as ReturnType<typeof advocateWallet>).calls.find(
+    (entry) => entry.method === 'eth_signTypedData_v4',
+  );
+  expect(call).toBeDefined();
+  const [signer, rawTypedData] = call!.params as [string, string];
+  const typedData = JSON.parse(rawTypedData) as { message: { wallet: string; role: string } };
+  expect(signer.toLowerCase()).toBe(account.toLowerCase());
+  expect(typedData.message.wallet.toLowerCase()).toBe(account.toLowerCase());
+  expect(typedData.message.role).toBe('base_sender');
 }
 
 function listenableWallet(handlers: Record<string, (params?: unknown) => unknown> = {}) {
@@ -276,7 +291,7 @@ describe('SubmissionComposer advocate session', () => {
   it('connects, signs a base_sender challenge, then allows a quote without changing the target voter', async () => {
     const { api, calls } = stubApi([
       ...baseRoutes,
-      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallengeForRequest },
       { method: 'POST', match: /\/auth\/verify$/, status: 200, body: senderSession },
       { method: 'POST', match: /\/submissions$/, status: 201, body: quotedReceipt },
     ]);
@@ -385,7 +400,7 @@ describe('SubmissionComposer advocate session', () => {
   it('reports a rejected signature and stays connected-but-unauthenticated', async () => {
     const { api } = stubApi([
       ...baseRoutes,
-      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallengeForRequest },
     ]);
     const provider = advocateWallet({
       eth_signTypedData_v4: () => {
@@ -415,7 +430,7 @@ describe('SubmissionComposer advocate session', () => {
   it('reports a malformed signature without leaving a stale session', async () => {
     const { api } = stubApi([
       ...baseRoutes,
-      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+      { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallengeForRequest },
       {
         method: 'POST',
         match: /\/auth\/verify$/,
@@ -445,7 +460,7 @@ function senderSessionFor(wallet: string) {
 function signInRoutes(verified: unknown = senderSession) {
   return [
     ...baseRoutes,
-    { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallenge },
+    { method: 'POST', match: /\/auth\/challenge$/, status: 200, body: senderChallengeForRequest },
     { method: 'POST', match: /\/auth\/verify$/, status: 200, body: verified },
     { method: 'POST', match: /\/submissions$/, status: 201, body: quotedReceipt },
   ];
@@ -495,6 +510,52 @@ describe('SubmissionComposer payer sign-in (staging regression)', () => {
     expect((verify[0].body as { proofType: string }).proofType).toBe('WalletSession');
   });
 
+  it('rejects a wrong-wallet challenge before signing and keeps Request quote disabled', async () => {
+    const { api } = stubApi([
+      ...baseRoutes,
+      {
+        method: 'POST',
+        match: /\/auth\/challenge$/,
+        status: 200,
+        body: (request: { body: unknown }) => ({
+          ...senderChallengeForRequest(request),
+          message: { ...senderChallengeForRequest(request).message, wallet: VOTER },
+        }),
+      },
+    ]);
+    const provider = advocateWallet();
+    const user = userEvent.setup();
+    renderComposer(api, { walletAddress: PAYER, provider });
+
+    await user.click(await screen.findByRole('button', { name: /sign in to request quote/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/challenge does not match/i);
+    expect(provider.calls.filter((call) => call.method === 'eth_signTypedData_v4')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /^request quote$/i })).toBeNull();
+  });
+
+  it('rejects a wrong-role challenge before signing and keeps Request quote disabled', async () => {
+    const { api } = stubApi([
+      ...baseRoutes,
+      {
+        method: 'POST',
+        match: /\/auth\/challenge$/,
+        status: 200,
+        body: (request: { body: unknown }) => ({
+          ...senderChallengeForRequest(request),
+          message: { ...senderChallengeForRequest(request).message, role: 'dao_inbox' },
+        }),
+      },
+    ]);
+    const provider = advocateWallet();
+    const user = userEvent.setup();
+    renderComposer(api, { walletAddress: PAYER, provider });
+
+    await user.click(await screen.findByRole('button', { name: /sign in to request quote/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/challenge does not match/i);
+    expect(provider.calls.filter((call) => call.method === 'eth_signTypedData_v4')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /^request quote$/i })).toBeNull();
+  });
+
   it('a verified base_sender session for the connected wallet unlocks Request quote', async () => {
     const { api } = stubApi(signInRoutes());
     const user = userEvent.setup();
@@ -519,6 +580,7 @@ describe('SubmissionComposer payer sign-in (staging regression)', () => {
     expect(await screen.findByRole('button', { name: /^request quote$/i })).toBeInTheDocument();
     const challenge = requests.find((request) => request.url.endsWith('/v1/gate/auth/challenge'));
     expect(challenge?.body).toEqual({ proofType: 'WalletSession', wallet: OTHER, role: 'base_sender' });
+    expectWalletSessionSignedBy(provider, OTHER);
   });
 
   it('refuses a verified session the server issued to a wallet other than the signer', async () => {
@@ -551,6 +613,7 @@ describe('SubmissionComposer payer sign-in (staging regression)', () => {
     expect(await screen.findByRole('button', { name: /^request quote$/i })).toBeInTheDocument();
     const challenges = requests.filter((request) => request.url.endsWith('/v1/gate/auth/challenge'));
     expect(challenges.map((request) => (request.body as { wallet: string }).wallet)).toEqual([OTHER]);
+    expectWalletSessionSignedBy(provider, OTHER);
   });
 
   it('a disconnected wallet shows Connect wallet and no sign-in or quote control', async () => {
