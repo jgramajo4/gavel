@@ -14,7 +14,9 @@ pinned, validated Gavel runtime under `HERMES_HOME`, creates a separate private
 data directory, and reuses both on later requests. Do not ask the user to clone
 the repository, run `npm ci`, use `npm link`, or set a data path for an ordinary
 installation. Stop and report the missing prerequisite if Git, npm, or Node.js
-20+ is unavailable.
+20+ is unavailable. The runner stays pinned to the last published runtime;
+new CLI features require a post-merge published-commit pin update before users
+can invoke them (see [runtime configuration](references/runtime.md)).
 
 For every Gavel command, invoke this installed skill's `scripts/gavel.js` with
 the command arguments. The runner supplies `GAVEL_DATA_DIR`; never print

@@ -490,9 +490,12 @@ verify the delegation
 bind it in an execution profile as proposalIdentity: "local:safe-proposer-main"
 ```
 
-The key is generated locally, written only encrypted at mode `0600` under
-`GAVEL_DATA_DIR`, and the passphrase (from `GAVEL_IDENTITY_PASSPHRASE`, minimum
-12 characters) is never written to disk.
+The key is generated locally, encrypted in a mode-`0600` keystore under
+`GAVEL_DATA_DIR`, and unlocked by a separate owner-only local credential by
+default. Explicit environment-managed identities may use the document's named
+passphrase variable instead; legacy documents remain compatible. Back up both
+local files together as signing material. Co-locating them is an unattended
+agent trade-off, not protection against compromise of the same filesystem.
 
 ### Hosted / Bankr identity model
 

@@ -62,6 +62,38 @@ test("Hermes runner bootstraps a pinned runtime once and reuses it", () => {
   }
 });
 
+test("Hermes runner delegates arguments unchanged and supplies private data only in child environment", () => {
+  const { runCanonicalCli } = require(path.join(integration, "scripts", "gavel.js"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "gavel-hermes-child-"));
+  try {
+    const cli = path.join(home, "cli.js");
+    const output = path.join(home, "result.json");
+    const dataDir = path.join(home, "private", "gavel");
+    fs.writeFileSync(cli, `require('node:fs').writeFileSync(process.env.GAVEL_TEST_OUTPUT, JSON.stringify({ argv: process.argv.slice(2), dataDir: process.env.GAVEL_DATA_DIR, credential: process.env.GAVEL_GATE_SESSION }));`);
+    const args = ["gate", "inbox", "--json"];
+    const env = { ...process.env, HOME: home, GAVEL_TEST_OUTPUT: output, GAVEL_GATE_SESSION: "fixture-session", GAVEL_DATA_DIR: "wrong-parent-path" };
+    const result = runCanonicalCli({ cli, dataDir }, args, env);
+    assert.equal(result.status, 0, result.error?.message);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), {
+      argv: args,
+      dataDir,
+      credential: "fixture-session",
+    });
+    assert.equal(env.GAVEL_DATA_DIR, "wrong-parent-path");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Hermes runner defaults to the invoking HOME without a pi-specific path", () => {
+  const { resolveConfig } = require(path.join(integration, "scripts", "gavel.js"));
+  const alternateHome = path.join(os.tmpdir(), "gavel-alternate-home");
+  const config = resolveConfig({ HOME: alternateHome });
+  assert.equal(config.hermesHome, path.join(alternateHome, ".hermes"));
+  assert.equal(config.dataDir, path.join(alternateHome, ".hermes", "data", "gavel"));
+  assert.equal(config.runtimeDir, path.join(alternateHome, ".hermes", "runtimes", "gavel", require(path.join(integration, "scripts", "gavel.js")).RUNTIME_REF.slice(0, 12)));
+});
+
 test("Hermes runner keeps managed runtime and private data separate", () => {
   const { resolveConfig } = require(path.join(integration, "scripts", "gavel.js"));
   const base = path.join(os.tmpdir(), "gavel-hermes-overlap");

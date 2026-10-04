@@ -72,8 +72,8 @@ const SECRET_DESCRIPTORS = Object.freeze([
   Object.freeze({
     id: "safe-proposer-passphrase",
     label: "Safe proposer keystore passphrase",
-    variable: "GAVEL_SAFE_PASSPHRASE",
-    requiredFor: "Unlocking the encrypted Safe proposal identity",
+    variable: "GAVEL_IDENTITY_PASSPHRASE",
+    requiredFor: "Unlocking legacy or explicitly environment-managed Safe proposal identities",
     optional: true,
   }),
   Object.freeze({
