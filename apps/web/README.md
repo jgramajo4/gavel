@@ -6,7 +6,7 @@ the standalone Gate frontend (`gate.0773h.com`).
 
 - **Public, no wallet:** home (latest proposals per DAO), `/daos`, each DAO's
   overview and proposals, proposal detail, `/install` (agents, hosted, self-host,
-  and the copyable Daily Governance Brief).
+  and the copyable on-demand Governance Brief).
 - **Gate, under `/gate`:** directory, profiles, enrollment, paid submission
   composition, quote checkout, settlement state, and the private voter inbox.
 
@@ -25,7 +25,7 @@ Experimental. The browser is not authoritative for anything that matters.
 | `/daos` | DAO index |
 | `/daos/:dao` · `/daos/:dao/:section` | DAO overview / section (only sections the DAO supports) |
 | `/daos/:dao/proposals/:id` | Proposal detail |
-| `/install` | Install and Daily Brief |
+| `/install` | Install and Governance Brief |
 | `/gate` | Gate directory |
 | `/gate/voters/:wallet` · `/gate/voters/:wallet/compose` | Gate profile / paid submission |
 | `/gate/checkout/:publicId` | Quote checkout and settlement |

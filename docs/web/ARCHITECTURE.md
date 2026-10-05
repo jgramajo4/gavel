@@ -58,10 +58,10 @@ strings by hand.
 
 | Path | Surface |
 | --- | --- |
-| `/` | Home: latest proposals per DAO, install entry, Daily Brief |
+| `/` | Home: latest proposals per DAO, install entry, Governance Brief |
 | `/daos`, `/daos/:dao`, `/daos/:dao/:section` | DAO index, overview, sections |
 | `/daos/:dao/proposals/:id` | Proposal detail |
-| `/install` | Agents, hosted, self-host, Daily Brief |
+| `/install` | Agents, hosted, self-host, Governance Brief |
 | `/gate/**` | Gate: directory, `voters/:wallet`, `voters/:wallet/compose`, `checkout/:publicId`, `inbox`, `enroll` |
 
 Route params are untrusted: unknown DAO ids, unsupported sections, malformed

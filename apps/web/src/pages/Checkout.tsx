@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ApiError } from '../http';
 import { freezeQuote, type GateApi } from '../gate-api';
 import { useSession } from '../session';
@@ -42,6 +42,21 @@ import type { IssuedQuote, PublicReceiptState, SubmissionReceipt } from '../type
  */
 
 const TERMINAL: PublicReceiptState[] = ['accepted', 'expired', 'rejected_by_policy', 'malformed'];
+
+/**
+ * Thrown inside a payment attempt whose authority changed while it was in
+ * flight. Never shown to the user directly and never treated as a server or
+ * wallet verdict.
+ */
+class AttemptCancelled extends Error {
+  constructor() {
+    super('payment attempt cancelled');
+    this.name = 'AttemptCancelled';
+  }
+}
+
+const CANCELLED_MESSAGE =
+  'The wallet or session changed, so this payment attempt was cancelled. Nothing was signed or sent. Sign in again to continue.';
 
 function isUserRejection(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
@@ -121,6 +136,70 @@ export function Checkout({
   // Only an explicit, live Base sender that owns this quote may resume or pay.
   const senderSession = sender.status === 'ready' && problem === null ? sender.session : null;
   const senderToken = senderSession?.token ?? null;
+
+  /*
+   * Attempt cancellation. A payment attempt captures the authority it started
+   * with (session token, connected account, payer) and then awaits the server
+   * and the wallet. If that authority changes in the meantime — disconnect,
+   * wallet lock, account switch, session cleared or replaced, a different
+   * payer, unmount — the attempt is dead: it may not request a signature,
+   * broadcast, record a settlement hint, or report success.
+   *
+   * `generation` is bumped synchronously on every such change; an attempt
+   * checks it after each await and immediately before signing and
+   * broadcasting. The backend stays authoritative; this only stops a stale
+   * continuation from acting after the user withdrew or changed authority.
+   */
+  const generation = useRef(0);
+  const inFlight = useRef<{ generation: number; sender: string } | null>(null);
+  const mounted = useRef(true);
+  const invalidate = useCallback(() => {
+    generation.current += 1;
+    if (inFlight.current && mounted.current) {
+      inFlight.current = null;
+      // The stale attempt may still be awaiting a response that never comes;
+      // give the user a recoverable state now rather than when it resolves.
+      setBusy(false);
+      setPhase('idle');
+      setError(CANCELLED_MESSAGE);
+    }
+    inFlight.current = null;
+  }, []);
+  const authority = senderSession
+    ? `${senderSession.token}|${senderSession.session.wallet.toLowerCase()}|${(address ?? '').toLowerCase()}|${(payer ?? '').toLowerCase()}`
+    : null;
+  // Layout effect: commits run synchronously with the change that caused them,
+  // so no awaited continuation can observe the old authority in between.
+  useLayoutEffect(() => {
+    invalidate();
+  }, [authority, invalidate]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      invalidate();
+    };
+  }, [invalidate]);
+  // Wallet events reach React through a scheduled render. Listen directly as
+  // well, so a lock or switch cancels the attempt at the moment it happens.
+  useEffect(() => {
+    if (!wallet.on || !wallet.removeListener) return;
+    const onAccounts = (accounts: unknown) => {
+      const attempt = inFlight.current;
+      if (!attempt) return;
+      const next = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : null;
+      if (!next || !sameAddress(next, attempt.sender)) invalidate();
+    };
+    const onDisconnect = () => {
+      if (inFlight.current) invalidate();
+    };
+    wallet.on('accountsChanged', onAccounts);
+    wallet.on('disconnect', onDisconnect);
+    return () => {
+      wallet.removeListener?.('accountsChanged', onAccounts);
+      wallet.removeListener?.('disconnect', onDisconnect);
+    };
+  }, [wallet, invalidate]);
 
   // Recovery path: a reload, or a duplicate, lands here with only a public ID.
   // Resume returns the ORIGINAL quote; it issues nothing and refreshes nothing.
@@ -261,12 +340,20 @@ export function Checkout({
       return;
     }
     const baseSender = senderSession.session.wallet;
+    const attempt = generation.current;
+    inFlight.current = { generation: attempt, sender: baseSender };
+    /** Throws once this attempt's authority has changed. */
+    const live = () => {
+      if (generation.current !== attempt) throw new AttemptCancelled();
+    };
+    let broadcastHash: string | null = null;
     setError(null);
     setBusy(true);
     try {
       // 1. Re-authorize. The rendered quote is a display cache; the persisted,
       //    owner-bound quote is the only thing that may reach the wallet.
       const authoritative = await api.resumeSubmission(senderSession.token, `/v1/submissions/${id}/resume`);
+      live();
       if (!authoritative) {
         setPhase('failed');
         setError('This quote could not be confirmed with the server. Nothing was signed or sent.');
@@ -289,22 +376,47 @@ export function Checkout({
         setError('This quote was issued to a different Base sender. Nothing was signed or sent.');
         return;
       }
-      const live = await resolveAccount(wallet, baseSender);
-      if (!sameAddress(live, baseSender)) {
+      const account = await resolveAccount(wallet, baseSender);
+      live();
+      if (!sameAddress(account, baseSender)) {
         setPhase('failed');
         setError('The wallet is no longer on the Base sender account. Nothing was signed or sent.');
         return;
       }
 
       // 2. Pay the server's object. payQuote re-checks version and expiry
-      //    before it touches the wallet.
-      const result = await payQuote(wallet, payable, setPhase, { now });
+      //    before it touches the wallet, and calls `live` before every wallet
+      //    step, immediately before the signature, and before the broadcast.
+      const result = await payQuote(
+        wallet,
+        payable,
+        (next) => {
+          if (generation.current === attempt) setPhase(next);
+        },
+        { now, guard: live },
+      );
+      broadcastHash = result.txHash;
+      live(); // a settlement hint is only recorded under unchanged authority
       setTxHash(result.txHash);
       // 3. 202: the hash is recorded as a hint. Not payment, not acceptance.
       const hint = await api.recordSettlementHint(senderSession.token, id, result.txHash, result.chainId);
+      live();
       setState(hint.state);
       void pollStatus();
     } catch (cause: unknown) {
+      if (cause instanceof AttemptCancelled || generation.current !== attempt) {
+        // A stale attempt never touches the UI of whatever is current now —
+        // except to say a transaction it already broadcast exists, and only
+        // while no newer attempt is running.
+        if (broadcastHash && mounted.current && inFlight.current === null) {
+          setTxHash(broadcastHash);
+          setPhase('broadcast');
+          setError(
+            'The wallet or session changed after the payment was broadcast, so Gavel was not notified from this page. Gate still verifies settlement on chain. Keep the transaction hash shown below.',
+          );
+        }
+        return;
+      }
       setPhase(isUserRejection(cause) ? 'rejected' : 'failed');
       if (cause instanceof ApiError && cause.status === 401) {
         clearSession();
@@ -316,7 +428,10 @@ export function Checkout({
         setError(cause instanceof Error ? cause.message : 'The payment could not be completed.');
       }
     } finally {
-      setBusy(false);
+      if (generation.current === attempt) {
+        inFlight.current = null;
+        setBusy(false);
+      }
     }
   }, [api, wallet, quote, id, senderSession, problem, pollStatus, now, clearSession]);
 

@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { VoterInbox } from './VoterInbox';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
+import { useSession } from '../session';
+import { ApiError } from '../http';
+import type { InboxItem } from '../types';
 import {
   VOTER,
   candidateInboxItem,
@@ -357,5 +360,170 @@ describe('VoterInbox identity', () => {
     const signed = wallet.calls.find((call) => call.method === 'eth_signTypedData_v4');
     expect(JSON.stringify(signed?.params)).toContain(VOTER);
     expect(calls.join(' ')).not.toContain('.eth');
+  });
+});
+
+/**
+ * F3: private inbox state belongs to the exact `dao_inbox` session that
+ * fetched it. A session change drops it, and a response that lands for the
+ * previous session is discarded rather than stored or rendered.
+ */
+describe('VoterInbox session transitions', () => {
+  const OTHER_WALLET = '0x6666666666666666666666666666666666666666';
+  const sessionB = {
+    token: 'j'.repeat(43),
+    session: { ...inboxSession.session, wallet: OTHER_WALLET },
+  };
+  const itemB: InboxItem = {
+    ...proposalInboxItem,
+    id: 'inbox-b',
+    pitch: 'Wallet B private pitch.',
+    canonicalFacts: { ...proposalInboxItem.canonicalFacts, proposalId: '999', targetId: 'proposal:999' },
+  };
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (cause: unknown) => void;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function Controls() {
+    const { session, setSession, clearSession } = useSession();
+    return (
+      <>
+        <output data-testid="session-token">{session?.token ?? 'none'}</output>
+        <button type="button" onClick={() => setSession(sessionB)}>
+          test-switch-to-b
+        </button>
+        <button type="button" onClick={clearSession}>
+          test-sign-out
+        </button>
+      </>
+    );
+  }
+
+  function renderInbox(api: ReturnType<typeof stubApi>['api']) {
+    return renderApp(
+      <>
+        <VoterInbox api={api} wallet={stubWallet()} />
+        <Controls />
+      </>,
+      { session: inboxSession },
+    );
+  }
+
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  it("wallet A's late inbox list is discarded after switching to wallet B", async () => {
+    const { api } = stubApi([]);
+    const heldA = deferred<InboxItem[]>();
+    vi.spyOn(api, 'listInbox').mockImplementation((token: string) =>
+      token === inboxSession.token ? heldA.promise : Promise.resolve([itemB]),
+    );
+    const user = userEvent.setup();
+    renderInbox(api);
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledWith(inboxSession.token));
+
+    await user.click(screen.getByRole('button', { name: 'test-switch-to-b' }));
+    expect(await screen.findByText(/proposal 999/i)).toBeInTheDocument();
+
+    act(() => heldA.resolve([candidateInboxItem, proposalInboxItem]));
+    await settle();
+
+    expect(screen.queryByText(/proposal 812/i)).toBeNull();
+    expect(screen.queryByText(/candidate/i)).toBeNull();
+    expect(screen.getAllByRole('button', { name: /open request/i })).toHaveLength(1);
+  });
+
+  it("wallet A's late inbox list is discarded after signing out, and never shown after signing in again", async () => {
+    const { api } = stubApi([]);
+    const heldA = deferred<InboxItem[]>();
+    const heldB = deferred<InboxItem[]>();
+    vi.spyOn(api, 'listInbox').mockImplementation((token: string) =>
+      token === inboxSession.token ? heldA.promise : heldB.promise,
+    );
+    const user = userEvent.setup();
+    renderInbox(api);
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-sign-out' }));
+    act(() => heldA.resolve([candidateInboxItem, proposalInboxItem]));
+    await settle();
+    expect(screen.queryByText(/proposal 812/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /connect governance wallet/i })).toBeEnabled();
+
+    // Wallet B signs in; while B's own list is still loading, nothing of A's shows.
+    await user.click(screen.getByRole('button', { name: 'test-switch-to-b' }));
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledWith(sessionB.token));
+    expect(screen.queryByText(/proposal 812/i)).toBeNull();
+    expect(screen.queryAllByRole('button', { name: /open request/i })).toHaveLength(0);
+    act(() => heldB.resolve([itemB]));
+    expect(await screen.findByText(/proposal 999/i)).toBeInTheDocument();
+    expect(screen.queryByText(/proposal 812/i)).toBeNull();
+  });
+
+  it("wallet A's late item detail is never shown to wallet B", async () => {
+    const { api } = stubApi([]);
+    vi.spyOn(api, 'listInbox').mockImplementation((token: string) =>
+      Promise.resolve(token === inboxSession.token ? [candidateInboxItem] : [itemB]),
+    );
+    const heldDetail = deferred<InboxItem | null>();
+    vi.spyOn(api, 'getInboxItem').mockImplementation((token: string) =>
+      token === inboxSession.token ? heldDetail.promise : Promise.resolve(itemB),
+    );
+    const user = userEvent.setup();
+    renderInbox(api);
+    await user.click(await screen.findByRole('button', { name: /open request/i }));
+    await waitFor(() => expect(api.getInboxItem).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-switch-to-b' }));
+    await screen.findByText(/proposal 999/i);
+    act(() => heldDetail.resolve(candidateInboxItem));
+    await settle();
+
+    expect(screen.queryByRole('article', { name: /inbox item/i })).toBeNull();
+    expect(screen.queryByText(/sponsor this candidate/i)).toBeNull();
+  });
+
+  it("an open item of wallet A is dropped the moment the session changes", async () => {
+    const { api } = stubApi([]);
+    vi.spyOn(api, 'listInbox').mockImplementation((token: string) =>
+      Promise.resolve(token === inboxSession.token ? [candidateInboxItem] : [itemB]),
+    );
+    vi.spyOn(api, 'getInboxItem').mockResolvedValue(candidateInboxItem);
+    const user = userEvent.setup();
+    renderInbox(api);
+    await user.click(await screen.findByRole('button', { name: /open request/i }));
+    expect(await screen.findByRole('article', { name: /inbox item/i })).toHaveTextContent(/sponsor this candidate/i);
+
+    await user.click(screen.getByRole('button', { name: 'test-switch-to-b' }));
+    expect(screen.queryByRole('article', { name: /inbox item/i })).toBeNull();
+    expect(screen.queryByText(/sponsor this candidate/i)).toBeNull();
+  });
+
+  it("a late 401 for wallet A does not sign wallet B out", async () => {
+    const { api } = stubApi([]);
+    const heldA = deferred<InboxItem[]>();
+    vi.spyOn(api, 'listInbox').mockImplementation((token: string) =>
+      token === inboxSession.token ? heldA.promise : Promise.resolve([itemB]),
+    );
+    const user = userEvent.setup();
+    renderInbox(api);
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('button', { name: 'test-switch-to-b' }));
+    await screen.findByText(/proposal 999/i);
+
+    act(() => heldA.reject(new ApiError('gate', 401, 'UNAUTHORIZED', 'expired', null)));
+    await settle();
+
+    expect(screen.getByTestId('session-token')).toHaveTextContent(sessionB.token);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

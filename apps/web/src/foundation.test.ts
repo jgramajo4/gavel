@@ -258,10 +258,18 @@ describe('install claims', () => {
     expect(AGENTS.map((agent) => agent.name)).toEqual(['Hermes', 'Bankr', 'Muse', 'Grok Bot']);
   });
 
-  it('the Daily Brief asks only for what Gavel provides and forbids signing', () => {
-    const prompt = RECIPES.find((recipe) => recipe.id === 'daily-brief')!.prompt;
+  it('the Governance Brief asks only for what Gavel provides and forbids signing', () => {
+    const recipe = RECIPES.find((entry) => entry.id === 'governance-brief')!;
+    const prompt = recipe.prompt;
     expect(prompt).toMatch(/source of truth/i);
     expect(prompt).toMatch(/do not prepare or sign/i);
-    expect(prompt).not.toMatch(/calendar|forum|discord|twitter/i);
+    expect(prompt).not.toMatch(/calendar|forum|discord|twitter|feed/i);
+    // On demand: the prompt names its own DAOs and voter. It must not lean on
+    // a follow list the web app never configured, or on a schedule Gavel
+    // never sets up.
+    expect(prompt).not.toMatch(/(DAOs I follow|I follow in Gavel|every day|each morning|daily)/i);
+    expect(prompt).toMatch(/Nouns, ENS and Railgun/);
+    expect(prompt).toMatch(/voting address/i);
+    expect(`${recipe.title} ${recipe.pitch}`).not.toMatch(/\bdaily\b|one message a day/i);
   });
 });

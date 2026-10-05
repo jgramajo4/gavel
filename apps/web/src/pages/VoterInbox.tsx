@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../http';
 import { type GateApi } from '../gate-api';
@@ -226,12 +226,35 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
   const { session, setSession, clearSession } = useSession();
   const { address, noteConnected } = useWalletConnection();
   const inboxSession = isSessionForRole(session, INBOX_ROLE) ? session : null;
-  const [items, setItems] = useState<InboxItem[] | null>(null);
-  const [openItem, setOpenItem] = useState<InboxItem | null>(null);
+  const token = inboxSession?.token ?? null;
+
+  /*
+   * Private state belongs to the exact `dao_inbox` session that fetched it.
+   * Every stored list and detail is tagged with that session's token and is
+   * only treated as current while the token is unchanged, so another wallet's
+   * (or a signed-out) page never renders it — not even for one commit. When
+   * the token changes the stored data is dropped outright, and a request that
+   * resolves afterwards is discarded: it may not store data, report an error,
+   * or clear the new session on a stale 401/403.
+   */
+  const [ownedItems, setOwnedItems] = useState<{ token: string; items: InboxItem[] } | null>(null);
+  const [ownedOpen, setOwnedOpen] = useState<{ token: string; item: InboxItem } | null>(null);
+  const items = ownedItems && ownedItems.token === token ? ownedItems.items : null;
+  const openItem = ownedOpen && ownedOpen.token === token ? ownedOpen.item : null;
+  const currentToken = useRef(token);
+  const isCurrent = (requestToken: string) => currentToken.current === requestToken;
   const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  useLayoutEffect(() => {
+    currentToken.current = token;
+    setOwnedItems(null);
+    setOwnedOpen(null);
+    // A pending request of the previous session no longer owns these flags.
+    setBusy(false);
+    setArchiving(false);
+  }, [token]);
   // Which session token the first automatic load was already attempted for, so
   // a failed load shows its error instead of retrying in a tight loop.
   const attempted = useRef<string | null>(null);
@@ -263,16 +286,19 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
   );
 
   const load = useCallback(
-    async (token: string) => {
+    async (requestToken: string) => {
       setBusy(true);
       try {
-        setItems(await api.listInbox(token));
+        const loaded = await api.listInbox(requestToken);
+        if (!isCurrent(requestToken)) return;
+        setOwnedItems({ token: requestToken, items: loaded });
         setError(null);
       } catch (cause: unknown) {
-        setItems(null);
+        if (!isCurrent(requestToken)) return;
+        setOwnedItems(null);
         setError(explain(cause, 'The inbox could not be loaded. Check your connection and try again.'));
       } finally {
-        setBusy(false);
+        if (isCurrent(requestToken)) setBusy(false);
       }
     },
     [api, explain],
@@ -298,8 +324,8 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
       });
       // Identity for the header; the `dao_inbox` token below is the grant.
       noteConnected(account);
-      setItems(null);
-      setOpenItem(null);
+      setOwnedItems(null);
+      setOwnedOpen(null);
       setSession(verified);
     } catch (cause: unknown) {
       setError(
@@ -318,19 +344,22 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
   const open = useCallback(
     async (id: string) => {
       if (!inboxSession) return;
+      const requestToken = inboxSession.token;
       setError(null);
       setBusy(true);
       try {
-        const item = await api.getInboxItem(inboxSession.token, id);
+        const item = await api.getInboxItem(requestToken, id);
+        if (!isCurrent(requestToken)) return;
         if (!item) {
           setError('That request is no longer in your inbox.');
           return;
         }
-        setOpenItem(item);
+        setOwnedOpen({ token: requestToken, item });
       } catch (cause: unknown) {
+        if (!isCurrent(requestToken)) return;
         setError(explain(cause, 'That request could not be opened. Try again shortly.'));
       } finally {
-        setBusy(false);
+        if (isCurrent(requestToken)) setBusy(false);
       }
     },
     [api, inboxSession, explain],
@@ -338,21 +367,27 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
 
   const archive = useCallback(async () => {
     if (!inboxSession || !openItem) return;
+    const requestToken = inboxSession.token;
     setError(null);
     setArchiving(true);
     try {
-      const result = await api.archiveInboxItem(inboxSession.token, openItem.id);
+      const result = await api.archiveInboxItem(requestToken, openItem.id);
+      if (!isCurrent(requestToken)) return;
       const archived = result.archived === true;
-      setOpenItem({ ...openItem, archived });
-      setItems((current) =>
-        current === null
+      setOwnedOpen({ token: requestToken, item: { ...openItem, archived } });
+      setOwnedItems((current) =>
+        current === null || current.token !== requestToken
           ? current
-          : current.map((item) => (item.id === openItem.id ? { ...item, archived } : item)),
+          : {
+              token: requestToken,
+              items: current.items.map((item) => (item.id === openItem.id ? { ...item, archived } : item)),
+            },
       );
     } catch (cause: unknown) {
+      if (!isCurrent(requestToken)) return;
       setError(explain(cause, 'Archiving failed. The request is still in your inbox.'));
     } finally {
-      setArchiving(false);
+      if (isCurrent(requestToken)) setArchiving(false);
     }
   }, [api, inboxSession, openItem, explain]);
 
@@ -423,7 +458,7 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
       {openItem ? (
         <InboxDetail
           item={openItem}
-          onBack={() => setOpenItem(null)}
+          onBack={() => setOwnedOpen(null)}
           onArchive={archive}
           archiving={archiving}
         />

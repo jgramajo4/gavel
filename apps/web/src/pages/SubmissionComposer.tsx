@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../http';
 import { type GateApi } from '../gate-api';
 import { useSession } from '../session';
@@ -93,6 +93,21 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /*
+   * A quote request belongs to the composer, and the voter, it was started
+   * for. Unmounting or retargeting the composer bumps `generation`; a request
+   * resolving after that is stale and may not navigate (onQuote), resume, or
+   * touch this page's state. Server ownership is unchanged; this only stops a
+   * late response from steering the app to another voter's checkout.
+   */
+  const generation = useRef(0);
+  useLayoutEffect(() => {
+    generation.current += 1;
+    return () => {
+      generation.current += 1;
+    };
+  }, [wallet]);
+
   useEffect(() => {
     let cancelled = false;
     api
@@ -185,13 +200,17 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
         setError(problem);
         return;
       }
+      const attempt = generation.current;
+      const current = () => generation.current === attempt;
       setBusy(true);
       try {
         const result = await api.createSubmission(senderSession.token, wallet, request);
+        if (!current()) return;
         if ((result as DuplicateReceipt).state === 'duplicate') {
           const duplicate = result as DuplicateReceipt;
           // Frozen recovery path: resume the existing quote, never reissue.
           const resumed = await api.resumeSubmission(senderSession.token, duplicate.existing.resumeUrl);
+          if (!current()) return;
           if (!resumed) {
             setError('This submission already exists, but its quote could not be recovered.');
             return;
@@ -202,6 +221,7 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
         }
         onQuote?.(result as SubmissionReceipt);
       } catch (cause: unknown) {
+        if (!current()) return;
         if (cause instanceof ApiError && cause.status === 401) {
           clearSession();
           setError('Your advocate session expired. Sign in with wallet again to request a quote.');
@@ -214,7 +234,7 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
             : 'The quote request failed. Nothing was submitted and nothing was charged.',
         );
       } finally {
-        setBusy(false);
+        if (current()) setBusy(false);
       }
     },
     [api, authenticated, senderSession, sender.status, wallet, request, proposalId, position, pitch, disclosures, evidenceUrls, onQuote, clearSession],

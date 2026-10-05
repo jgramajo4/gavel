@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { App } from '../App';
 import { SubmissionComposer } from './SubmissionComposer';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
@@ -660,5 +661,98 @@ describe('SubmissionComposer payer sign-in (staging regression)', () => {
     expect(submissions[0].headers.authorization).toBe(`Bearer ${senderSession.token}`);
     // The browser names no payer; the server derives it from the session.
     expect(JSON.stringify(submissions[0].body)).not.toMatch(/payer|0x3333/i);
+  });
+});
+
+/**
+ * F2: a quote request belongs to the composer and voter it was started for.
+ * A response that lands after the user moved to another voter (or left the
+ * composer) must not steer the app to the old voter's checkout.
+ */
+describe('SubmissionComposer discards a stale quote response', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function Probe() {
+    const navigate = useNavigate();
+    const location = useLocation();
+    return (
+      <>
+        <output data-testid="location">{location.pathname}</output>
+        <button type="button" onClick={() => navigate(`/gate/voters/${OTHER}/compose`)}>
+          test-go-other
+        </button>
+        <button type="button" onClick={() => navigate('/daos')}>
+          test-leave
+        </button>
+      </>
+    );
+  }
+
+  async function startHeldQuote() {
+    const { api } = stubApi([
+      { method: 'GET', match: /\/v1\/gates\/0x/, status: 200, body: acceptingProfile },
+    ]);
+    const held = deferred<typeof quotedReceipt>();
+    vi.spyOn(api, 'createSubmission').mockImplementation(() => held.promise as never);
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <App />
+        <Probe />
+      </>,
+      {
+        gate: api,
+        route: `/gate/voters/${VOTER}/compose`,
+        session: senderSession,
+        walletAddress: PAYER,
+        provider: advocateWallet(),
+      },
+    );
+    await screen.findByRole('button', { name: /^request quote$/i });
+    await fillValidDraft(user);
+    await user.click(screen.getByRole('button', { name: /^request quote$/i }));
+    await waitFor(() => expect(api.createSubmission).toHaveBeenCalledTimes(1));
+    return { api, held, user };
+  }
+
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  it("voter A's late quote cannot navigate to A's checkout after the user moved to voter B", async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-go-other' }));
+    expect(screen.getByTestId('location')).toHaveTextContent(`/gate/voters/${OTHER}/compose`);
+
+    act(() => held.resolve(quotedReceipt));
+    await settle();
+
+    expect(screen.getByTestId('location')).toHaveTextContent(`/gate/voters/${OTHER}/compose`);
+    expect(screen.queryByRole('heading', { name: /checkout/i })).toBeNull();
+  });
+
+  it("a late quote cannot navigate after the composer unmounted", async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-leave' }));
+
+    act(() => held.resolve(quotedReceipt));
+    await settle();
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/daos');
+  });
+
+  it('a current quote still navigates to its checkout', async () => {
+    const { held } = await startHeldQuote();
+    act(() => held.resolve(quotedReceipt));
+    await waitFor(() =>
+      expect(screen.getByTestId('location')).toHaveTextContent(`/gate/checkout/${quotedReceipt.publicId}`),
+    );
   });
 });

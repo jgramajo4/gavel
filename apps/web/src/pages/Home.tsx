@@ -97,8 +97,8 @@ export function Home() {
         <h2 id="explain-heading">What Gavel does</h2>
         <ol className="explain-list">
           <li>
-            <h3>Follows</h3>
-            <p>Proposals across every DAO you participate in, read from one canonical index.</p>
+            <h3>Reads</h3>
+            <p>Proposals for every DAO it supports, from one canonical index.</p>
           </li>
           <li>
             <h3>Prioritises</h3>

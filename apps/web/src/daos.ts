@@ -35,7 +35,7 @@ export interface Capability {
 
 export const CAPABILITIES: Record<CapabilityId, Capability> = {
   overview: { id: 'overview', label: 'Overview', kind: 'section', segment: null },
-  proposals: { id: 'proposals', label: 'Proposals', kind: 'section', segment: 'proposals' },
+  proposals: { id: 'proposals', label: 'Recent proposals', kind: 'section', segment: 'proposals' },
   gate: { id: 'gate', label: 'Gate', kind: 'feature', segment: null },
 };
 
@@ -114,6 +114,12 @@ export function findSection(dao: DaoDefinition, segment: string | undefined): Ca
   if (segment === undefined) return CAPABILITIES.overview;
   return sectionsOf(dao).find((capability) => capability.segment === segment) ?? null;
 }
+
+/**
+ * How many proposals the Recent proposals section shows. It is a bounded,
+ * non-paginated recent view — never labelled as the complete list.
+ */
+export const RECENT_PROPOSALS = 25;
 
 /** Page size that yields a correct newest-first view for this DAO. */
 export function newestPageSize(dao: DaoDefinition, wanted: number): number {

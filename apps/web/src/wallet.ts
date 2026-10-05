@@ -419,16 +419,30 @@ export async function payQuote(
   provider: Eip1193Provider,
   quote: IssuedQuote,
   onPhase: (phase: PaymentPhase) => void = () => {},
-  { now = Date.now }: { now?: () => number } = {},
+  {
+    now = Date.now,
+    guard = () => {},
+  }: {
+    now?: () => number;
+    /**
+     * Called before every wallet step and immediately before the signature
+     * and the broadcast. Throwing stops the payment there: the caller uses it
+     * to cancel an attempt whose authority changed while it was in flight.
+     */
+    guard?: () => void;
+  } = {},
 ): Promise<PaymentResult> {
   // Expiry and version are checked first so a refusal never reaches the wallet.
   assertPayableQuote(quote, Math.floor(now() / 1000));
   const plan = planPayment(quote);
+  guard();
   await ensureChain(provider, plan.chainId);
+  guard();
   const payer = getAddress(quote.message.payer);
 
   onPhase('authorizing');
   const tokenDomain = await readTokenDomain(provider, plan.token, plan.chainId);
+  guard(); // immediately before the signature request
   // The splitter consumes `v, r, s`, so this path — and only this path — holds
   // the signature to the 65-byte ECDSA shape.
   const authorizationSignature = assertEcdsaSignature(
@@ -439,6 +453,7 @@ export async function payQuote(
       message: plan.authorization,
     }),
   );
+  guard(); // immediately before the broadcast; the signature is discarded unsent
 
   onPhase('broadcasting');
   const txHash = await provider.request({

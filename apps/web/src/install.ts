@@ -36,7 +36,9 @@ export const AGENTS: readonly InstallOption[] = [
     outcome: 'Gavel as a persistent Hermes skill with private, runtime-owned memory.',
     command:
       'hermes skills install https://raw.githubusercontent.com/jgramajo4/gavel/main/integrations/hermes/SKILL.md --yes',
-    steps: ['Start a new conversation and ask for your daily governance brief.'],
+    steps: [
+      'Start a new conversation and paste the Governance Brief prompt below. Gavel answers when asked; to get it every morning, schedule the prompt with Hermes’s own cron jobs.',
+    ],
     source: `${REPO}/blob/main/integrations/hermes/references/runtime.md`,
   },
   {
@@ -61,7 +63,7 @@ export const AGENTS: readonly InstallOption[] = [
     name: 'Grok Bot',
     status: 'not_packaged',
     outcome: 'No Gavel integration for Grok Bot is packaged yet.',
-    steps: ['Explore public governance here today. The Daily Brief prompt below works once an integration exists.'],
+    steps: ['Explore public governance here today. The Governance Brief prompt below needs an agent with Gavel installed.'],
     source: REPO,
   },
 ];
@@ -127,6 +129,10 @@ export const SELF_HOST: readonly InstallOption[] = [
  * attention (execution required, voting ends soon, vote open, new proposal,
  * voting opens soon), vote status, and evidence-backed recommendations. It does
  * not promise calendars, forums, or other sources Gavel cannot read.
+ *
+ * It is on demand: installing Gavel schedules nothing, and the web app keeps
+ * no follow list. The prompt names its DAOs and voter itself, and recurring
+ * delivery is the agent's own scheduler, where it has one.
  */
 export interface Recipe {
   id: string;
@@ -137,11 +143,12 @@ export interface Recipe {
 
 export const RECIPES: readonly Recipe[] = [
   {
-    id: 'daily-brief',
-    title: 'Daily Governance Brief',
-    pitch: 'One message a day that tells you what needs you, and nothing that doesn’t.',
+    id: 'governance-brief',
+    title: 'Governance Brief',
+    pitch:
+      'Ask your agent whenever you want one: what needs you across the DAOs you name, and nothing that doesn’t. Want it every morning? Schedule this prompt with your agent’s own scheduler, if it has one.',
     prompt: [
-      'Give me today’s governance brief for the DAOs I follow in Gavel.',
+      'Use Gavel to give me a governance brief for Nouns, ENS and Railgun (keep only the DAOs I care about). My voting address is <your address or ENS name>.',
       '',
       'Lead with what needs action: proposals awaiting execution, votes ending soon, and open votes I have not cast. Then new proposals from the last 24 hours and votes opening soon.',
       '',

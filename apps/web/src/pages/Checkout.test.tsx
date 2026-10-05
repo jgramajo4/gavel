@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor } from '@testing-library/react';
 import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
 import userEvent from '@testing-library/user-event';
 import { Checkout } from './Checkout';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
@@ -821,5 +822,205 @@ describe('Checkout Base sender requirement', () => {
     expect(await screen.findByTestId('base-sender-required')).toHaveTextContent(/expired/i);
     expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
     expect(settlementTouched(calls)).toEqual([]);
+  });
+});
+
+/**
+ * F1: once a payment attempt starts, a change of authority — the app's own
+ * disconnect, an account switch, the session being cleared — kills it. The
+ * stale continuation must not sign, broadcast, record a settlement hint, or
+ * show success, however late its pending response arrives.
+ */
+describe('Checkout cancels an in-flight payment when authority changes', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  /** A wallet that emits events. eth_accounts keeps PAYER authorized, as real
+   *  multi-account wallets do after a switch or an app-side disconnect. */
+  function eventedWallet(handlers: Record<string, (params?: unknown) => unknown> = {}) {
+    const wallet = tokenWallet({ eth_accounts: () => [PAYER, VOTER], ...handlers });
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    return Object.assign(wallet, {
+      on(event: string, listener: (...args: unknown[]) => void) {
+        const set = listeners.get(event) ?? new Set();
+        set.add(listener);
+        listeners.set(event, set);
+      },
+      removeListener(event: string, listener: (...args: unknown[]) => void) {
+        listeners.get(event)?.delete(listener);
+      },
+      emit(event: string, ...args: unknown[]) {
+        for (const listener of [...(listeners.get(event) ?? [])]) listener(...args);
+      },
+    });
+  }
+
+  /** The header's Disconnect and the session store, as the shell exposes them. */
+  function Controls() {
+    const { disconnect } = useWalletConnection();
+    const { clearSession } = useSession();
+    return (
+      <>
+        <button type="button" onClick={disconnect}>
+          test-disconnect
+        </button>
+        <button type="button" onClick={clearSession}>
+          test-clear-session
+        </button>
+      </>
+    );
+  }
+
+  const signatureRequested = (wallet: { calls: { method: string; params?: unknown }[] }) =>
+    // The payment authorization is the only typed-data request in these flows.
+    wallet.calls.some((call) => call.method === 'eth_signTypedData_v4');
+  const broadcast = (wallet: { calls: { method: string }[] }) =>
+    wallet.calls.some((call) => call.method === 'eth_sendTransaction');
+
+  async function startHeldPayment(wallet: ReturnType<typeof eventedWallet>) {
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute]);
+    const held = deferred<typeof quotedReceipt | null>();
+    vi.spyOn(api, 'resumeSubmission').mockImplementation(() => held.promise as never);
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />
+        <Controls />
+      </>,
+      { session, walletAddress: PAYER, provider: wallet },
+    );
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(api.resumeSubmission).toHaveBeenCalledTimes(1));
+    return { api, calls, held, user };
+  }
+
+  async function expectCancelledSafely(
+    wallet: ReturnType<typeof eventedWallet>,
+    calls: string[],
+  ) {
+    // Let every continuation of the stale attempt run to completion.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(signatureRequested(wallet)).toBe(false);
+    expect(broadcast(wallet)).toBe(false);
+    expect(calls.filter((call) => call.endsWith('/settlement'))).toEqual([]);
+    expect(screen.queryByText(TX_HASH)).toBeNull();
+    expect(screen.queryByText(/payment sent|accepted/i)).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent(/payment attempt was cancelled/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/nothing was signed or sent/i);
+  }
+
+  it('app-side disconnect while the owner-bound quote is pending: no signature, no broadcast, no settlement', async () => {
+    const wallet = eventedWallet();
+    const { calls, held, user } = await startHeldPayment(wallet);
+
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    act(() => held.resolve(quotedReceipt));
+
+    await expectCancelledSafely(wallet, calls);
+    // Recoverable: the page asks to connect again; nothing is stuck busy.
+    expect(screen.getByRole('button', { name: /connect wallet/i })).toBeEnabled();
+  });
+
+  it('account switch while the owner-bound quote is pending: never signs as the old Base sender', async () => {
+    const wallet = eventedWallet();
+    const { calls, held } = await startHeldPayment(wallet);
+
+    act(() => wallet.emit('accountsChanged', [VOTER, PAYER]));
+    act(() => held.resolve(quotedReceipt));
+
+    await expectCancelledSafely(wallet, calls);
+    expect(screen.getByTestId('base-sender-required')).toHaveTextContent(/not the Base sender/i);
+  });
+
+  it('wallet lock while the owner-bound quote is pending', async () => {
+    const wallet = eventedWallet();
+    const { calls, held } = await startHeldPayment(wallet);
+
+    act(() => wallet.emit('accountsChanged', []));
+    act(() => held.resolve(quotedReceipt));
+
+    await expectCancelledSafely(wallet, calls);
+    expect(screen.getByRole('button', { name: /connect wallet/i })).toBeEnabled();
+  });
+
+  it('Base sender session cleared while the owner-bound quote is pending', async () => {
+    const wallet = eventedWallet();
+    const { calls, held, user } = await startHeldPayment(wallet);
+
+    await user.click(screen.getByRole('button', { name: 'test-clear-session' }));
+    act(() => held.resolve(quotedReceipt));
+
+    await expectCancelledSafely(wallet, calls);
+    expect(screen.getByRole('button', { name: /sign in with wallet/i })).toBeEnabled();
+  });
+
+  it('account switch while the wallet is reading the token domain: the signature is never requested', async () => {
+    const heldRead = deferred<void>();
+    let firstRead = true;
+    const base = tokenWallet();
+    const wallet = eventedWallet({
+      eth_call: async (params) => {
+        if (firstRead) {
+          firstRead = false;
+          await heldRead.promise;
+        }
+        return base.request({ method: 'eth_call', params: params as unknown[] });
+      },
+    });
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session,
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_call')).toBe(true));
+
+    act(() => wallet.emit('accountsChanged', [VOTER, PAYER]));
+    act(() => heldRead.resolve());
+
+    await expectCancelledSafely(wallet, calls);
+  });
+
+  it('account switch while the wallet holds the signature prompt: the signed authorization is never broadcast', async () => {
+    const heldSignature = deferred<string>();
+    const wallet = eventedWallet({ eth_signTypedData_v4: () => heldSignature.promise });
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
+    const user = userEvent.setup();
+    renderApp(<Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />, {
+      session,
+      walletAddress: PAYER,
+      provider: wallet,
+    });
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(signatureRequested(wallet)).toBe(true));
+
+    act(() => wallet.emit('accountsChanged', [VOTER, PAYER]));
+    act(() => heldSignature.resolve(AUTH_SIGNATURE));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(broadcast(wallet)).toBe(false);
+    expect(calls.filter((call) => call.endsWith('/settlement'))).toEqual([]);
+    expect(screen.queryByText(TX_HASH)).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent(/payment attempt was cancelled/i);
+  });
+
+  it('a payment that completes under unchanged authority still records its settlement hint', async () => {
+    const wallet = eventedWallet();
+    const { calls, held } = await startHeldPayment(wallet);
+    act(() => held.resolve(quotedReceipt));
+    await waitFor(() => expect(calls.some((call) => call.endsWith('/settlement'))).toBe(true));
+    expect(broadcast(wallet)).toBe(true);
+    expect(screen.queryByText(/payment attempt was cancelled/i)).toBeNull();
   });
 });

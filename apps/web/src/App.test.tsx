@@ -239,7 +239,7 @@ describe('DAO routing and capabilities', () => {
   it('shows only the sections a DAO supports', async () => {
     renderRoute('/daos/ens');
     const tabs = screen.getByRole('navigation', { name: /ens sections/i });
-    expect(within(tabs).getAllByRole('link').map((link) => link.textContent)).toEqual(['Overview', 'Proposals']);
+    expect(within(tabs).getAllByRole('link').map((link) => link.textContent)).toEqual(['Overview', 'Recent proposals']);
   });
 
   it('shows the Gate entry point only for DAOs with the Gate capability', async () => {
@@ -400,7 +400,7 @@ describe('homepage', () => {
   });
 });
 
-describe('install and Daily Brief', () => {
+describe('install and Governance Brief', () => {
   it('renders every agent integration as a peer, with honest status', async () => {
     renderRoute('/install');
     const agents = screen.getByRole('list', { name: 'Agents' });
@@ -416,12 +416,12 @@ describe('install and Daily Brief', () => {
     }
   });
 
-  it('copies the Daily Brief prompt exactly', async () => {
+  it('copies the Governance Brief prompt exactly', async () => {
     const user = userEvent.setup();
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     renderRoute('/install');
-    await user.click(screen.getByRole('button', { name: /copy daily governance brief prompt/i }));
+    await user.click(screen.getByRole('button', { name: /copy governance brief prompt/i }));
     expect(writeText).toHaveBeenCalledWith(RECIPES[0].prompt);
     expect(await screen.findByText('Copied.')).toBeInTheDocument();
   });
@@ -437,7 +437,7 @@ describe('install and Daily Brief', () => {
       configurable: true,
     });
     renderRoute('/');
-    await user.click(screen.getByRole('button', { name: /copy daily governance brief prompt/i }));
+    await user.click(screen.getByRole('button', { name: /copy governance brief prompt/i }));
     expect(await screen.findByText(/press ctrl\+c/i)).toBeInTheDocument();
   });
 });
@@ -611,7 +611,7 @@ describe('session follows the live wallet across navigation', () => {
     );
     act(() => wallet.emit('chainChanged', '0x2105'));
     expect(active()).toBe(`dao_inbox:${VOTER}`);
-    await user.click(screen.getByRole('link', { name: 'Proposals' }));
+    await user.click(screen.getByRole('link', { name: 'Recent proposals' }));
     expect(await screen.findByRole('link', { name: 'Nouns proposal 1001' })).toBeInTheDocument();
     expect(wallet.calls.some((call) => call.method === 'wallet_switchEthereumChain')).toBe(false);
   });

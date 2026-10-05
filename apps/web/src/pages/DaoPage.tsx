@@ -1,6 +1,15 @@
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { useCallback } from 'react';
-import { DAOS, findDao, findSection, hasCapability, newestPageSize, sectionsOf, type DaoDefinition } from '../daos';
+import {
+  DAOS,
+  RECENT_PROPOSALS,
+  findDao,
+  findSection,
+  hasCapability,
+  newestPageSize,
+  sectionsOf,
+  type DaoDefinition,
+} from '../daos';
 import { newestFirst, type IndexedProposal } from '../index-api';
 import { paths } from '../routes';
 import { useServices } from '../services';
@@ -84,7 +93,7 @@ function Overview({ dao }: { dao: DaoDefinition }) {
       <section className="dao-section" aria-labelledby="recent-heading">
         <div className="section-head">
           <h2 id="recent-heading">Recent proposals</h2>
-          <Link to={paths.daoCapability(dao.id, 'proposals')}>All proposals</Link>
+          <Link to={paths.daoCapability(dao.id, 'proposals')}>{`Latest ${RECENT_PROPOSALS}`}</Link>
         </div>
         <ProposalList dao={dao} limit={5} />
       </section>
@@ -127,7 +136,14 @@ export function DaoRoute() {
     // Keyed by DAO so nothing (scroll, local state) survives into another DAO.
     <DaoShell key={dao.id} dao={dao}>
       {section.id === 'overview' ? <Overview dao={dao} /> : null}
-      {section.id === 'proposals' ? <ProposalList dao={dao} limit={25} /> : null}
+      {section.id === 'proposals' ? (
+        <>
+          <p className="section-note">
+            The {RECENT_PROPOSALS} most recent {dao.name} proposals in the Gavel Governance Indexer.
+          </p>
+          <ProposalList dao={dao} limit={RECENT_PROPOSALS} />
+        </>
+      ) : null}
     </DaoShell>
   );
 }
