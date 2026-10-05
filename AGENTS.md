@@ -27,7 +27,7 @@ Gavel is an npm-workspaces monorepo: governance CLI/TUI, Gate paid-attention ser
 | `packages/daos` | DAO adapter registry: catalog ids → live governance adapters |
 | `packages/nouns-adapter`, `packages/ens-adapter`, `packages/railgun-adapter` | Per-DAO governance adapters (Nouns, ENS, Railgun) |
 | `packages/proposal-identity` | Canonical proposal identity and content-binding invariants shared by the index and Gate |
-| `apps/gate-web` | Gate React app (Vitest) |
+| `apps/web` | Gavel Web: the one human-facing app (DAOs, Install, Gate under `/gate`). Vitest. See `docs/web/ARCHITECTURE.md` |
 | `contracts/gate` | Foundry `GavelGateSplitter` |
 | `integrations/bankr`, `integrations/hermes` | Shipped agent skills; Bankr payer client |
 
@@ -43,7 +43,7 @@ Use `docs/CODEMAP.md` to find a file or symbol before opening large files.
 
 ## Tests
 
-- No database: `npm test` (root glob) plus `npm test --workspace @gavel/cli`, `npm run tui:typecheck`, and `npm run gate-web:test`, `gate-web:typecheck`, `gate-web:build`.
+- No database: `npm test` (root glob) plus `npm test --workspace @gavel/cli`, `npm run tui:typecheck`, and `npm run web:test`, `web:typecheck`, `web:build-check`.
 - Gate PostgreSQL and governance-index PostgreSQL suites need attested disposable databases (in practice a throwaway container). They **skip and still exit 0** without the variables. Read the `# skipped` count; see `docs/TESTING.md`.
 - `.github/workflows/test.yml` is the authoritative release matrix.
 

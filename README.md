@@ -42,10 +42,16 @@ for the pre-change audit and staged migration map.
 
 The experimental Gavel Gate MVP contract is documented in [`docs/GAVEL_GATE_TECHNICAL_SPEC.md`](docs/GAVEL_GATE_TECHNICAL_SPEC.md); this pointer is not a mainnet-readiness claim.
 
-## Public website
+## Gavel Web
 
-The static Gavel landing page lives in [`website/`](website/). See its
-[preview, design, validation, and deployment notes](website/README.md).
+[`apps/web`](apps/web/) is the one human-facing Gavel app, intended for
+`https://gavel.0773h.com`: DAOs, proposals, install, and Gate under `/gate`.
+See [`docs/web/ARCHITECTURE.md`](docs/web/ARCHITECTURE.md) and the cutover plan
+in [`docs/web/DOMAIN_CONSOLIDATION.md`](docs/web/DOMAIN_CONSOLIDATION.md).
+
+The static landing page in [`website/`](website/) is what `gavel.0773h.com`
+serves today. It is superseded by Gavel Web and will be removed once the cutover
+is live.
 
 ## Requirements
 

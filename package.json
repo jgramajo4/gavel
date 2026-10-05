@@ -33,10 +33,15 @@
     "tui": "npm run dev --workspace @gavel/tui",
     "tui:build": "npm run build --workspace @gavel/tui",
     "tui:typecheck": "npm run typecheck --workspace @gavel/tui",
-    "gate-web": "npm run dev --workspace @gavel/gate-web",
-    "gate-web:build": "npm run build --workspace @gavel/gate-web",
-    "gate-web:test": "npm test --workspace @gavel/gate-web",
-    "gate-web:typecheck": "npm run typecheck --workspace @gavel/gate-web"
+    "web": "npm run dev --workspace @gavel/web",
+    "web:build": "npm run build --workspace @gavel/web",
+    "web:test": "npm test --workspace @gavel/web",
+    "web:typecheck": "npm run typecheck --workspace @gavel/web",
+    "web:build-check": "scripts/web-build-check.sh",
+    "gate-web": "npm run web",
+    "gate-web:build": "npm run web:build",
+    "gate-web:test": "npm run web:test",
+    "gate-web:typecheck": "npm run web:typecheck"
   },
   "dependencies": {
     "ethers": "^6.15.0",

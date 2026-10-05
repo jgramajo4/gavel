@@ -102,11 +102,55 @@ function requestPath(value) {
   catch { return String(value || "").split(/[?#]/, 1)[0] || "/"; }
 }
 
-function createReadOnlyApi({ store, logger = null }) {
+/**
+ * Exact browser origins allowed to read this API cross-origin. Same contract as
+ * the Gate server's `corsOrigins`: HTTPS origins only, no wildcard, no path,
+ * query, credentials, or fragment. The index is public and read-only and the
+ * client sends no credentials, so CORS here only lets a configured web origin
+ * (Gavel Web) read what any non-browser client can already read.
+ */
+function parseCorsOrigins(values) {
+  if (!Array.isArray(values)) throw new TypeError("corsOrigins must be an array of exact HTTPS origins");
+  return new Set(values.map((value) => {
+    let parsed;
+    if (typeof value !== "string" || value.length > 256) throw new TypeError("corsOrigins must contain exact HTTPS origins");
+    try { parsed = new URL(value); } catch { throw new TypeError("corsOrigins must contain exact HTTPS origins"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/"
+      || parsed.search || parsed.hash || parsed.origin !== value) {
+      throw new TypeError("corsOrigins must contain exact HTTPS origins without path, query, credentials, or fragment");
+    }
+    return parsed.origin;
+  }));
+}
+
+/** `GAVEL_INDEX_CORS_ORIGINS`: comma-separated exact HTTPS origins. Empty → no CORS. */
+function corsOriginsFromEnv(env = process.env) {
+  const raw = env.GAVEL_INDEX_CORS_ORIGINS;
+  if (raw === undefined || raw.trim() === "") return [];
+  return [...parseCorsOrigins(raw.split(",").map((value) => value.trim()).filter(Boolean))];
+}
+
+function createReadOnlyApi({ store, logger = null, corsOrigins = [] }) {
   const log = logger || { info() {}, error() {} };
+  const allowedOrigins = parseCorsOrigins(corsOrigins);
   return http.createServer(async (req, res) => {
     const started = Date.now();
     try {
+      const origin = typeof req.headers.origin === "string" && allowedOrigins.has(req.headers.origin) ? req.headers.origin : null;
+      // With CORS configured, every response varies by Origin, allowed or not:
+      // a shared cache must never serve a no-ACAO copy to an allowed origin.
+      if (allowedOrigins.size > 0) res.setHeader("vary", "Origin");
+      if (origin) {
+        res.setHeader("access-control-allow-origin", origin);
+        if (req.method === "OPTIONS") {
+          res.writeHead(204, {
+            "access-control-allow-methods": "GET, HEAD, OPTIONS",
+            "access-control-allow-headers": "Accept",
+            "access-control-max-age": "600",
+          });
+          return res.end();
+        }
+      }
       if (!["GET", "HEAD"].includes(req.method)) return json(res, 405, { error: "method_not_allowed" });
       const url = new URL(req.url, "http://localhost"); const parts = url.pathname.split("/").filter(Boolean);
       if (["/health", "/healthz"].includes(url.pathname)) return json(res, 200, { ok: true });
@@ -140,4 +184,4 @@ function createReadOnlyApi({ store, logger = null }) {
     finally { log.info({ event: "http_request", method: req.method, path: requestPath(req.url), durationMs: Date.now() - started }); }
   });
 }
-module.exports = { createReadOnlyApi, publicEndpoint };
+module.exports = { createReadOnlyApi, corsOriginsFromEnv, publicEndpoint };
