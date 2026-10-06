@@ -12,6 +12,7 @@ const {
   NounsSubgraphSource,
   createReadOnlyApi,
 } = require("../src");
+const { corsOriginsFromEnv } = require("../src/api");
 const { redactErrorMessage } = require("../src/redaction");
 const { resolveLogBlockBatchSize } = require("../../core/src/rpc/block-range");
 
@@ -157,7 +158,7 @@ async function reconcileEns(db, provider) {
 async function serve(db, values) {
   const port = integer(values.port || process.env.API_PORT || "8080", "API_PORT", 1);
   const host = process.env.API_HOST || "0.0.0.0";
-  const server = createReadOnlyApi({ store: db, logger: log });
+  const server = createReadOnlyApi({ store: db, logger: log, corsOrigins: corsOriginsFromEnv() });
   await new Promise((resolve, reject) => server.once("error", reject).listen(port, host, resolve));
   log.info({ event: "api_listening", host, port });
   const stop = () => server.close(() => db.close().finally(() => process.exit(0)));

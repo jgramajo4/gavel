@@ -73,7 +73,7 @@ Where to look for X without reading 1,000-line files. Symbols are authoritative;
 | Need | Where |
 |---|---|
 | CLI commands (`gavel gate ...` dispatch in `bin/gavel.js`) | `packages/cli/bin/gavel.js`, Gate HTTP helper `packages/cli/gate-client.js` |
-| Gate web pages | `apps/gate-web/src/pages/{GateDirectory,GateProfile,SubmissionComposer,Checkout,Enrollment,VoterInbox}.tsx`; sessions `apps/gate-web/src/session.tsx`, `apps/gate-web/src/wallet-session.ts` |
+| Gate web pages | `apps/web/src/pages/{GateDirectory,GateProfile,SubmissionComposer,Checkout,Enrollment,VoterInbox}.tsx`; sessions `apps/web/src/session.tsx`, `apps/web/src/wallet-session.ts` |
 | Splitter contract | `contracts/gate/src/GavelGateSplitter.sol`, tests `contracts/gate/test/*.t.sol`, deploy `contracts/gate/script/` |
 | Bankr payer client / skill | `integrations/bankr/src/`, `integrations/bankr/SKILL.md` |
 | Proposal identity shared by index + Gate | `packages/proposal-identity/index.js` |

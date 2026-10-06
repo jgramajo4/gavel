@@ -15,7 +15,7 @@ Run from the repository root after `npm ci`.
 | Single file | `node --test packages/server/test/observability.test.js` | Fastest inner loop |
 | CLI workspace | `npm test --workspace @gavel/cli` | Also matched by the root glob; CI runs it separately |
 | TUI | `npm run tui:typecheck` | TypeScript only, no tests |
-| Gate web | `npm run gate-web:test && npm run gate-web:typecheck && npm run gate-web:build` | Vitest. **Not** covered by the root glob. |
+| Gavel Web | `npm run web:test && npm run web:typecheck && npm run web:build-check` | Vitest. **Not** covered by the root glob. |
 | Contracts | `cd contracts/gate && forge test -vvv && forge fmt --check && forge build --sizes` | Foundry; not in the Node workflow |
 | CI shape guard | `node --test packages/server/test/postgres-ci.test.js` | Fails if the workflow's PostgreSQL gate is weakened |
 

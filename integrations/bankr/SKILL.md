@@ -354,8 +354,11 @@ yet, and no new quote is needed. If Gate eventually returns
 
 ## Boundaries
 
-AgentMail is disabled. The voter-facing web app is deployed separately at
-`gate.0773h.com`; this integration does not own it. The splitter comes from the Gate quote. Payment is pinned to Base mainnet 8453
+AgentMail is disabled. The voter-facing web app is Gavel Web at
+`gavel.0773h.com/gate` (the legacy `gate.0773h.com` host is planned to redirect
+there); this
+integration does not own it, and `GAVEL_GATE_URL` is the Gate API/relay origin,
+never the web app. The splitter comes from the Gate quote. Payment is pinned to Base mainnet 8453
 and canonical native USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` before
 any token read or signature.
 
