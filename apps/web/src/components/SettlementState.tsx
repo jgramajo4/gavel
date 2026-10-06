@@ -1,6 +1,7 @@
 import type { PublicReceiptState } from '../types';
 import type { PaymentPhase } from '../wallet';
-import { formatDateTime, formatTimestamp, shortenAddress } from '../format';
+import { formatDateTime, formatTimestamp } from '../format';
+import { CopyBlock } from './CopyBlock';
 
 /**
  * The single place that turns wallet phase + public receipt state into words.
@@ -35,6 +36,14 @@ function copyFor(state: PublicReceiptState, phase: PaymentPhase): Copy {
       detail: 'Nothing was sent. Your quote is unchanged and still payable until it expires.',
     };
   }
+  if (phase === 'outcome_unknown') {
+    return {
+      tone: 'bad',
+      headline: 'Payment outcome unknown',
+      detail:
+        'Your wallet was asked to send the payment transaction but did not confirm it. It may or may not have been sent. Gate verifies settlement on chain.',
+    };
+  }
   if (phase === 'failed') {
     return {
       tone: 'bad',
@@ -62,7 +71,15 @@ function copyFor(state: PublicReceiptState, phase: PaymentPhase): Copy {
   if (phase === 'authorizing') {
     return { tone: 'progress', headline: 'Awaiting your signature', detail: 'Confirm the payment authorization in your wallet.' };
   }
-  if (phase === 'broadcasting' || phase === 'broadcast') {
+  if (phase === 'broadcasting') {
+    return {
+      tone: 'progress',
+      headline: 'Waiting for your wallet to send the transaction',
+      detail:
+        'Your wallet was asked to send the payment. Until it answers, it may or may not have been sent. Gavel has not verified settlement. This is not an acceptance.',
+    };
+  }
+  if (phase === 'broadcast') {
     return {
       tone: 'progress',
       headline: 'Transaction sent',
@@ -85,19 +102,25 @@ export interface SettlementStateProps {
 export function SettlementState({ state, phase, txHash, acceptedAt }: SettlementStateProps) {
   const copy = copyFor(state, phase);
   return (
-    <div role="status" aria-live="polite" className={`settlement settlement-${copy.tone}`}>
-      <p className="settlement-headline">{copy.headline}</p>
-      <p className="settlement-detail">{copy.detail}</p>
-      {txHash && copy.tone !== 'bad' ? (
-        <p className="settlement-tx">
-          Transaction <code>{shortenAddress(txHash)}</code>
-        </p>
+    <>
+      <div role="status" aria-live="polite" aria-label="Payment status" className={`settlement settlement-${copy.tone}`}>
+        <p className="settlement-headline">{copy.headline}</p>
+        <p className="settlement-detail">{copy.detail}</p>
+        {state === 'accepted' && acceptedAt ? (
+          <p className="settlement-tx" title={formatTimestamp(acceptedAt)}>
+            Accepted at {formatDateTime(acceptedAt)}
+          </p>
+        ) : null}
+      </div>
+      {txHash ? (
+        // Evidence of a sent transaction: shown in full and copyable in every
+        // state, including failures and cancellations, never shortened. Kept
+        // outside the live status region so its Copy feedback is not nested.
+        <section className="settlement-tx" aria-label="Transaction hash" data-testid="settlement-tx">
+          <p>Transaction hash</p>
+          <CopyBlock text={txHash} label="transaction hash" />
+        </section>
       ) : null}
-      {state === 'accepted' && acceptedAt ? (
-        <p className="settlement-tx" title={formatTimestamp(acceptedAt)}>
-          Accepted at {formatDateTime(acceptedAt)}
-        </p>
-      ) : null}
-    </div>
+    </>
   );
 }

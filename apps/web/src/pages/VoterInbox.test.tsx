@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { VoterInbox } from './VoterInbox';
+import { App } from '../App';
+import { useNavigate } from 'react-router-dom';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
 import { useSession } from '../session';
 import { ApiError } from '../http';
@@ -525,5 +527,127 @@ describe('VoterInbox session transitions', () => {
 
     expect(screen.getByTestId('session-token')).toHaveTextContent(sessionB.token);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+
+/**
+ * N4: leaving the inbox ends the authority of everything it had in flight. A
+ * late list, detail or archive response — success, 401 or 403 — may not
+ * store data, report an error, or clear the session the app now holds.
+ */
+describe('VoterInbox after it unmounts', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (cause: unknown) => void;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function Probe() {
+    const navigate = useNavigate();
+    const { session } = useSession();
+    return (
+      <>
+        <output data-testid="session-token">{session?.token ?? 'none'}</output>
+        <button type="button" onClick={() => navigate('/daos')}>
+          test-leave
+        </button>
+      </>
+    );
+  }
+
+  function renderInboxRoute(api: ReturnType<typeof stubApi>['api']) {
+    return renderApp(
+      <>
+        <App />
+        <Probe />
+      </>,
+      { gate: api, route: '/gate/inbox', session: inboxSession },
+    );
+  }
+
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  const expired = () => new ApiError('gate', 401, 'UNAUTHORIZED', 'expired', null);
+  const notEnrolled = () => new ApiError('gate', 403, 'FORBIDDEN', 'not enrolled', null);
+
+  it('a late 401 on the inbox list does not clear the session after leaving', async () => {
+    const { api } = stubApi([]);
+    const list = deferred<InboxItem[]>();
+    vi.spyOn(api, 'listInbox').mockImplementation(() => list.promise);
+    const user = userEvent.setup();
+    renderInboxRoute(api);
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-leave' }));
+    act(() => list.reject(expired()));
+    await settle();
+
+    expect(screen.getByTestId('session-token')).toHaveTextContent(inboxSession.token);
+    expect(screen.queryByText(/inbox session expired/i)).toBeNull();
+  });
+
+  it('a late 403 on an item detail does not clear the session after leaving', async () => {
+    const { api } = stubApi([]);
+    vi.spyOn(api, 'listInbox').mockResolvedValue([candidateInboxItem]);
+    const detail = deferred<InboxItem | null>();
+    vi.spyOn(api, 'getInboxItem').mockImplementation(() => detail.promise);
+    const user = userEvent.setup();
+    renderInboxRoute(api);
+    await user.click(await screen.findByRole('button', { name: /open request/i }));
+    await waitFor(() => expect(api.getInboxItem).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-leave' }));
+    act(() => detail.reject(notEnrolled()));
+    await settle();
+
+    expect(screen.getByTestId('session-token')).toHaveTextContent(inboxSession.token);
+    expect(screen.queryByText(/not enrolled as a Gate voter/i)).toBeNull();
+  });
+
+  it('a late 401 on archive does not clear the session after leaving', async () => {
+    const { api } = stubApi([]);
+    vi.spyOn(api, 'listInbox').mockResolvedValue([candidateInboxItem]);
+    vi.spyOn(api, 'getInboxItem').mockResolvedValue(candidateInboxItem);
+    const archive = deferred<{ id: string; archived: boolean }>();
+    vi.spyOn(api, 'archiveInboxItem').mockImplementation(() => archive.promise as never);
+    const user = userEvent.setup();
+    renderInboxRoute(api);
+    await user.click(await screen.findByRole('button', { name: /open request/i }));
+    await user.click(await screen.findByRole('button', { name: /archive/i }));
+    await waitFor(() => expect(api.archiveInboxItem).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-leave' }));
+    act(() => archive.reject(expired()));
+    await settle();
+
+    expect(screen.getByTestId('session-token')).toHaveTextContent(inboxSession.token);
+  });
+
+  it('late private data after leaving is neither rendered nor shown on return', async () => {
+    const { api } = stubApi([]);
+    const first = deferred<InboxItem[]>();
+    let calls = 0;
+    vi.spyOn(api, 'listInbox').mockImplementation(() => {
+      calls += 1;
+      return calls === 1 ? first.promise : Promise.resolve([]);
+    });
+    const user = userEvent.setup();
+    renderInboxRoute(api);
+    await waitFor(() => expect(api.listInbox).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'test-leave' }));
+    act(() => first.resolve([candidateInboxItem, proposalInboxItem]));
+    await settle();
+
+    expect(screen.queryByText(/proposal 812/i)).toBeNull();
+    expect(screen.queryByText(/sponsor this candidate/i)).toBeNull();
+    expect(screen.getByTestId('session-token')).toHaveTextContent(inboxSession.token);
   });
 });

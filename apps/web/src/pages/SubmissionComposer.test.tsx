@@ -5,6 +5,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { App } from '../App';
 import { SubmissionComposer } from './SubmissionComposer';
 import { renderApp, stubApi, stubWallet } from '../test/harness';
+import { useSession } from '../session';
+import { useWalletConnection } from '../wallet-connection';
+import { ApiError } from '../http';
 import {
   PAYER,
   VOTER,
@@ -749,6 +752,158 @@ describe('SubmissionComposer discards a stale quote response', () => {
   });
 
   it('a current quote still navigates to its checkout', async () => {
+    const { held } = await startHeldQuote();
+    act(() => held.resolve(quotedReceipt));
+    await waitFor(() =>
+      expect(screen.getByTestId('location')).toHaveTextContent(`/gate/checkout/${quotedReceipt.publicId}`),
+    );
+  });
+});
+
+
+/**
+ * N3: a pending quote request also belongs to the payer authority it started
+ * under — the exact base_sender session and the connected account — not only
+ * to the target voter. Replacing or clearing that authority on the same voter
+ * makes the request stale.
+ */
+describe('SubmissionComposer binds a pending quote to its payer authority', () => {
+  const PAYER_B = '0x7777777777777777777777777777777777777777';
+  const sessionB = {
+    token: 't'.repeat(43),
+    session: { ...senderSession.session, wallet: PAYER_B },
+  };
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (cause: unknown) => void;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function Probe() {
+    const location = useLocation();
+    const { session: current, setSession, clearSession } = useSession();
+    const { noteConnected } = useWalletConnection();
+    return (
+      <>
+        <output data-testid="location">{location.pathname}</output>
+        <output data-testid="session-token">{current?.token ?? 'none'}</output>
+        <button
+          type="button"
+          onClick={() => {
+            noteConnected(PAYER_B);
+            setSession(sessionB);
+          }}
+        >
+          test-sign-in-as-b
+        </button>
+        <button type="button" onClick={clearSession}>
+          test-sign-out
+        </button>
+        <button type="button" onClick={() => noteConnected(PAYER_B)}>
+          test-switch-account
+        </button>
+      </>
+    );
+  }
+
+  async function startHeldQuote() {
+    const { api } = stubApi([{ method: 'GET', match: /\/v1\/gates\/0x/, status: 200, body: acceptingProfile }]);
+    const held = deferred<typeof quotedReceipt>();
+    vi.spyOn(api, 'createSubmission').mockImplementation(() => held.promise as never);
+    const resume = vi.spyOn(api, 'resumeSubmission');
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <App />
+        <Probe />
+      </>,
+      {
+        gate: api,
+        route: `/gate/voters/${VOTER}/compose`,
+        session: senderSession,
+        walletAddress: PAYER,
+        provider: advocateWallet({ eth_accounts: () => [PAYER, PAYER_B] }),
+      },
+    );
+    await screen.findByRole('button', { name: /^request quote$/i });
+    await fillValidDraft(user);
+    await user.click(screen.getByRole('button', { name: /^request quote$/i }));
+    await waitFor(() => expect(api.createSubmission).toHaveBeenCalledTimes(1));
+    return { api, held, resume, user };
+  }
+
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  const composePath = `/gate/voters/${VOTER}/compose`;
+
+  it("session A's late quote cannot navigate after B signs in on the same voter", async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-sign-in-as-b' }));
+    act(() => held.resolve(quotedReceipt));
+    await settle();
+
+    expect(screen.getByTestId('location')).toHaveTextContent(composePath);
+    expect(screen.queryByRole('heading', { name: /checkout/i })).toBeNull();
+    expect(screen.getByTestId('session-token')).toHaveTextContent(sessionB.token);
+    // B's composer is not left busy by A's request.
+    expect(screen.getByRole('button', { name: /^request quote$/i })).toBeEnabled();
+  });
+
+  it("session A's late duplicate cannot resume A's quote for B", async () => {
+    const { held, resume, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-sign-in-as-b' }));
+    act(() =>
+      held.resolve({
+        state: 'duplicate',
+        existing: { publicId: quotedReceipt.publicId, resumeUrl: `/v1/submissions/${quotedReceipt.publicId}/resume` },
+      } as never),
+    );
+    await settle();
+
+    expect(resume).not.toHaveBeenCalled();
+    expect(screen.getByTestId('location')).toHaveTextContent(composePath);
+    expect(screen.queryByText(/already submitted this pitch/i)).toBeNull();
+  });
+
+  it("an old 401 for session A does not sign B out or show A's error", async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-sign-in-as-b' }));
+    act(() => held.reject(new ApiError('gate', 401, 'UNAUTHORIZED', 'authentication required', null)));
+    await settle();
+
+    expect(screen.getByTestId('session-token')).toHaveTextContent(sessionB.token);
+    expect(screen.queryByText(/advocate session expired/i)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("session A's late quote cannot navigate after sign-out", async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-sign-out' }));
+    act(() => held.resolve(quotedReceipt));
+    await settle();
+
+    expect(screen.getByTestId('location')).toHaveTextContent(composePath);
+    expect(screen.getByTestId('session-token')).toHaveTextContent('none');
+  });
+
+  it('a connected-account switch with the same token invalidates the pending quote', async () => {
+    const { held, user } = await startHeldQuote();
+    await user.click(screen.getByRole('button', { name: 'test-switch-account' }));
+    act(() => held.resolve(quotedReceipt));
+    await settle();
+
+    expect(screen.getByTestId('location')).toHaveTextContent(composePath);
+    expect(screen.queryByRole('heading', { name: /checkout/i })).toBeNull();
+  });
+
+  it('normal control: unchanged payer authority still navigates to checkout', async () => {
     const { held } = await startHeldQuote();
     act(() => held.resolve(quotedReceipt));
     await waitFor(() =>

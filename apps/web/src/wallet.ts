@@ -402,6 +402,12 @@ export type PaymentPhase =
   | 'authorizing'
   | 'broadcasting'
   | 'broadcast'
+  /**
+   * The wallet was asked to send the transaction, but this page cannot say
+   * whether it reached the network: the request was interrupted, failed in a
+   * way that is not a user rejection, or returned no usable hash.
+   */
+  | 'outcome_unknown'
   | 'rejected'
   | 'failed';
 
@@ -422,6 +428,7 @@ export async function payQuote(
   {
     now = Date.now,
     guard = () => {},
+    onBroadcastRequested = () => {},
   }: {
     now?: () => number;
     /**
@@ -430,6 +437,13 @@ export async function payQuote(
      * to cancel an attempt whose authority changed while it was in flight.
      */
     guard?: () => void;
+    /**
+     * Called synchronously, immediately before `eth_sendTransaction` is
+     * requested. From here on the transaction may reach the network whether or
+     * not the request ever returns a hash, so the caller can no longer say
+     * that nothing was sent.
+     */
+    onBroadcastRequested?: () => void;
   } = {},
 ): Promise<PaymentResult> {
   // Expiry and version are checked first so a refusal never reaches the wallet.
@@ -456,6 +470,7 @@ export async function payQuote(
   guard(); // immediately before the broadcast; the signature is discarded unsent
 
   onPhase('broadcasting');
+  onBroadcastRequested();
   const txHash = await provider.request({
     method: 'eth_sendTransaction',
     params: [{ from: payer, to: plan.splitter, data: encodeSettleCall(quote, authorizationSignature), value: '0x0' }],

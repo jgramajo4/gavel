@@ -58,6 +58,41 @@ class AttemptCancelled extends Error {
 const CANCELLED_MESSAGE =
   'The wallet or session changed, so this payment attempt was cancelled. Nothing was signed or sent. Sign in again to continue.';
 
+/*
+ * Once the wallet has been asked to send the transaction, nothing this page
+ * does can recall it, and "nothing was sent" is no longer a safe statement:
+ * the wallet may submit it whether or not it ever answers, and an error after
+ * the request does not prove it never reached the network. These say so.
+ */
+const BROADCAST_CANCELLED_MESSAGE =
+  'The wallet or session changed after your wallet was asked to send the payment transaction. It may still be sent; this page cannot recall it. Gavel was not notified from this page, and Gate verifies settlement on chain. Check your wallet’s activity before paying again.';
+const LATE_HASH_MESSAGE =
+  'The wallet or session changed after your wallet was asked to send the payment, so Gavel was not notified from this page. Your wallet then returned the transaction hash below; keep it. Gate verifies settlement on chain.';
+const OUTCOME_UNKNOWN_MESSAGE =
+  'Your wallet did not confirm whether the payment transaction was sent. It may or may not have reached the network. Check your wallet’s activity before paying again; Gate verifies settlement on chain, and this quote can be settled only once.';
+const DECLINED_AFTER_REQUEST_MESSAGE =
+  'Your wallet reported that you declined the transaction, so it was not sent.';
+
+/**
+ * The last transaction this page asked the wallet to send, kept as evidence.
+ * `requested`: asked, no answer yet — the outcome is unknown and may stay so.
+ * `sent`: the wallet returned this hash. `unknown`: the request ended without
+ * a hash and without a user rejection. `declined`: the wallet answered with an
+ * EIP-1193 user rejection (4001), the one answer that establishes it was not
+ * sent. Settlement itself is only ever what Gate verifies on chain.
+ */
+interface BroadcastRecord {
+  attempt: number;
+  status: 'requested' | 'sent' | 'unknown' | 'declined';
+  txHash?: string;
+}
+
+/** EIP-1193 user rejection: the wallet established that it did not send. */
+function isWalletRejectionCode(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === 4001 || code === 'ACTION_REJECTED';
+}
+
 function isUserRejection(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
   if (code === 4001 || code === 'ACTION_REJECTED') return true;
@@ -123,7 +158,14 @@ export function Checkout({
   const [id, setId] = useState<string | null>(receipt?.publicId ?? publicId ?? null);
   const [state, setState] = useState<PublicReceiptState>(receipt?.state ?? 'payment_required');
   const [phase, setPhase] = useState<PaymentPhase>('idle');
-  const [txHash, setTxHash] = useState<string | undefined>(undefined);
+  const [broadcast, setBroadcastState] = useState<BroadcastRecord | null>(null);
+  // Mirrors `broadcast` so async continuations can check which attempt owns it.
+  const broadcastRef = useRef<BroadcastRecord | null>(null);
+  const setBroadcast = useCallback((next: BroadcastRecord) => {
+    broadcastRef.current = next;
+    setBroadcastState(next);
+  }, []);
+  const txHash = broadcast?.txHash;
   const [acceptedAt, setAcceptedAt] = useState<string | undefined>(receipt?.acceptedAt);
   const [error, setError] = useState<string | null>(null);
   const [notRecoverable, setNotRecoverable] = useState(false);
@@ -151,17 +193,24 @@ export function Checkout({
    * continuation from acting after the user withdrew or changed authority.
    */
   const generation = useRef(0);
-  const inFlight = useRef<{ generation: number; sender: string } | null>(null);
+  const inFlight = useRef<{ generation: number; sender: string; broadcastRequested: boolean } | null>(null);
   const mounted = useRef(true);
   const invalidate = useCallback(() => {
     generation.current += 1;
     if (inFlight.current && mounted.current) {
+      const requested = inFlight.current.broadcastRequested;
       inFlight.current = null;
       // The stale attempt may still be awaiting a response that never comes;
       // give the user a recoverable state now rather than when it resolves.
       setBusy(false);
-      setPhase('idle');
-      setError(CANCELLED_MESSAGE);
+      if (requested) {
+        // Past the point of no return: keep the "waiting for the wallet"
+        // state and never claim nothing was sent.
+        setError(BROADCAST_CANCELLED_MESSAGE);
+      } else {
+        setPhase('idle');
+        setError(CANCELLED_MESSAGE);
+      }
     }
     inFlight.current = null;
   }, []);
@@ -341,7 +390,10 @@ export function Checkout({
     }
     const baseSender = senderSession.session.wallet;
     const attempt = generation.current;
-    inFlight.current = { generation: attempt, sender: baseSender };
+    inFlight.current = { generation: attempt, sender: baseSender, broadcastRequested: false };
+    let broadcastRequested = false;
+    /** True while the retained broadcast record still belongs to this attempt. */
+    const ownsRecord = () => broadcastRef.current?.attempt === attempt && mounted.current;
     /** Throws once this attempt's authority has changed. */
     const live = () => {
       if (generation.current !== attempt) throw new AttemptCancelled();
@@ -393,11 +445,22 @@ export function Checkout({
         (next) => {
           if (generation.current === attempt) setPhase(next);
         },
-        { now, guard: live },
+        {
+          now,
+          guard: live,
+          // Synchronous with the eth_sendTransaction request, right after the
+          // last `live()` check: from here on the outcome may be unknown.
+          onBroadcastRequested: () => {
+            broadcastRequested = true;
+            if (inFlight.current?.generation === attempt) inFlight.current.broadcastRequested = true;
+            setBroadcast({ attempt, status: 'requested' });
+          },
+        },
       );
       broadcastHash = result.txHash;
+      // The hash is evidence of a sent transaction: kept whatever happens next.
+      if (ownsRecord()) setBroadcast({ attempt, status: 'sent', txHash: result.txHash });
       live(); // a settlement hint is only recorded under unchanged authority
-      setTxHash(result.txHash);
       // 3. 202: the hash is recorded as a hint. Not payment, not acceptance.
       const hint = await api.recordSettlementHint(senderSession.token, id, result.txHash, result.chainId);
       live();
@@ -406,15 +469,50 @@ export function Checkout({
     } catch (cause: unknown) {
       if (cause instanceof AttemptCancelled || generation.current !== attempt) {
         // A stale attempt never touches the UI of whatever is current now —
-        // except to say a transaction it already broadcast exists, and only
-        // while no newer attempt is running.
-        if (broadcastHash && mounted.current && inFlight.current === null) {
-          setTxHash(broadcastHash);
+        // except to report what became of a transaction it asked the wallet
+        // to send, and only while that record is still this attempt's.
+        if (!broadcastRequested || !ownsRecord()) return;
+        if (broadcastHash) {
           setPhase('broadcast');
-          setError(
-            'The wallet or session changed after the payment was broadcast, so Gavel was not notified from this page. Gate still verifies settlement on chain. Keep the transaction hash shown below.',
-          );
+          setError(LATE_HASH_MESSAGE);
+        } else if (isWalletRejectionCode(cause)) {
+          setBroadcast({ attempt, status: 'declined' });
+          setPhase('rejected');
+          setError(DECLINED_AFTER_REQUEST_MESSAGE);
+        } else {
+          setBroadcast({ attempt, status: 'unknown' });
+          setPhase('outcome_unknown');
+          setError(OUTCOME_UNKNOWN_MESSAGE);
         }
+        return;
+      }
+      if (broadcastRequested && !broadcastHash) {
+        // The wallet was asked to send and answered without a hash. Only an
+        // EIP-1193 user rejection establishes that nothing was sent.
+        if (isWalletRejectionCode(cause)) {
+          if (ownsRecord()) setBroadcast({ attempt, status: 'declined' });
+          setPhase('rejected');
+        } else {
+          if (ownsRecord()) setBroadcast({ attempt, status: 'unknown' });
+          setPhase('outcome_unknown');
+          setError(OUTCOME_UNKNOWN_MESSAGE);
+        }
+        return;
+      }
+      if (broadcastHash) {
+        // Sent, but the hint could not be recorded from here. The transaction
+        // stands; Gate's own on-chain scan is the authority on settlement.
+        setPhase('broadcast');
+        if (cause instanceof ApiError && cause.status === 401) {
+          clearSession();
+        } else if (cause instanceof ApiError && cause.state === 'expired') {
+          setState('expired');
+        }
+        setError(
+          `Your transaction was sent (hash below), but Gavel could not be notified from this page${
+            cause instanceof ApiError ? `: ${cause.message}` : ''
+          }. Gate verifies settlement on chain; keep the transaction hash.`,
+        );
         return;
       }
       setPhase(isUserRejection(cause) ? 'rejected' : 'failed');
@@ -433,7 +531,7 @@ export function Checkout({
         setBusy(false);
       }
     }
-  }, [api, wallet, quote, id, senderSession, problem, pollStatus, now, clearSession]);
+  }, [api, wallet, quote, id, senderSession, problem, pollStatus, now, clearSession, setBroadcast]);
 
   const senderControl =
     problem === null ? null : (
@@ -486,8 +584,16 @@ export function Checkout({
   // An expired or unsupported quote offers no pay control at all: the splitter
   // would revert, so asking for a signature would only waste the user's gas.
   const quotePayable = isQuotePayable(quote, Math.floor(now() / 1000));
+  // A transaction the wallet may still send, or did send, withholds another
+  // payment for this quote. After an unknown or declined outcome a manual
+  // retry is offered: the splitter settles a quote at most once.
+  const outstanding = broadcast?.status === 'requested' || broadcast?.status === 'sent';
   const payable =
-    quotePayable && state === 'payment_required' && phase !== 'broadcast' && phase !== 'broadcasting';
+    quotePayable &&
+    state === 'payment_required' &&
+    !outstanding &&
+    phase !== 'broadcast' &&
+    phase !== 'broadcasting';
   // Only an unpaid quote goes stale. Once the server has moved the submission
   // on — pending settlement, or accepted — its state outranks the clock.
   const displayState = !quotePayable && state === 'payment_required' ? 'expired' : state;

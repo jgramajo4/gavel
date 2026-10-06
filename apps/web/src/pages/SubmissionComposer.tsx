@@ -94,19 +94,24 @@ export function SubmissionComposer({ api, wallet, provider, onQuote }: Submissio
   const [busy, setBusy] = useState(false);
 
   /*
-   * A quote request belongs to the composer, and the voter, it was started
-   * for. Unmounting or retargeting the composer bumps `generation`; a request
-   * resolving after that is stale and may not navigate (onQuote), resume, or
-   * touch this page's state. Server ownership is unchanged; this only stops a
-   * late response from steering the app to another voter's checkout.
+   * A quote request belongs to the authority it was started under: this
+   * mounted composer, the target voter, the exact base_sender session token,
+   * and the connected payer account. Changing any of them — unmount, another
+   * voter, sign-out, a different session, an account switch — bumps
+   * `generation`; a request resolving after that is stale and may not
+   * navigate (onQuote), resume, set errors or busy state, or clear the
+   * current session on its old 401. Server ownership is unchanged.
    */
   const generation = useRef(0);
+  const requestAuthority = `${wallet.toLowerCase()}|${senderSession?.token ?? ''}|${(address ?? '').toLowerCase()}`;
   useLayoutEffect(() => {
     generation.current += 1;
+    // A pending request of the previous authority no longer owns `busy`.
+    setBusy(false);
     return () => {
       generation.current += 1;
     };
-  }, [wallet]);
+  }, [requestAuthority]);
 
   useEffect(() => {
     let cancelled = false;

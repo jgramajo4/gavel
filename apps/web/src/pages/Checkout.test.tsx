@@ -234,7 +234,7 @@ describe('Checkout', () => {
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
-    const status = await screen.findByRole('status');
+    const status = await screen.findByRole('status', { name: /payment status/i });
     await waitFor(() => expect(status).toHaveTextContent(/pending/i));
     expect(status.textContent).not.toMatch(/\b(accepted|paid|delivered)\b/i);
   });
@@ -249,7 +249,7 @@ describe('Checkout', () => {
     renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} pollIntervalMs={5} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/accepted/i), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByRole('status', { name: /payment status/i })).toHaveTextContent(/accepted/i), { timeout: 3000 });
   });
 
   it('does not show accepted when the wallet rejects the transaction', async () => {
@@ -264,7 +264,7 @@ describe('Checkout', () => {
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
-    const status = await screen.findByRole('status');
+    const status = await screen.findByRole('status', { name: /payment status/i });
     await waitFor(() => expect(status).toHaveTextContent(/cancell?ed|rejected|not sent/i));
     expect(status.textContent).not.toMatch(/\b(accepted|paid|delivered)\b/i);
     expect(screen.queryByText(/pending_settlement/)).toBeNull();
@@ -285,7 +285,7 @@ describe('Checkout', () => {
     renderApp(<Checkout now={nowMs} api={api} wallet={tokenWallet()} receipt={quotedReceipt} />, { session, walletAddress: PAYER });
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
+    await waitFor(() => expect(screen.getByRole('status', { name: /payment status/i })).toHaveTextContent(/expired/i));
     expect(calls.some((call) => CREATE_SUBMISSION.test(call))).toBe(false);
   });
 
@@ -315,7 +315,7 @@ describe('Checkout quote payability', () => {
     await screen.findByTestId('total-amount');
 
     expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
-    expect(screen.getByRole('status')).toHaveTextContent(/expired/i);
+    expect(screen.getByRole('status', { name: /payment status/i })).toHaveTextContent(/expired/i);
     expect(wallet.calls).toHaveLength(0);
   });
 
@@ -344,8 +344,8 @@ describe('Checkout quote payability', () => {
       { session, walletAddress: PAYER },
     );
     await screen.findByTestId('total-amount');
-    expect(screen.getByRole('status')).toHaveTextContent(/accepted/i);
-    expect(screen.getByRole('status').textContent).not.toMatch(/expired/i);
+    expect(screen.getByRole('status', { name: /payment status/i })).toHaveTextContent(/accepted/i);
+    expect(screen.getByRole('status', { name: /payment status/i }).textContent).not.toMatch(/expired/i);
   });
 
   it('offers no pay control for an unsupported quote version', async () => {
@@ -448,7 +448,7 @@ describe('Checkout pay-time quote authority', () => {
     await screen.findByTestId('total-amount');
     await user.click(screen.getByRole('button', { name: /authorize and pay/i }));
 
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/expired/i));
+    await waitFor(() => expect(screen.getByRole('status', { name: /payment status/i })).toHaveTextContent(/expired/i));
     expect(wallet.calls.some((call) => call.method === 'eth_signTypedData_v4')).toBe(false);
     expect(wallet.calls.some((call) => call.method === 'eth_sendTransaction')).toBe(false);
   });
@@ -1022,5 +1022,235 @@ describe('Checkout cancels an in-flight payment when authority changes', () => {
     await waitFor(() => expect(calls.some((call) => call.endsWith('/settlement'))).toBe(true));
     expect(broadcast(wallet)).toBe(true);
     expect(screen.queryByText(/payment attempt was cancelled/i)).toBeNull();
+  });
+});
+
+
+/**
+ * N1/N2: once the wallet has been asked to send the transaction, the page can
+ * no longer say nothing was sent. A cancellation from then on reports an
+ * unknown outcome, a hash that arrives late is kept in full, and no stale
+ * attempt records a settlement hint.
+ */
+describe('Checkout after the broadcast was requested', () => {
+  function held<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (cause: unknown) => void;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function eventedWallet(handlers: Record<string, (params?: unknown) => unknown> = {}) {
+    const wallet = tokenWallet({ eth_accounts: () => [PAYER, VOTER], ...handlers });
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+    return Object.assign(wallet, {
+      on(event: string, listener: (...args: unknown[]) => void) {
+        const set = listeners.get(event) ?? new Set();
+        set.add(listener);
+        listeners.set(event, set);
+      },
+      removeListener(event: string, listener: (...args: unknown[]) => void) {
+        listeners.get(event)?.delete(listener);
+      },
+      emit(event: string, ...args: unknown[]) {
+        for (const listener of [...(listeners.get(event) ?? [])]) listener(...args);
+      },
+    });
+  }
+
+  function Controls() {
+    const { disconnect } = useWalletConnection();
+    const { clearSession, setSession } = useSession();
+    return (
+      <>
+        <button type="button" onClick={disconnect}>
+          test-disconnect
+        </button>
+        <button type="button" onClick={clearSession}>
+          test-clear-session
+        </button>
+        <button type="button" onClick={() => setSession(session)}>
+          test-restore-session
+        </button>
+      </>
+    );
+  }
+
+  const NOTHING_SENT = /nothing was (signed or )?sent|was not sent/i;
+  const sends = (wallet: { calls: { method: string }[] }) =>
+    wallet.calls.filter((call) => call.method === 'eth_sendTransaction').length;
+  const settlementCalls = (calls: string[]) => calls.filter((call) => call.endsWith('/settlement'));
+  const settle = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  const paymentStatus = () => screen.getByRole('status', { name: /payment status/i });
+  const pageText = () => document.body.textContent ?? '';
+
+  async function startHeldBroadcast(routes = [statusRoute(quotedReceipt), settlementRoute, resumeRoute()]) {
+    const send = held<string>();
+    const wallet = eventedWallet({ eth_sendTransaction: () => send.promise });
+    const { api, calls } = stubApi(routes);
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />
+        <Controls />
+      </>,
+      { session, walletAddress: PAYER, provider: wallet },
+    );
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(sends(wallet)).toBe(1));
+    return { send, wallet, calls, user };
+  }
+
+  it('disconnect while eth_sendTransaction is pending: never says nothing was sent, reports an unknown outcome', async () => {
+    const { wallet, calls, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    await settle();
+
+    expect(pageText()).not.toMatch(NOTHING_SENT);
+    expect(screen.getByRole('alert')).toHaveTextContent(/may still be sent/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/verifies settlement on chain/i);
+    expect(paymentStatus()).toHaveTextContent(/may or may not have been sent/i);
+    expect(paymentStatus().textContent).not.toMatch(/\b(accepted|transaction sent)\b/i);
+    expect(settlementCalls(calls)).toEqual([]);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('a hash returned after the cancellation is kept in full and copyable, with no settlement hint and no success', async () => {
+    const { send, wallet, calls, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    act(() => send.resolve(TX_HASH));
+    await settle();
+
+    // Full, unshortened, and inside a copy control.
+    expect(screen.getByLabelText('transaction hash')).toHaveTextContent(TX_HASH);
+    expect(screen.getByRole('button', { name: /copy transaction hash/i })).toBeEnabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/returned the transaction hash/i);
+    expect(pageText()).not.toMatch(NOTHING_SENT);
+    expect(paymentStatus().textContent).not.toMatch(/\baccepted\b/i);
+    expect(settlementCalls(calls)).toEqual([]);
+
+    // Still there after the session changes again.
+    await user.click(screen.getByRole('button', { name: 'test-clear-session' }));
+    await settle();
+    expect(screen.getByLabelText('transaction hash')).toHaveTextContent(TX_HASH);
+    expect(settlementCalls(calls)).toEqual([]);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('a newer attempt cannot replace the evidence of a possibly-sent transaction', async () => {
+    const { send, wallet, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-clear-session' }));
+    act(() => send.resolve(TX_HASH));
+    await settle();
+
+    // Authority comes back: the sent transaction still withholds a second payment.
+    await user.click(screen.getByRole('button', { name: 'test-restore-session' }));
+    await settle();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(screen.getByLabelText('transaction hash')).toHaveTextContent(TX_HASH);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('withholds a second payment while the broadcast request is still unanswered, even after re-authorizing', async () => {
+    const { wallet, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-clear-session' }));
+    await user.click(screen.getByRole('button', { name: 'test-restore-session' }));
+    await settle();
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+    expect(paymentStatus()).toHaveTextContent(/may or may not have been sent/i);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('a broadcast error after the cancellation reports an unknown outcome and never retries', async () => {
+    const { send, wallet, calls, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    act(() => send.reject(Object.assign(new Error('Internal JSON-RPC error.'), { code: -32603 })));
+    await settle();
+
+    expect(paymentStatus()).toHaveTextContent(/payment outcome unknown/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/may or may not have reached the network/i);
+    expect(pageText()).not.toMatch(NOTHING_SENT);
+    expect(settlementCalls(calls)).toEqual([]);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('a broadcast error under unchanged authority is an unknown outcome, not a failure that sent nothing', async () => {
+    const { send, wallet, calls } = await startHeldBroadcast();
+    act(() => send.reject(Object.assign(new Error('Internal JSON-RPC error.'), { code: -32603 })));
+    await settle();
+
+    expect(paymentStatus()).toHaveTextContent(/payment outcome unknown/i);
+    expect(pageText()).not.toMatch(NOTHING_SENT);
+    expect(paymentStatus().textContent).not.toMatch(/did not go through/i);
+    expect(settlementCalls(calls)).toEqual([]);
+    expect(sends(wallet)).toBe(1); // no automatic retry
+  });
+
+  it('an EIP-1193 user rejection of the send, after the cancellation, is reported as not sent', async () => {
+    const { send, wallet, user } = await startHeldBroadcast();
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    act(() => send.reject(Object.assign(new Error('User rejected the request.'), { code: 4001 })));
+    await settle();
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/you declined the transaction, so it was not sent/i);
+    expect(sends(wallet)).toBe(1);
+  });
+
+  it('a hash returned while Gavel cannot be notified is still shown in full', async () => {
+    const { send, calls } = await startHeldBroadcast([
+      statusRoute(quotedReceipt),
+      resumeRoute(),
+      {
+        method: 'POST',
+        match: /\/settlement$/,
+        status: 503,
+        body: { error: { code: 'UNAVAILABLE', message: 'Settlement hints are unavailable' } },
+      },
+    ]);
+    act(() => send.resolve(TX_HASH));
+    await waitFor(() => expect(settlementCalls(calls)).toHaveLength(1));
+    await settle();
+
+    expect(screen.getByLabelText('transaction hash')).toHaveTextContent(TX_HASH);
+    expect(screen.getByRole('alert')).toHaveTextContent(/your transaction was sent/i);
+    expect(pageText()).not.toMatch(NOTHING_SENT);
+    expect(screen.queryByRole('button', { name: /authorize and pay/i })).toBeNull();
+  });
+
+  it('pre-broadcast control: a cancellation before eth_sendTransaction still says nothing was signed or sent', async () => {
+    const signature = held<string>();
+    const wallet = eventedWallet({ eth_signTypedData_v4: () => signature.promise });
+    const { api, calls } = stubApi([statusRoute(quotedReceipt), settlementRoute, resumeRoute()]);
+    const user = userEvent.setup();
+    renderApp(
+      <>
+        <Checkout now={nowMs} api={api} wallet={wallet} receipt={quotedReceipt} />
+        <Controls />
+      </>,
+      { session, walletAddress: PAYER, provider: wallet },
+    );
+    await user.click(await screen.findByRole('button', { name: /authorize and pay/i }));
+    await waitFor(() => expect(wallet.calls.some((call) => call.method === 'eth_signTypedData_v4')).toBe(true));
+    await user.click(screen.getByRole('button', { name: 'test-disconnect' }));
+    act(() => signature.resolve(AUTH_SIGNATURE));
+    await settle();
+
+    expect(sends(wallet)).toBe(0);
+    expect(screen.getByRole('alert')).toHaveTextContent(/nothing was signed or sent/i);
+    expect(settlementCalls(calls)).toEqual([]);
+  });
+
+  it('normal control: unchanged authority completes and shows the full hash', async () => {
+    const { send, calls } = await startHeldBroadcast();
+    act(() => send.resolve(TX_HASH));
+    await waitFor(() => expect(settlementCalls(calls)).toHaveLength(1));
+    expect(screen.getByLabelText('transaction hash')).toHaveTextContent(TX_HASH);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

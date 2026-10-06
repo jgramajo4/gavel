@@ -242,7 +242,17 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
   const items = ownedItems && ownedItems.token === token ? ownedItems.items : null;
   const openItem = ownedOpen && ownedOpen.token === token ? ownedOpen.item : null;
   const currentToken = useRef(token);
-  const isCurrent = (requestToken: string) => currentToken.current === requestToken;
+  // Unmounting ends every pending request's authority too: once the inbox is
+  // gone, a late list, detail, archive, 401 or 403 may not store data, report
+  // an error, or clear whatever session the app holds now.
+  const mounted = useRef(true);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const isCurrent = (requestToken: string) => mounted.current && currentToken.current === requestToken;
   const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -322,12 +332,16 @@ export function VoterInbox({ api, wallet }: VoterInboxProps) {
         role: INBOX_ROLE,
         account: address,
       });
+      // Left the inbox mid-signature: a late session must not replace the
+      // one the page now on screen relies on.
+      if (!mounted.current) return;
       // Identity for the header; the `dao_inbox` token below is the grant.
       noteConnected(account);
       setOwnedItems(null);
       setOwnedOpen(null);
       setSession(verified);
     } catch (cause: unknown) {
+      if (!mounted.current) return;
       setError(
         explain(
           cause,
